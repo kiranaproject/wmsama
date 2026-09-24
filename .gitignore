@@ -1,0 +1,10 @@
+# Free Pascal Compiler (FPC) build outputs
+*.o
+*.ppu
+*.rsj
+
+# Build and IDE directories
+/target/
+/src/main/pascal/backup/
+/scratch/
+packagefiles.xml
