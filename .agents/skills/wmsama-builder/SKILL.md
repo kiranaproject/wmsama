@@ -1,7 +1,7 @@
 ---
 name: wmsama-builder
-description: Builds, tests, and verifies the Samarinda Desktop Environment (wmsama) — a modern X11 window manager, compositing manager, and desktop shell powered by Florialib and Floria Toolkit.
-version: 1.0.0
+description: Builds, tests, and verifies wmsama — a dedicated modern X11 Window Manager and Compositing Manager powered by Florialib and AggPas.
+version: 1.1.0
 triggers:
   - build wmsama
   - compile wmsama
@@ -9,23 +9,24 @@ triggers:
   - test wmsama xephyr
   - run wmsama
   - wmsama compositor
-  - samarinda de
 ---
 
-# Samarinda Desktop Environment (`wmsama`) Build & Development Skill
+# `wmsama` — Unique X11 Window Manager & Compositor
 
-Orchestrates the build pipeline, unit tests, and nested Xephyr visual verification for **wmsama** (the Samarinda Desktop Environment and Compositing Window Manager) powered by **Florialib** and **Floria Toolkit**.
+Build pipeline, test suites, and nested Xephyr execution skill for **wmsama**, the dedicated X11 Reparenting Window Manager and Compositing Manager powered by **Florialib**.
+
+> [!NOTE]
+> Desktop Shell components (docks, top panels, taskbars, application launchers, system tray) are housed in the companion project **`../shellsama`**. `wmsama` focuses purely on window management, client frame decorations, EWMH/ICCCM protocols, XComposite redirection, drop shadows, and tear-free presentation.
 
 ---
 
 ## 1. Prerequisites & Dependencies
 
 - **Free Pascal Compiler (`fpc` >= 3.2.0)**
-- **PasBuild (`pasbuild` >= 1.9.0)**: Project build orchestrator reading `project.xml`.
+- **PasBuild (`pasbuild` >= 1.9.0)**: Reads `project.xml`.
 - **X11 Libraries**: `libxcb`, `libxcb-composite`, `libxcb-damage`, `libxcb-render`, `libxcb-shape`, `libxcb-xfixes`, `libxcb-randr`, `libxcb-ewmh`, `libxcb-icccm`, `libEGL`, `libGL`.
 - **Xephyr (`/usr/bin/Xephyr`)**: Nested X server for visual WM development, debugging, and isolation.
 - **Florialib (`florialib:0.0.1-SNAPSHOT`)**: Core vector graphics (AggPas), image processing (blur, PMA, PNG), EGL acceleration, and XCB WM/Compositor subsystems.
-- **Floria Toolkit (`floria-toolkit`)**: Dotted-namespace UI widgets (`Ft.Widget.*`), theming (`Ft.Theme`), vector icons (`Ft.Icons`), and dialogs.
 
 ---
 
@@ -36,7 +37,6 @@ Orchestrates the build pipeline, unit tests, and nested Xephyr visual verificati
 | **Compile Executable** | `./build.sh` or `pasbuild compile` | Compiles `wmsama` binary to `target/wmsama` |
 | **Run Unit Tests** | `./build.sh test` or `pasbuild test` | Compiles and executes test suite `TestRunner` |
 | **Clean Artifacts** | `./build.sh clean` or `pasbuild clean` | Cleans `target/` build directory |
-| **Import libft.so** | `./copy-libft.sh` | Copies `libft.so` from `../floria-toolkit/target/` |
 
 ---
 
@@ -88,7 +88,7 @@ List.Free();
 ```
 
 ### 4.2 File & Unit Naming
-- **Unit Filenames**: Strictly lowercase, dot-separated: `wmsama.<subsystem>.<role>.pas` (e.g. `wmsama.core.wm.pas`, `wmsama.shell.panel.pas`).
+- **Unit Filenames**: Strictly lowercase, dot-separated: `wmsama.<subsystem>.<role>.pas` (e.g. `wmsama.core.wm.pas`, `wmsama.core.compositor.pas`).
 - **Unit Header Names**: PascalCase dotted namespace: `unit WMSama.Core.WM;`.
 - **Indentation**: Exactly 2 spaces, no tabs.
 - **Comments**: Use `//` line comments; avoid nested `{}` comments.
@@ -96,11 +96,11 @@ List.Free();
 
 ---
 
-## 5. Samarinda DE Architecture & Roadmap
+## 5. `wmsama` Core Architecture & Roadmap
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                      Samarinda Desktop Environment                      │
+│                    wmsama (Compositing Window Manager)                  │
 ├────────────────────────────────────┬────────────────────────────────────┤
 │         Core Window Manager        │         Compositing Manager        │
 │          (WMSama.Core.WM)          │      (WMSama.Core.Compositor)      │
@@ -108,21 +108,18 @@ List.Free();
 │  - ICCCM (Delete Window, Focus)    │  - XDamage Dirty Rect Tracking     │
 │  - EWMH (Desktops, Active, Type)   │  - Soft Gaussian Drop Shadows      │
 │  - Interactive Move / Resize       │  - Frosted Glass Backdrop Blur     │
-│  - Window Frame Decorators         │  - EGL Tear-Free Swapchain         │
+│  - Vector Titlebars & Frame Dots   │  - EGL Tear-Free Presentation      │
 ├────────────────────────────────────┴────────────────────────────────────┤
-│                       Desktop Shell Components                          │
-│  - Top / Bottom Panel (WMSama.Shell.Panel)                              │
-│  - Application Launcher / Start Menu (WMSama.Shell.Launcher)            │
-│  - Taskbar / Window Switcher (WMSama.Shell.Taskbar)                     │
-│  - System Tray & Status Indicators (WMSama.Shell.Tray)                  │
-├─────────────────────────────────────────────────────────────────────────┤
-│                   Foundational Libraries & Engines                      │
-│  - Florialib: AggPas 2D vector engine, XCB bindings, PMA, Image Blur    │
-│  - Floria Toolkit: Modern CSS theming, Amamizu Liquid Glass, SVG icons  │
+│                    Foundational Florialib Subsystems                    │
+│  - Floria.XCB.WM: Base reparenting WM, ICCCM, EWMH                      │
+│  - Floria.XCB.WM.Compositor: TXCBCompositor, TXCBCompositedWindow       │
+│  - Floria.Canvas.Agg: High-DPI vector rendering, AggPas curves          │
+│  - Floria.Image.Blur: Fast box/Gaussian blur for frosted glass & shadow │
+│  - Floria.EGL: Tear-free swapchain hardware presentation                │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Next Implementation Steps
 1. **WM + Compositor Integration**: Wire `TXCBWindowManager` and `TXCBCompositor` into a unified main loop in `wmsama.pas`.
-2. **Desktop Shell Panel (`wmsama.shell.panel.pas`)**: Build a dock window (`_NET_WM_WINDOW_TYPE_DOCK`) using Floria Toolkit widgets (app menu launcher, taskbar window buttons, clock).
-3. **Amamizu Liquid Glass Theme**: Apply frosted glass backdrop blur and semi-transparent liquid glass styling to the panel, docks, and window titlebars.
+2. **Modern Vector Titlebar Decorator**: Draw vector rounded top corners, title text, and macOS/Amamizu-style close/minimize/maximize buttons via `OnFramePaint`.
+3. **EWMH Struts & Workarea**: Respect `_NET_WM_STRUT_PARTIAL` from `shellsama` dock panels so maximized client windows do not overlap the panel.
