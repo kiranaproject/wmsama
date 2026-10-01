@@ -18,8 +18,11 @@ type
     procedure TestWMCreation();
     procedure TestDesktopConfiguration();
     procedure TestCompositorConfiguration();
+    procedure TestCornerRadiusConfiguration();
     procedure TestClientCompositorIntegration();
     procedure TestFrameMetricsAndTitlebar();
+    procedure TestWindowSnappingAndPreviews();
+    procedure TestAltTabSwitcher();
   end;
 
 implementation
@@ -33,6 +36,8 @@ begin
     AssertNotNull('WM instance created', wm);
     AssertEquals('WM name is wmsama', 'wmsama', wm.WMName);
     AssertEquals('Default titlebar height', 28, wm.TitlebarHeight);
+    AssertEquals('Default top corner radius', 12, wm.CornerRadius);
+    AssertEquals('Default bottom corner radius', 12, wm.BottomCornerRadius);
     AssertTrue('Compositor enabled by default', wm.CompositorEnabled);
     AssertNotNull('Compositor instance created', wm.Compositor);
     AssertFalse('Offline by default', wm.IsRunning);
@@ -101,6 +106,22 @@ begin
   end;
 end;
 
+procedure TWMSamaTest.TestCornerRadiusConfiguration();
+var
+  wm: TWMSamaCompositingWM;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.CornerRadius := 14;
+    AssertEquals('Top corner radius updated', 14, wm.CornerRadius);
+
+    wm.BottomCornerRadius := 16;
+    AssertEquals('Bottom corner radius updated', 16, wm.BottomCornerRadius);
+  finally
+    wm.Free();
+  end;
+end;
+
 procedure TWMSamaTest.TestClientCompositorIntegration();
 var
   wm: TWMSamaCompositingWM;
@@ -112,6 +133,8 @@ begin
   try
     wm.BlurEnabled := True;
     wm.BlurRadius := 18;
+    wm.CornerRadius := 12;
+    wm.BottomCornerRadius := 12;
 
     // Simulate managing a client window (ID: 3001)
     cli := wm.ManageWindow(3001);
@@ -127,6 +150,8 @@ begin
     AssertNotNull('Compositor registered window', compWin);
     AssertEquals('Blur radius synced', 18, compWin.BlurRadius);
     AssertTrue('Backdrop blur enabled', compWin.HasBackdropBlur);
+    AssertEquals('Top corner radius applied', 12, compWin.CornerRadius);
+    AssertEquals('Bottom corner radius applied', 12, compWin.BottomCornerRadius);
 
     // Simulate client image buffer
     clientImg := TFloriaImage.Create(600, 400);
@@ -163,13 +188,86 @@ begin
   try
     metrics := wm.FrameMetrics;
     AssertEquals('FrameMetrics titlebar height', 28, metrics.TitlebarHeight);
-    AssertEquals('FrameMetrics top inset matches titlebar + border', 29, metrics.Insets.Top);
+    AssertEquals('FrameMetrics top inset matches titlebar + border', 32, metrics.Insets.Top);
 
     // Update titlebar height
     wm.TitlebarHeight := 32;
     AssertEquals('Updated titlebar height', 32, wm.TitlebarHeight);
     metrics := wm.FrameMetrics;
     AssertEquals('FrameMetrics titlebar height updated', 32, metrics.TitlebarHeight);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowSnappingAndPreviews();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(4001);
+    cli.SetGeometry(100, 100, 800, 600);
+
+    // 1. Test Snapping to Top (Maximize)
+    wm.BeginDrag(cli, dmMove, 500, 200);
+    wm.UpdateDrag(500, 5); // Drag to top threshold
+    AssertEquals('Snap mode is maximize', Ord(snapMaximize), Ord(wm.ActiveSnap));
+    AssertTrue('Snap preview has full width', wm.SnapPreviewRect.Width > 0);
+    AssertEquals('Snap preview width matches screen', wm.Compositor.ScreenWidth, wm.SnapPreviewRect.Width);
+    wm.EndDrag();
+    AssertEquals('Active snap reset after release', Ord(snapNone), Ord(wm.ActiveSnap));
+    AssertTrue('Client maximized', wsMaximizedHorz in cli.State);
+
+    // 2. Test Snapping to Left (Half Screen)
+    wm.BeginDrag(cli, dmMove, 500, 200);
+    wm.UpdateDrag(5, 400); // Drag to left threshold
+    AssertEquals('Snap mode is left half', Ord(snapLeftHalf), Ord(wm.ActiveSnap));
+    AssertEquals('Snap preview is half screen width', wm.Compositor.ScreenWidth div 2, wm.SnapPreviewRect.Width);
+    wm.EndDrag();
+    AssertEquals('Client snapped to left half', wm.Compositor.ScreenWidth div 2, cli.CurrentRect.Width);
+    AssertEquals('Client X is 0', 0, cli.CurrentRect.X);
+
+    // 3. Test Snapping to Right (Half Screen)
+    wm.BeginDrag(cli, dmMove, 500, 200);
+    wm.UpdateDrag(wm.Compositor.ScreenWidth - 5, 400); // Drag to right threshold
+    AssertEquals('Snap mode is right half', Ord(snapRightHalf), Ord(wm.ActiveSnap));
+    wm.EndDrag();
+    AssertEquals('Client snapped to right half', wm.Compositor.ScreenWidth - (wm.Compositor.ScreenWidth div 2), cli.CurrentRect.Width);
+    AssertEquals('Client X is right half start', wm.Compositor.ScreenWidth div 2, cli.CurrentRect.X);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestAltTabSwitcher();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli1 := wm.ManageWindow(5001);
+    cli1.Title := 'Editor';
+    cli2 := wm.ManageWindow(5002);
+    cli2.Title := 'Browser';
+
+    AssertFalse('Alt-Tab inactive initially', wm.AltTabActive);
+
+    // Trigger forward
+    wm.TriggerAltTabForward();
+    AssertTrue('Alt-Tab activated', wm.AltTabActive);
+    AssertEquals('Alt-Tab index is 1', 1, wm.AltTabIndex);
+
+    // Trigger forward again (cycles)
+    wm.TriggerAltTabForward();
+    AssertEquals('Alt-Tab cycled to index 0', 0, wm.AltTabIndex);
+
+    // Dismiss activates selected client
+    wm.TriggerAltTabDismiss();
+    AssertFalse('Alt-Tab dismissed', wm.AltTabActive);
+    AssertSame('Selected client is active', cli1, wm.ActiveClient);
   finally
     wm.Free();
   end;

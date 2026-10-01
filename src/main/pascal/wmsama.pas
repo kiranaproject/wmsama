@@ -23,10 +23,12 @@ var
   CompositorEnabled : Boolean;
   BlurEnabled       : Boolean;
   BlurRadius        : Integer;
-  ShadowRadius      : Integer;
-  ShadowOpacity     : Single;
-  I                 : Integer;
-  Arg               : AnsiString;
+  ShadowRadius        : Integer;
+  ShadowOpacity       : Single;
+  CornerRadius        : Integer;
+  BottomCornerRadius  : Integer;
+  I                   : Integer;
+  Arg                 : AnsiString;
 
 procedure PrintUsage();
 begin
@@ -41,6 +43,8 @@ begin
   WriteLn('  --blur-radius <int>    Backdrop blur radius (default: 15)');
   WriteLn('  --shadow-radius <int>  Drop shadow radius (default: 14)');
   WriteLn('  --shadow-opacity <flt> Drop shadow opacity (default: 0.35)');
+  WriteLn('  --corner-radius <int>  Window top corner radius (default: 12)');
+  WriteLn('  --bottom-radius <int>  Window bottom corner radius (default: 12)');
 end;
 
 procedure SigHandler(Sig: LongInt); cdecl;
@@ -62,6 +66,8 @@ begin
   BlurRadius := 15;
   ShadowRadius := 14;
   ShadowOpacity := 0.35;
+  CornerRadius := 12;
+  BottomCornerRadius := 12;
 
   I := 1;
   while I <= ParamCount do
@@ -95,6 +101,16 @@ begin
     begin
       Inc(I);
       ShadowOpacity := StrToFloatDef(ParamStr(I), 0.35);
+    end
+    else if (Arg = '--corner-radius') and (I < ParamCount) then
+    begin
+      Inc(I);
+      CornerRadius := StrToIntDef(ParamStr(I), 12);
+    end
+    else if (Arg = '--bottom-radius') and (I < ParamCount) then
+    begin
+      Inc(I);
+      BottomCornerRadius := StrToIntDef(ParamStr(I), 12);
     end
     else if (Arg = '--display') and (I < ParamCount) then
     begin
@@ -133,12 +149,15 @@ begin
       WM.BlurRadius := BlurRadius;
       WM.ShadowRadius := ShadowRadius;
       WM.ShadowOpacity := ShadowOpacity;
+      WM.CornerRadius := CornerRadius;
+      WM.BottomCornerRadius := BottomCornerRadius;
 
       WriteLn('Virtual Desktops: ', WM.DesktopCount);
       WriteLn('Active Desktop:   ', WM.CurrentDesktop);
       WriteLn('Compositor:       ', CompositorEnabled);
       if CompositorEnabled then
       begin
+        WriteLn('  Corner Radii:   Top: ', CornerRadius, 'px, Bottom: ', BottomCornerRadius, 'px');
         WriteLn('  Backdrop Blur:  ', BlurEnabled, ' (Radius: ', BlurRadius, 'px)');
         WriteLn('  Drop Shadows:   Enabled (Radius: ', ShadowRadius, 'px, Opacity: ', Format('%.2f', [ShadowOpacity]), ')');
       end;
