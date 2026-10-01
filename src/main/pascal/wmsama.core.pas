@@ -155,7 +155,7 @@ begin
 
   WMName := 'wmsama';
   FTitlebarHeight := 28;
-  metrics := TXCBFrameMetrics.Create(FTitlebarHeight, 4);
+  metrics := TXCBFrameMetrics.Create(FTitlebarHeight, 0);
   FrameMetrics := metrics;
 
   FCornerRadius := 12;
@@ -1056,79 +1056,102 @@ begin
     begin
       btnEv := Pxcb_button_press_event_t(AEvent);
       cli := FindClient(btnEv^.event);
-      if (cli <> nil) and (btnEv^.event = cli.FrameWindow) then
+      if cli <> nil then
       begin
-        localX := btnEv^.event_x;
-        localY := btnEv^.event_y;
-        th := FTitlebarHeight;
-        bw := FrameMetrics.BorderWidth;
-
-        cli.Activate();
-        if Connection <> nil then
-          xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
-
-        // A. Handle click on control dots
-        if (localY >= 3) and (localY <= th - 3) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+        // 1. Direct clicks on client application window (pass-through / click-to-focus)
+        if btnEv^.event = cli.ClientWindow then
         begin
-          // Close button: X in [6..22]
-          if (localX >= 6) and (localX <= 22) then
+          cli.Activate();
+          if Connection <> nil then
           begin
-            FPressedButton := 0;
-            PaintClientFrame(cli);
-            cli.Close();
-            Exit(True);
+            xcb_allow_events(Connection, XCB_ALLOW_REPLAY_POINTER, btnEv^.time);
+            xcb_flush(Connection);
           end;
-
-          // Minimize button: X in [25..41]
-          if (localX >= 25) and (localX <= 41) then
-          begin
-            FPressedButton := 1;
-            PaintClientFrame(cli);
-            cli.Minimize();
-            Exit(True);
-          end;
-
-          // Maximize button: X in [44..60]
-          if (localX >= 44) and (localX <= 60) then
-          begin
-            FPressedButton := 2;
-            PaintClientFrame(cli);
-            if wsMaximizedHorz in cli.State then
-              cli.Restore()
-            else
-              cli.Maximize();
-            Exit(True);
-          end;
-        end;
-
-        // B. Handle Double-Click on titlebar to Maximize / Restore
-        if (localY >= 0) and (localY < th) and (localX >= 60) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
-        begin
-          if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
-          begin
-            if wsMaximizedHorz in cli.State then
-              cli.Restore()
-            else
-              cli.Maximize();
-            FLastClickTime := 0;
-            Exit(True);
-          end
-          else
-          begin
-            FLastClickTime := btnEv^.time;
-            FLastClickWindow := btnEv^.event;
-          end;
-
-          // Otherwise begin window moving
-          BeginDrag(cli, dmMove, btnEv^.root_x, btnEv^.root_y);
           Exit(True);
         end;
 
-        // C. Handle Edge and Bottom Border Resizing
-        if (localY >= th) or (localX < bw) or (localX >= cli.CurrentRect.Width - bw) or (localY >= cli.CurrentRect.Height - bw) then
+        // 2. Clicks on frame window decorations
+        if btnEv^.event = cli.FrameWindow then
         begin
-          BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
-          Exit(True);
+          localX := btnEv^.event_x;
+          localY := btnEv^.event_y;
+          th := FTitlebarHeight;
+          bw := FrameMetrics.BorderWidth;
+
+          cli.Activate();
+          if Connection <> nil then
+            xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
+
+          // A. Handle click on control dots
+          if (localY >= 3) and (localY <= th - 3) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+          begin
+            // Close button: X in [6..22]
+            if (localX >= 6) and (localX <= 22) then
+            begin
+              FPressedButton := 0;
+              PaintClientFrame(cli);
+              cli.Close();
+              Exit(True);
+            end;
+
+            // Minimize button: X in [25..41]
+            if (localX >= 25) and (localX <= 41) then
+            begin
+              FPressedButton := 1;
+              PaintClientFrame(cli);
+              cli.Minimize();
+              Exit(True);
+            end;
+
+            // Maximize button: X in [44..60]
+            if (localX >= 44) and (localX <= 60) then
+            begin
+              FPressedButton := 2;
+              PaintClientFrame(cli);
+              if wsMaximizedHorz in cli.State then
+                cli.Restore()
+              else
+                cli.Maximize();
+              Exit(True);
+            end;
+          end;
+
+          // B. Right-click on titlebar to resize window
+          if (localY >= 0) and (localY < th) and (btnEv^.detail = XCB_BUTTON_INDEX_3) then
+          begin
+            BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
+            Exit(True);
+          end;
+
+          // C. Handle Double-Click on titlebar to Maximize / Restore
+          if (localY >= 0) and (localY < th) and (localX >= 60) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+          begin
+            if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
+            begin
+              if wsMaximizedHorz in cli.State then
+                cli.Restore()
+              else
+                cli.Maximize();
+              FLastClickTime := 0;
+              Exit(True);
+            end
+            else
+            begin
+              FLastClickTime := btnEv^.time;
+              FLastClickWindow := btnEv^.event;
+            end;
+
+            // Otherwise begin window moving
+            BeginDrag(cli, dmMove, btnEv^.root_x, btnEv^.root_y);
+            Exit(True);
+          end;
+
+          // D. Handle Border Resizing when border width > 0
+          if (bw > 0) and ((localY >= th) or (localX < bw) or (localX >= cli.CurrentRect.Width - bw) or (localY >= cli.CurrentRect.Height - bw)) then
+          begin
+            BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
+            Exit(True);
+          end;
         end;
       end;
     end;

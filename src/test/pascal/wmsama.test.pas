@@ -191,13 +191,17 @@ begin
   try
     metrics := wm.FrameMetrics;
     AssertEquals('FrameMetrics titlebar height', 28, metrics.TitlebarHeight);
-    AssertEquals('FrameMetrics top inset matches titlebar + border', 32, metrics.Insets.Top);
+    AssertEquals('FrameMetrics top inset matches titlebar', 28, metrics.Insets.Top);
+    AssertEquals('FrameMetrics left inset is 0', 0, metrics.Insets.Left);
+    AssertEquals('FrameMetrics right inset is 0', 0, metrics.Insets.Right);
+    AssertEquals('FrameMetrics bottom inset is 0', 0, metrics.Insets.Bottom);
 
     // Update titlebar height
     wm.TitlebarHeight := 32;
     AssertEquals('Updated titlebar height', 32, wm.TitlebarHeight);
     metrics := wm.FrameMetrics;
     AssertEquals('FrameMetrics titlebar height updated', 32, metrics.TitlebarHeight);
+    AssertEquals('FrameMetrics top inset updated', 32, metrics.Insets.Top);
   finally
     wm.Free();
   end;
