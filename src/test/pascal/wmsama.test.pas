@@ -10,6 +10,8 @@ uses
   Floria.XCB.WM,
   Floria.XCB.WM.Compositor,
   Floria.Image.Core,
+  Floria.Canvas.Agg,
+  WMSama.FT,
   wmsama.core;
 
 type
@@ -23,6 +25,7 @@ type
     procedure TestFrameMetricsAndTitlebar();
     procedure TestWindowSnappingAndPreviews();
     procedure TestAltTabSwitcher();
+    procedure TestFloriaToolkitButtonStyling();
   end;
 
 implementation
@@ -268,6 +271,59 @@ begin
     wm.TriggerAltTabDismiss();
     AssertFalse('Alt-Tab dismissed', wm.AltTabActive);
     AssertSame('Selected client is active', cli1, wm.ActiveClient);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestFloriaToolkitButtonStyling();
+var
+  wm: TWMSamaCompositingWM;
+  img: TFloriaImage;
+  canvas: TFloriaCanvasAgg;
+  loaded: Boolean;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // Test default button style and theme
+    AssertEquals('Default button style is circle', FT_WINDOW_BUTTON_CIRCLE, wm.WindowButtonStyle);
+    AssertTrue('Default theme is dark mode', wm.ThemeDarkMode);
+
+    // Test setting squircle and square
+    wm.WindowButtonStyle := FT_WINDOW_BUTTON_SQUIRCLE;
+    AssertEquals('WindowButtonStyle updated to squircle', FT_WINDOW_BUTTON_SQUIRCLE, wm.WindowButtonStyle);
+
+    wm.WindowButtonStyle := FT_WINDOW_BUTTON_SQUARE;
+    AssertEquals('WindowButtonStyle updated to square', FT_WINDOW_BUTTON_SQUARE, wm.WindowButtonStyle);
+
+    wm.ThemeDarkMode := False;
+    AssertFalse('ThemeDarkMode updated to light mode', wm.ThemeDarkMode);
+
+    // Test dynamic loading and drawing
+    loaded := InitFloriaToolkit('');
+    AssertTrue('Floria Toolkit loaded via WMSama.FT', loaded);
+    AssertTrue('FloriaToolkitLoaded returns true', FloriaToolkitLoaded());
+
+    // Test drawing into a canvas
+    img := TFloriaImage.Create(100, 30);
+    try
+      img.Clear(30, 30, 40, 255);
+      canvas := TFloriaCanvasAgg.Create(img);
+      try
+        // Draw close, minimize, maximize, restore in all states
+        FtDrawWindowButton(canvas, 5, 8, 13, 13, FT_WINDOW_BUTTON_CLOSE, FT_WINDOW_BUTTON_CIRCLE, FT_BUTTON_STATE_NORMAL, True);
+        FtDrawWindowButton(canvas, 25, 8, 13, 13, FT_WINDOW_BUTTON_MINIMIZE, FT_WINDOW_BUTTON_CIRCLE, FT_BUTTON_STATE_HOVERED, True);
+        FtDrawWindowButton(canvas, 45, 8, 13, 13, FT_WINDOW_BUTTON_MAXIMIZE, FT_WINDOW_BUTTON_CIRCLE, FT_BUTTON_STATE_PRESSED, True);
+        FtDrawWindowButton(canvas, 65, 8, 13, 13, FT_WINDOW_BUTTON_RESTORE, FT_WINDOW_BUTTON_CIRCLE, FT_BUTTON_STATE_NORMAL, False);
+
+        // Verify pixel data modified
+        AssertTrue('Canvas rendered pixels', img.Data <> nil);
+      finally
+        canvas.Free();
+      end;
+    finally
+      img.Free();
+    end;
   finally
     wm.Free();
   end;

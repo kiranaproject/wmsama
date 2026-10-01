@@ -5,6 +5,9 @@
 
 # Build and IDE directories
 /target/
+/src/target/
 /src/main/pascal/backup/
 /scratch/
+*.lpi
+*.lps
 packagefiles.xml

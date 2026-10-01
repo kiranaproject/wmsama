@@ -20,7 +20,8 @@ uses
   Floria.XCB.WM.Compositor,
   Floria.XCB.Damage,
   Floria.Image.Core,
-  Floria.Canvas.Agg;
+  Floria.Canvas.Agg,
+  WMSama.FT;
 
 type
   TWMSnapTarget = (
@@ -48,6 +49,13 @@ type
     FCornerRadius       : Integer;
     FBottomCornerRadius : Integer;
 
+    // Window Button Theming and Hover States
+    FWindowButtonStyle  : Integer;
+    FThemeDarkMode      : Boolean;
+    FHoveredWindow      : xcb_window_t;
+    FHoveredButton      : Integer;
+    FPressedButton      : Integer;
+
     // Double-click detection
     FLastClickTime      : Cardinal;
     FLastClickWindow    : xcb_window_t;
@@ -74,6 +82,8 @@ type
     procedure SetTitlebarHeight(const AValue: Integer);
     procedure SetCornerRadius(const AValue: Integer);
     procedure SetBottomCornerRadius(const AValue: Integer);
+    procedure SetWindowButtonStyle(const AValue: Integer);
+    procedure SetThemeDarkMode(const AValue: Boolean);
 
     procedure DoOnCompositorAfterRender(ASender: TObject; ACanvas: TFloriaCanvasAgg; const ASceneRect: TXCBRect);
   protected
@@ -125,6 +135,8 @@ type
     property TitlebarHeight     : Integer        read FTitlebarHeight      write SetTitlebarHeight;
     property CornerRadius       : Integer        read FCornerRadius        write SetCornerRadius;
     property BottomCornerRadius : Integer        read FBottomCornerRadius  write SetBottomCornerRadius;
+    property WindowButtonStyle  : Integer        read FWindowButtonStyle   write SetWindowButtonStyle;
+    property ThemeDarkMode      : Boolean        read FThemeDarkMode       write SetThemeDarkMode;
     property ActiveSnap         : TWMSnapTarget  read FActiveSnap;
     property SnapPreviewRect    : TXCBRect       read FSnapPreviewRect;
     property AltTabActive       : Boolean        read FAltTabActive;
@@ -148,6 +160,12 @@ begin
 
   FCornerRadius := 12;
   FBottomCornerRadius := 12;
+
+  FWindowButtonStyle := FT_WINDOW_BUTTON_CIRCLE;
+  FThemeDarkMode := True;
+  FHoveredWindow := 0;
+  FHoveredButton := -1;
+  FPressedButton := -1;
 
   FCompositorEnabled := True;
   FNeedsComposite := False;
@@ -408,6 +426,22 @@ begin
   end;
 end;
 
+procedure TWMSamaCompositingWM.SetWindowButtonStyle(const AValue: Integer);
+begin
+  if FWindowButtonStyle = AValue then Exit;
+  FWindowButtonStyle := AValue;
+  PaintAllFrames();
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.SetThemeDarkMode(const AValue: Boolean);
+begin
+  if FThemeDarkMode = AValue then Exit;
+  FThemeDarkMode := AValue;
+  PaintAllFrames();
+  RequestComposite();
+end;
+
 procedure TWMSamaCompositingWM.DoOnClientMapped(const AClient: TXCBWMClient);
 var
   targetWin, frameWin: xcb_window_t;
@@ -564,7 +598,7 @@ end;
 procedure TWMSamaCompositingWM.PaintClientFrame(const AClient: TXCBWMClient);
 var
   w, h, th, bw: Integer;
-  isActive: Boolean;
+  isActive, isHoveredWin: Boolean;
   frameImg: TFloriaImage;
   canvas: TFloriaCanvasAgg;
   winTitle: AnsiString;
@@ -573,6 +607,8 @@ var
   mask: Cardinal;
   values: array[0..0] of Cardinal;
   compWin: TXCBCompositedWindow;
+  s0, s1, s2, maxKind: Integer;
+  btnSize, btnY: Double;
 begin
   if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) then Exit;
 
@@ -606,23 +642,37 @@ begin
         canvas.DrawLine(0, th - 1, w, th - 1, 1.0, 18 / 255, 19 / 255, 24 / 255, 1.0);
       end;
 
-      // 2. Control dots (macOS / Samarinda modern aesthetic)
-      if isActive then
-      begin
-        // Close: Coral Red (#FF5F56)
-        canvas.DrawCircle(14, th / 2, 5.5, 255 / 255, 95 / 255, 86 / 255, 1.0);
-        // Minimize: Warm Amber (#FFBD2E)
-        canvas.DrawCircle(32, th / 2, 5.5, 255 / 255, 189 / 255, 46 / 255, 1.0);
-        // Maximize: Mint Emerald (#27C93F)
-        canvas.DrawCircle(50, th / 2, 5.5, 39 / 255, 201 / 255, 63 / 255, 1.0);
-      end
+      // 2. Vector Window Buttons via Floria Toolkit (libft.so)
+      isHoveredWin := (FHoveredWindow <> 0) and (FHoveredWindow = AClient.FrameWindow);
+      if isHoveredWin and (FPressedButton = 0) then s0 := FT_BUTTON_STATE_PRESSED
+      else if isHoveredWin and (FHoveredButton = 0) then s0 := FT_BUTTON_STATE_HOVERED
+      else s0 := FT_BUTTON_STATE_NORMAL;
+
+      if isHoveredWin and (FPressedButton = 1) then s1 := FT_BUTTON_STATE_PRESSED
+      else if isHoveredWin and (FHoveredButton = 1) then s1 := FT_BUTTON_STATE_HOVERED
+      else s1 := FT_BUTTON_STATE_NORMAL;
+
+      if isHoveredWin and (FPressedButton = 2) then s2 := FT_BUTTON_STATE_PRESSED
+      else if isHoveredWin and (FHoveredButton = 2) then s2 := FT_BUTTON_STATE_HOVERED
+      else s2 := FT_BUTTON_STATE_NORMAL;
+
+      if wsMaximizedHorz in AClient.State then
+        maxKind := FT_WINDOW_BUTTON_RESTORE
       else
-      begin
-        // Muted dots when inactive (#45475A)
-        canvas.DrawCircle(14, th / 2, 5.5, 69 / 255, 71 / 255, 90 / 255, 1.0);
-        canvas.DrawCircle(32, th / 2, 5.5, 69 / 255, 71 / 255, 90 / 255, 1.0);
-        canvas.DrawCircle(50, th / 2, 5.5, 69 / 255, 71 / 255, 90 / 255, 1.0);
-      end;
+        maxKind := FT_WINDOW_BUTTON_MAXIMIZE;
+
+      btnSize := 13.0;
+      btnY := (th - btnSize) * 0.5;
+
+      FtDrawWindowButton(canvas, 8.0, btnY, btnSize, btnSize,
+                         FT_WINDOW_BUTTON_CLOSE, FWindowButtonStyle, s0,
+                         FThemeDarkMode);
+      FtDrawWindowButton(canvas, 27.0, btnY, btnSize, btnSize,
+                         FT_WINDOW_BUTTON_MINIMIZE, FWindowButtonStyle, s1,
+                         FThemeDarkMode);
+      FtDrawWindowButton(canvas, 46.0, btnY, btnSize, btnSize,
+                         maxKind, FWindowButtonStyle, s2,
+                         FThemeDarkMode);
 
       // 3. Window title text
       winTitle := AClient.Title;
@@ -869,8 +919,11 @@ var
   evType: Byte;
   btnEv: Pxcb_button_press_event_t;
   keyEv: Pxcb_key_press_event_t;
-  cli: TXCBWMClient;
-  localX, localY, bw, th: Integer;
+  motionEv: Pxcb_motion_notify_event_t;
+  leaveEv: Pxcb_leave_notify_event_t;
+  cli, oldCli: TXCBWMClient;
+  localX, localY, bw, th, newBtn: Integer;
+  oldWin: xcb_window_t;
 begin
   Result := False;
   if AEvent = nil then Exit;
@@ -929,6 +982,76 @@ begin
       end;
     end;
 
+    XCB_MOTION_NOTIFY:
+    begin
+      motionEv := Pxcb_motion_notify_event_t(AEvent);
+      if DragMode = dmNone then
+      begin
+        cli := FindClient(motionEv^.event);
+        if (cli <> nil) and (motionEv^.event = cli.FrameWindow) then
+        begin
+          localX := motionEv^.event_x;
+          localY := motionEv^.event_y;
+          th := FTitlebarHeight;
+          newBtn := -1;
+          if (localY >= 3) and (localY <= th - 3) then
+          begin
+            if (localX >= 6) and (localX <= 22) then newBtn := 0
+            else if (localX >= 25) and (localX <= 41) then newBtn := 1
+            else if (localX >= 44) and (localX <= 60) then newBtn := 2;
+          end;
+
+          if (newBtn <> FHoveredButton) or (cli.FrameWindow <> FHoveredWindow) then
+          begin
+            FHoveredButton := newBtn;
+            FHoveredWindow := cli.FrameWindow;
+            PaintClientFrame(cli);
+            RequestComposite();
+          end;
+        end
+        else if FHoveredWindow <> 0 then
+        begin
+          oldWin := FHoveredWindow;
+          FHoveredWindow := 0;
+          FHoveredButton := -1;
+          oldCli := FindClient(oldWin);
+          if oldCli <> nil then
+            PaintClientFrame(oldCli);
+          RequestComposite();
+        end;
+      end;
+    end;
+
+    XCB_LEAVE_NOTIFY:
+    begin
+      leaveEv := Pxcb_leave_notify_event_t(AEvent);
+      if (FHoveredWindow <> 0) and (leaveEv^.event = FHoveredWindow) then
+      begin
+        oldWin := FHoveredWindow;
+        FHoveredWindow := 0;
+        FHoveredButton := -1;
+        oldCli := FindClient(oldWin);
+        if oldCli <> nil then
+          PaintClientFrame(oldCli);
+        RequestComposite();
+      end;
+    end;
+
+    XCB_BUTTON_RELEASE:
+    begin
+      if FPressedButton <> -1 then
+      begin
+        FPressedButton := -1;
+        if FHoveredWindow <> 0 then
+        begin
+          oldCli := FindClient(FHoveredWindow);
+          if oldCli <> nil then
+            PaintClientFrame(oldCli);
+          RequestComposite();
+        end;
+      end;
+    end;
+
     XCB_BUTTON_PRESS:
     begin
       btnEv := Pxcb_button_press_event_t(AEvent);
@@ -945,25 +1068,31 @@ begin
           xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
 
         // A. Handle click on control dots
-        if (localY >= 4) and (localY <= th - 4) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+        if (localY >= 3) and (localY <= th - 3) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
         begin
-          // Close button: X in [7..21]
-          if (localX >= 7) and (localX <= 21) then
+          // Close button: X in [6..22]
+          if (localX >= 6) and (localX <= 22) then
           begin
+            FPressedButton := 0;
+            PaintClientFrame(cli);
             cli.Close();
             Exit(True);
           end;
 
-          // Minimize button: X in [25..39]
-          if (localX >= 25) and (localX <= 39) then
+          // Minimize button: X in [25..41]
+          if (localX >= 25) and (localX <= 41) then
           begin
+            FPressedButton := 1;
+            PaintClientFrame(cli);
             cli.Minimize();
             Exit(True);
           end;
 
-          // Maximize button: X in [43..57]
-          if (localX >= 43) and (localX <= 57) then
+          // Maximize button: X in [44..60]
+          if (localX >= 44) and (localX <= 60) then
           begin
+            FPressedButton := 2;
+            PaintClientFrame(cli);
             if wsMaximizedHorz in cli.State then
               cli.Restore()
             else

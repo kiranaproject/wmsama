@@ -12,23 +12,28 @@ uses
   Floria.XCB,
   Floria.XCB.WM,
   Floria.XCB.WM.Compositor,
+  WMSama.FT,
   wmsama.core;
 
 var
-  WM                : TWMSamaCompositingWM;
-  Conn              : Pxcb_connection_t;
-  ScreenNum         : Integer;
-  DisplayStr        : AnsiString;
-  PDisplay          : PAnsiChar;
-  CompositorEnabled : Boolean;
-  BlurEnabled       : Boolean;
-  BlurRadius        : Integer;
-  ShadowRadius        : Integer;
-  ShadowOpacity       : Single;
-  CornerRadius        : Integer;
-  BottomCornerRadius  : Integer;
-  I                   : Integer;
-  Arg                 : AnsiString;
+  WM                 : TWMSamaCompositingWM;
+  Conn               : Pxcb_connection_t;
+  ScreenNum          : Integer;
+  DisplayStr         : AnsiString;
+  PDisplay           : PAnsiChar;
+  CompositorEnabled  : Boolean;
+  BlurEnabled        : Boolean;
+  BlurRadius         : Integer;
+  ShadowRadius       : Integer;
+  ShadowOpacity      : Single;
+  CornerRadius       : Integer;
+  BottomCornerRadius : Integer;
+  ButtonStyle        : Integer;
+  ButtonStyleStr     : AnsiString;
+  ThemeDark          : Boolean;
+  LibFtPath          : AnsiString;
+  I                  : Integer;
+  Arg                : AnsiString;
 
 procedure PrintUsage();
 begin
@@ -45,6 +50,9 @@ begin
   WriteLn('  --shadow-opacity <flt> Drop shadow opacity (default: 0.35)');
   WriteLn('  --corner-radius <int>  Window top corner radius (default: 12)');
   WriteLn('  --bottom-radius <int>  Window bottom corner radius (default: 12)');
+  WriteLn('  --button-style <style> Window button style: circle, squircle, square (default: circle)');
+  WriteLn('  --theme <theme>        Window theme: dark, light (default: dark)');
+  WriteLn('  --libft <path>         Path to libft.so shared library');
 end;
 
 procedure SigHandler(Sig: LongInt); cdecl;
@@ -68,6 +76,10 @@ begin
   ShadowOpacity := 0.35;
   CornerRadius := 12;
   BottomCornerRadius := 12;
+  ButtonStyle := FT_WINDOW_BUTTON_CIRCLE;
+  ButtonStyleStr := 'circle';
+  ThemeDark := True;
+  LibFtPath := '';
 
   I := 1;
   while I <= ParamCount do
@@ -112,6 +124,33 @@ begin
       Inc(I);
       BottomCornerRadius := StrToIntDef(ParamStr(I), 12);
     end
+    else if (Arg = '--button-style') and (I < ParamCount) then
+    begin
+      Inc(I);
+      ButtonStyleStr := LowerCase(ParamStr(I));
+      if ButtonStyleStr = 'squircle' then
+        ButtonStyle := FT_WINDOW_BUTTON_SQUIRCLE
+      else if ButtonStyleStr = 'square' then
+        ButtonStyle := FT_WINDOW_BUTTON_SQUARE
+      else
+      begin
+        ButtonStyle := FT_WINDOW_BUTTON_CIRCLE;
+        ButtonStyleStr := 'circle';
+      end;
+    end
+    else if (Arg = '--theme') and (I < ParamCount) then
+    begin
+      Inc(I);
+      if LowerCase(ParamStr(I)) = 'light' then
+        ThemeDark := False
+      else
+        ThemeDark := True;
+    end
+    else if (Arg = '--libft') and (I < ParamCount) then
+    begin
+      Inc(I);
+      LibFtPath := ParamStr(I);
+    end
     else if (Arg = '--display') and (I < ParamCount) then
     begin
       Inc(I);
@@ -123,6 +162,12 @@ begin
     end;
     Inc(I);
   end;
+
+  // Initialize Floria Toolkit integration (libft.so)
+  if InitFloriaToolkit(LibFtPath) then
+    WriteLn('Floria Toolkit:   Integrated (vector styling active)')
+  else
+    WriteLn('Floria Toolkit:   Fallback mode (using AggPas built-in render)');
 
   // Setup signal handling
   fpSignal(SIGINT, SignalHandler(@SigHandler));
@@ -151,9 +196,13 @@ begin
       WM.ShadowOpacity := ShadowOpacity;
       WM.CornerRadius := CornerRadius;
       WM.BottomCornerRadius := BottomCornerRadius;
+      WM.WindowButtonStyle := ButtonStyle;
+      WM.ThemeDarkMode := ThemeDark;
 
       WriteLn('Virtual Desktops: ', WM.DesktopCount);
       WriteLn('Active Desktop:   ', WM.CurrentDesktop);
+      WriteLn('Button Style:     ', ButtonStyleStr);
+      WriteLn('Theme Dark Mode:  ', ThemeDark);
       WriteLn('Compositor:       ', CompositorEnabled);
       if CompositorEnabled then
       begin
