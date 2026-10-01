@@ -28,6 +28,7 @@ type
     procedure TestFloriaToolkitButtonStyling();
     procedure TestButtonAlignmentAndPlacement();
     procedure TestAdditionalWindowControls();
+    procedure TestOverrideRedirectCompositorSupport();
   end;
 
 implementation
@@ -445,6 +446,68 @@ begin
     wm.DismissWindowMenu();
     AssertNull('Window menu dismissed', wm.WindowMenuClient);
     AssertEquals('Window menu rect cleared', 0, wm.WindowMenuRect.Width);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestOverrideRedirectCompositorSupport();
+var
+  wm: TWMSamaCompositingWM;
+  popupWin: xcb_window_t;
+  popupRect: TXCBRect;
+  compWin: TXCBCompositedWindow;
+  img: TFloriaImage;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // Simulate an override-redirect window created by client application
+    // (e.g. TFtPopupMenu, TFtComboBox dropdown list, or tooltip)
+    popupWin := 9001;
+    popupRect := TXCBRect.Create(250, 180, 200, 160);
+
+    // Register in Compositor with frameWin = 0
+    compWin := wm.Compositor.RegisterWindow(popupWin, popupRect, 0);
+    AssertNotNull('Compositor registered override-redirect window', compWin);
+    AssertEquals('Frame window is 0 for unmanaged popup', 0, compWin.FrameWindow);
+    AssertNull('Client is unmanaged (nil in WM client list)', wm.FindClient(popupWin));
+
+    // Configure popup styling (rounded corners and shadow)
+    compWin.CornerRadius := 6;
+    compWin.BottomCornerRadius := 6;
+    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(True, 12, 4, 0.40);
+    AssertEquals('Corner radius set to 6', 6, compWin.CornerRadius);
+    AssertEquals('Bottom corner radius set to 6', 6, compWin.BottomCornerRadius);
+    AssertTrue('Drop shadow enabled', compWin.ShadowConfig.Enabled);
+    AssertEquals('Drop shadow radius', 12, compWin.ShadowConfig.Radius);
+
+    // Stacking: elevate to top of compositor stack
+    wm.Compositor.Windows.Extract(compWin);
+    wm.Compositor.Windows.Add(compWin);
+    AssertSame('Popup is topmost window in compositor', compWin, wm.Compositor.Windows.Last);
+
+    // Geometry updates (e.g. cascading submenu positioning or combo repositioning)
+    compWin.UpdateGeometry(260, 220, 220, 180);
+    AssertEquals('Geometry X updated', 260, compWin.Geometry.X);
+    AssertEquals('Geometry Y updated', 220, compWin.Geometry.Y);
+    AssertEquals('Geometry Width updated', 220, compWin.Geometry.Width);
+    AssertEquals('Geometry Height updated', 180, compWin.Geometry.Height);
+
+    // Damage & Composite pass
+    img := TFloriaImage.Create(220, 180);
+    img.Clear(255, 255, 255, 255);
+    compWin.Image := img;
+    compWin.MarkDamaged();
+    AssertTrue('Window marked dirty/damaged', compWin.IsDirty);
+
+    wm.RequestComposite();
+    AssertTrue('Compositor requests redraw', wm.NeedsComposite);
+    wm.RenderComposite();
+    AssertFalse('Needs composite cleared after render', wm.NeedsComposite);
+
+    // Unregistration upon unmap / destroy
+    wm.Compositor.UnregisterWindow(popupWin);
+    AssertNull('Popup window unregistered from compositor', wm.Compositor.FindWindow(popupWin));
   finally
     wm.Free();
   end;

@@ -70,6 +70,9 @@ type
     OriginalHeight: Integer;
   end;
 
+  Pxcb_map_notify_event_t = ^xcb_map_notify_event_t;
+  Pxcb_unmap_notify_event_t = ^xcb_unmap_notify_event_t;
+
   TWMSamaCompositingWM = class(TXCBWindowManager)
   private
     FCompositor         : TXCBCompositor;
@@ -147,6 +150,7 @@ type
 
     function ClaimOwnership(): Boolean; override;
     procedure GrabGlobalKeys();
+    procedure ScanWindows();
 
     function StartCompositor(): Boolean;
     procedure StopCompositor();
@@ -302,6 +306,7 @@ end;
 procedure TWMSamaCompositingWM.GrabGlobalKeys();
 const
   TAB_KEYCODE = 23;
+  SPACE_KEYCODE = 65;
   MOD_ALT = 8;
   MOD_NUMLOCK = 16;
   MOD_CAPSLOCK = 2;
@@ -319,8 +324,81 @@ begin
   begin
     xcb_grab_key(Connection, 1, Screen^.root, mods[i], TAB_KEYCODE,
                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+    xcb_grab_key(Connection, 1, Screen^.root, mods[i], SPACE_KEYCODE,
+                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
   end;
   xcb_flush(Connection);
+end;
+
+procedure TWMSamaCompositingWM.ScanWindows();
+var
+  cookie: xcb_query_tree_cookie_t;
+  reply: Pxcb_query_tree_reply_t;
+  children: Pxcb_window_t;
+  numChildren, i: Integer;
+  attrCookie: xcb_get_window_attributes_cookie_t;
+  attrReply: Pxcb_get_window_attributes_reply_t;
+  geomCookie: xcb_get_geometry_cookie_t;
+  geomReply: Pxcb_get_geometry_reply_t;
+  compWin: TXCBCompositedWindow;
+  geomRect: TXCBRect;
+begin
+  inherited ScanWindows();
+
+  if (Connection = nil) or (Screen = nil) or (FCompositor = nil) then Exit;
+
+  cookie := xcb_query_tree(Connection, Screen^.root);
+  reply := xcb_query_tree_reply(Connection, cookie, nil);
+  if reply = nil then Exit;
+
+  try
+    numChildren := xcb_query_tree_children_length(reply);
+    children := xcb_query_tree_children(reply);
+    for i := 0 to numChildren - 1 do
+    begin
+      if (children[i] = Screen^.root) or (FindClient(children[i]) <> nil) then Continue;
+
+      attrCookie := xcb_get_window_attributes(Connection, children[i]);
+      attrReply := xcb_get_window_attributes_reply(Connection, attrCookie, nil);
+      if attrReply <> nil then
+      begin
+        try
+          if (attrReply^.override_redirect <> 0) and
+             (attrReply^.map_state <> XCB_MAP_STATE_UNMAPPED) then
+          begin
+            geomCookie := xcb_get_geometry(Connection, children[i]);
+            geomReply := xcb_get_geometry_reply(Connection, geomCookie, nil);
+            if geomReply <> nil then
+            begin
+              try
+                geomRect := TXCBRect.Create(geomReply^.x, geomReply^.y, geomReply^.width, geomReply^.height);
+                if (geomRect.Width > 1) and (geomRect.Height > 1) then
+                begin
+                  compWin := FCompositor.RegisterWindow(children[i], geomRect, 0);
+                  if compWin <> nil then
+                  begin
+                    compWin.CornerRadius := 6;
+                    compWin.BottomCornerRadius := 6;
+                    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 12, 4, 0.40);
+                    FCompositor.Windows.Extract(compWin);
+                    FCompositor.Windows.Add(compWin);
+                    compWin.MarkDamaged();
+                  end;
+                end;
+              finally
+                xcb_free(geomReply);
+              end;
+            end;
+          end;
+        finally
+          xcb_free(attrReply);
+        end;
+      end;
+    end;
+  finally
+    xcb_free(reply);
+  end;
+  RequestComposite();
 end;
 
 function TWMSamaCompositingWM.StartCompositor(): Boolean;
@@ -1585,6 +1663,15 @@ var
   keyEv: Pxcb_key_press_event_t;
   motionEv: Pxcb_motion_notify_event_t;
   leaveEv: Pxcb_leave_notify_event_t;
+  mapEv: Pxcb_map_notify_event_t;
+  unmapEv: Pxcb_unmap_notify_event_t;
+  destroyEv: Pxcb_destroy_notify_event_t;
+  cfgNotifyEv: Pxcb_configure_notify_event_t;
+  exposeEv: Pxcb_expose_event_t;
+  geomCookie: xcb_get_geometry_cookie_t;
+  geomReply: Pxcb_get_geometry_reply_t;
+  geomRect: TXCBRect;
+  compWin: TXCBCompositedWindow;
   cli, oldCli, menuCli: TXCBWMClient;
   localX, localY, bw, th, newBtn: Integer;
   oldWin: xcb_window_t;
@@ -1616,6 +1703,17 @@ begin
         end;
         TriggerAltTabForward();
         Exit(True);
+      end
+      else if (keyEv^.detail = 65) then // Space (Alt+Space)
+      begin
+        menuCli := ActiveClient;
+        if (menuCli = nil) and (Clients.Count > 0) then
+          menuCli := TXCBWMClient(Clients[Clients.Count - 1]);
+        if menuCli <> nil then
+        begin
+          TriggerWindowMenu(menuCli);
+          Exit(True);
+        end;
       end
       else if FAltTabActive and (keyEv^.detail = 9) then // Escape: cancel switcher
       begin
@@ -1853,6 +1951,101 @@ begin
             BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
             Exit(True);
           end;
+        end;
+      end;
+    end;
+
+    XCB_MAP_NOTIFY:
+    begin
+      mapEv := Pxcb_map_notify_event_t(AEvent);
+      if (Connection <> nil) and (Screen <> nil) and
+         (mapEv^.window <> Screen^.root) and (FindClient(mapEv^.window) = nil) then
+      begin
+        // If this is an override-redirect window (popup menu, dropdown, combobox, tooltip)
+        if (mapEv^.override_redirect <> 0) and (FCompositor <> nil) then
+        begin
+          geomCookie := xcb_get_geometry(Connection, mapEv^.window);
+          geomReply := xcb_get_geometry_reply(Connection, geomCookie, nil);
+          if geomReply <> nil then
+          begin
+            try
+              geomRect := TXCBRect.Create(geomReply^.x, geomReply^.y, geomReply^.width, geomReply^.height);
+              if (geomRect.Width > 1) and (geomRect.Height > 1) then
+              begin
+                compWin := FCompositor.RegisterWindow(mapEv^.window, geomRect, 0);
+                if compWin <> nil then
+                begin
+                  compWin.CornerRadius := 6;
+                  compWin.BottomCornerRadius := 6;
+                  compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 12, 4, 0.40);
+                  // Float popup menu to top of compositor stacking order
+                  FCompositor.Windows.Extract(compWin);
+                  FCompositor.Windows.Add(compWin);
+                  compWin.MarkDamaged();
+                  RequestComposite();
+                end;
+              end;
+            finally
+              xcb_free(geomReply);
+            end;
+          end;
+        end;
+      end;
+    end;
+
+    XCB_UNMAP_NOTIFY:
+    begin
+      unmapEv := Pxcb_unmap_notify_event_t(AEvent);
+      if FCompositor <> nil then
+      begin
+        compWin := FCompositor.FindWindow(unmapEv^.window);
+        if (compWin <> nil) and (compWin.FrameWindow = 0) and (FindClient(unmapEv^.window) = nil) then
+        begin
+          FCompositor.UnregisterWindow(unmapEv^.window);
+          RequestComposite();
+        end;
+      end;
+    end;
+
+    XCB_DESTROY_NOTIFY:
+    begin
+      destroyEv := Pxcb_destroy_notify_event_t(AEvent);
+      if FCompositor <> nil then
+      begin
+        compWin := FCompositor.FindWindow(destroyEv^.window);
+        if (compWin <> nil) and (compWin.FrameWindow = 0) and (FindClient(destroyEv^.window) = nil) then
+        begin
+          FCompositor.UnregisterWindow(destroyEv^.window);
+          RequestComposite();
+        end;
+      end;
+    end;
+
+    XCB_CONFIGURE_NOTIFY:
+    begin
+      cfgNotifyEv := Pxcb_configure_notify_event_t(AEvent);
+      if FCompositor <> nil then
+      begin
+        compWin := FCompositor.FindWindow(cfgNotifyEv^.window);
+        if (compWin <> nil) and (compWin.FrameWindow = 0) and (FindClient(cfgNotifyEv^.window) = nil) then
+        begin
+          compWin.UpdateGeometry(cfgNotifyEv^.x, cfgNotifyEv^.y, cfgNotifyEv^.width, cfgNotifyEv^.height);
+          compWin.MarkDamaged();
+          RequestComposite();
+        end;
+      end;
+    end;
+
+    XCB_EXPOSE:
+    begin
+      exposeEv := Pxcb_expose_event_t(AEvent);
+      if FCompositor <> nil then
+      begin
+        compWin := FCompositor.FindWindow(exposeEv^.window);
+        if compWin <> nil then
+        begin
+          compWin.MarkDamaged();
+          RequestComposite();
         end;
       end;
     end;
