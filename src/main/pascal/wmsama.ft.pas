@@ -174,6 +174,8 @@ begin
         Canvas.DrawCircle(cenX, cenY, r, 255 / 255, 189 / 255, 46 / 255, 1.0);
       FT_WINDOW_BUTTON_MAXIMIZE, FT_WINDOW_BUTTON_RESTORE:
         Canvas.DrawCircle(cenX, cenY, r, 39 / 255, 201 / 255, 63 / 255, 1.0);
+      FT_WINDOW_BUTTON_SHADE, FT_WINDOW_BUTTON_PIN, FT_WINDOW_BUTTON_MENU:
+        Canvas.DrawCircle(cenX, cenY, r, 56 / 255, 128 / 255, 235 / 255, 1.0);
     else
       Canvas.DrawCircle(cenX, cenY, r, 120 / 255, 120 / 255, 120 / 255, 1.0);
     end;

@@ -30,6 +30,8 @@ var
   BottomCornerRadius : Integer;
   ButtonStyle        : Integer;
   ButtonStyleStr     : AnsiString;
+  ButtonAlignmentStr : AnsiString;
+  ButtonLayoutStr    : AnsiString;
   ThemeDark          : Boolean;
   LibFtPath          : AnsiString;
   I                  : Integer;
@@ -51,6 +53,10 @@ begin
   WriteLn('  --corner-radius <int>  Window top corner radius (default: 12)');
   WriteLn('  --bottom-radius <int>  Window bottom corner radius (default: 12)');
   WriteLn('  --button-style <style> Window button style: circle, squircle, square (default: circle)');
+  WriteLn('  --buttons-left         Align window buttons to the left (macOS style)');
+  WriteLn('  --buttons-right        Align window buttons to the right (Windows/GNOME/KDE style)');
+  WriteLn('  --button-alignment <a> Window button alignment: left, right (default: left)');
+  WriteLn('  --button-layout <lay>  Custom window button layout (<left>:<right>, e.g. "menu:shade,pin,minimize,maximize,close")');
   WriteLn('  --theme <theme>        Window theme: dark, light (default: dark)');
   WriteLn('  --libft <path>         Path to libft.so shared library');
 end;
@@ -138,6 +144,24 @@ begin
         ButtonStyleStr := 'circle';
       end;
     end
+    else if Arg = '--buttons-left' then
+    begin
+      ButtonAlignmentStr := 'left';
+    end
+    else if Arg = '--buttons-right' then
+    begin
+      ButtonAlignmentStr := 'right';
+    end
+    else if (Arg = '--button-alignment') and (I < ParamCount) then
+    begin
+      Inc(I);
+      ButtonAlignmentStr := LowerCase(ParamStr(I));
+    end
+    else if (Arg = '--button-layout') and (I < ParamCount) then
+    begin
+      Inc(I);
+      ButtonLayoutStr := ParamStr(I);
+    end
     else if (Arg = '--theme') and (I < ParamCount) then
     begin
       Inc(I);
@@ -199,9 +223,21 @@ begin
       WM.WindowButtonStyle := ButtonStyle;
       WM.ThemeDarkMode := ThemeDark;
 
+      if ButtonLayoutStr <> '' then
+        WM.ButtonLayout := ButtonLayoutStr
+      else if ButtonAlignmentStr = 'right' then
+        WM.ButtonAlignment := baRight
+      else if ButtonAlignmentStr = 'left' then
+        WM.ButtonAlignment := baLeft;
+
       WriteLn('Virtual Desktops: ', WM.DesktopCount);
       WriteLn('Active Desktop:   ', WM.CurrentDesktop);
       WriteLn('Button Style:     ', ButtonStyleStr);
+      WriteLn('Button Layout:    ', WM.ButtonLayout);
+      if WM.ButtonAlignment = baRight then
+        WriteLn('Button Alignment: Right')
+      else
+        WriteLn('Button Alignment: Left');
       WriteLn('Theme Dark Mode:  ', ThemeDark);
       WriteLn('Compositor:       ', CompositorEnabled);
       if CompositorEnabled then

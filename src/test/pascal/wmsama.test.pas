@@ -26,6 +26,8 @@ type
     procedure TestWindowSnappingAndPreviews();
     procedure TestAltTabSwitcher();
     procedure TestFloriaToolkitButtonStyling();
+    procedure TestButtonAlignmentAndPlacement();
+    procedure TestAdditionalWindowControls();
   end;
 
 implementation
@@ -345,6 +347,104 @@ begin
     finally
       img.Free();
     end;
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestButtonAlignmentAndPlacement();
+var
+  wm: TWMSamaCompositingWM;
+  btns: TWMSamaButtonArray;
+  tX, tW: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // 1. Default is baLeft with 3 buttons
+    AssertEquals('Default button alignment is baLeft', Ord(baLeft), Ord(wm.ButtonAlignment));
+    AssertEquals('Default button layout is close,minimize,maximize:', 'close,minimize,maximize:', wm.ButtonLayout);
+
+    wm.CalculateButtons(800, btns, tX, tW);
+    AssertEquals('3 buttons calculated', 3, Length(btns));
+    AssertEquals('Button 0 is close', Ord(sbkClose), Ord(btns[0].Kind));
+    AssertEquals('Button 0 is left', Ord(bpLeft), Ord(btns[0].Placement));
+    AssertTrue('Button 0 is near left margin', btns[0].X < 20.0);
+    AssertTrue('Title starts after left buttons', tX > btns[2].X);
+
+    // 2. Switch to baRight
+    wm.ButtonAlignment := baRight;
+    AssertEquals('Button alignment changed to baRight', Ord(baRight), Ord(wm.ButtonAlignment));
+    AssertEquals('Button layout updated to right style', ':minimize,maximize,close', wm.ButtonLayout);
+
+    wm.CalculateButtons(800, btns, tX, tW);
+    AssertEquals('3 buttons calculated on right', 3, Length(btns));
+    AssertEquals('Button 0 is minimize', Ord(sbkMinimize), Ord(btns[0].Kind));
+    AssertEquals('Button 0 is right', Ord(bpRight), Ord(btns[0].Placement));
+    AssertTrue('Right buttons are positioned near right edge', btns[0].X > 700.0);
+    AssertTrue('Title starts near left edge when no left buttons', tX < 20);
+
+    // 3. Custom button layout with both sides: menu on left, shade, pin, min, max, close on right
+    wm.ButtonLayout := 'menu:shade,pin,minimize,maximize,close';
+    AssertEquals('Button layout parsed', 'menu:shade,pin,minimize,maximize,close', wm.ButtonLayout);
+    wm.CalculateButtons(800, btns, tX, tW);
+    AssertEquals('6 buttons in custom layout', 6, Length(btns));
+    AssertEquals('Button 0 is menu', Ord(sbkMenu), Ord(btns[0].Kind));
+    AssertEquals('Button 0 placement is left', Ord(bpLeft), Ord(btns[0].Placement));
+    AssertEquals('Button 1 is shade', Ord(sbkShade), Ord(btns[1].Kind));
+    AssertEquals('Button 1 placement is right', Ord(bpRight), Ord(btns[1].Placement));
+    AssertEquals('Button 2 is pin', Ord(sbkPin), Ord(btns[2].Kind));
+    AssertEquals('Button 5 is close', Ord(sbkClose), Ord(btns[5].Kind));
+
+    // 4. Test draggable titlebar boundaries
+    AssertFalse('Click on menu button is not draggable', wm.IsTitlebarDraggable(Round(btns[0].X), 10, 800));
+    AssertFalse('Click on close button is not draggable', wm.IsTitlebarDraggable(Round(btns[5].X), 10, 800));
+    AssertTrue('Click in center caption is draggable', wm.IsTitlebarDraggable(400, 10, 800));
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestAdditionalWindowControls();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(6001);
+    cli.SetGeometry(100, 100, 500, 350);
+
+    // 1. Keep on Top (Pin)
+    AssertFalse('Client initially not wsAbove', wsAbove in cli.State);
+    wm.ToggleKeepOnTop(cli);
+    AssertTrue('Client now wsAbove after toggle', wsAbove in cli.State);
+    wm.ToggleKeepOnTop(cli);
+    AssertFalse('Client no longer wsAbove after toggle off', wsAbove in cli.State);
+
+    // 2. Shade / Roll-up (requires reparented client)
+    // Manually mark reparented for test simulation
+    cli.IsReparented := True;
+    cli.FrameWindow := 6002;
+    AssertFalse('Client not shaded initially', wm.IsClientShaded(cli.ClientWindow));
+    wm.ToggleShade(cli);
+    AssertTrue('Client shaded after toggle', wm.IsClientShaded(cli.ClientWindow));
+    AssertEquals('Frame height collapsed to titlebar height', wm.TitlebarHeight, cli.CurrentRect.Height);
+
+    wm.ToggleShade(cli);
+    AssertFalse('Client unshaded after second toggle', wm.IsClientShaded(cli.ClientWindow));
+    AssertEquals('Frame height restored to 350', 350, cli.CurrentRect.Height);
+
+    // 3. Window Menu HUD
+    AssertNull('Window menu initially closed', wm.WindowMenuClient);
+    wm.TriggerWindowMenu(cli);
+    AssertSame('Window menu opened for client', cli, wm.WindowMenuClient);
+    AssertTrue('Window menu rect calculated', wm.WindowMenuRect.Width > 0);
+    AssertEquals('Window menu width', 160, wm.WindowMenuRect.Width);
+    AssertEquals('Window menu height', 154, wm.WindowMenuRect.Height);
+
+    wm.DismissWindowMenu();
+    AssertNull('Window menu dismissed', wm.WindowMenuClient);
+    AssertEquals('Window menu rect cleared', 0, wm.WindowMenuRect.Width);
   finally
     wm.Free();
   end;

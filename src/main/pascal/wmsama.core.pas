@@ -31,6 +31,45 @@ type
     snapRightHalf
   );
 
+  TWMSamaButtonKind = (
+    sbkClose,
+    sbkMinimize,
+    sbkMaximize,
+    sbkShade,
+    sbkPin,
+    sbkMenu
+  );
+
+  TWMSamaButtonAlignment = (
+    baLeft,
+    baRight
+  );
+
+  TWMSamaButtonPlacement = (
+    bpLeft,
+    bpRight
+  );
+
+  TWMSamaButtonLayoutItem = record
+    Kind: TWMSamaButtonKind;
+    Placement: TWMSamaButtonPlacement;
+  end;
+
+  TWMSamaCalculatedButton = record
+    Kind: TWMSamaButtonKind;
+    Placement: TWMSamaButtonPlacement;
+    X: Double;
+    Y: Double;
+    Size: Double;
+  end;
+
+  TWMSamaButtonArray = array of TWMSamaCalculatedButton;
+
+  TWMSamaShadedWindow = record
+    WindowId: xcb_window_t;
+    OriginalHeight: Integer;
+  end;
+
   TWMSamaCompositingWM = class(TXCBWindowManager)
   private
     FCompositor         : TXCBCompositor;
@@ -49,12 +88,20 @@ type
     FCornerRadius       : Integer;
     FBottomCornerRadius : Integer;
 
-    // Window Button Theming and Hover States
+    // Window Button Theming, Layout and Hover States
     FWindowButtonStyle  : Integer;
     FThemeDarkMode      : Boolean;
+    FButtonAlignment    : TWMSamaButtonAlignment;
+    FButtonLayout       : AnsiString;
+    FButtonLayoutItems  : array of TWMSamaButtonLayoutItem;
     FHoveredWindow      : xcb_window_t;
     FHoveredButton      : Integer;
     FPressedButton      : Integer;
+
+    // Shaded Windows and Window Menu Overlay
+    FShadedWindows      : array of TWMSamaShadedWindow;
+    FWindowMenuClient   : TXCBWMClient;
+    FWindowMenuRect     : TXCBRect;
 
     // Double-click detection
     FLastClickTime      : Cardinal;
@@ -84,6 +131,8 @@ type
     procedure SetBottomCornerRadius(const AValue: Integer);
     procedure SetWindowButtonStyle(const AValue: Integer);
     procedure SetThemeDarkMode(const AValue: Boolean);
+    procedure SetButtonAlignment(const AValue: TWMSamaButtonAlignment);
+    procedure SetButtonLayout(const AValue: AnsiString);
 
     procedure DoOnCompositorAfterRender(ASender: TObject; ACanvas: TFloriaCanvasAgg; const ASceneRect: TXCBRect);
   protected
@@ -109,8 +158,17 @@ type
     procedure PaintClientFrame(const AClient: TXCBWMClient);
 
     // Window Button Layout and Hit Detection
+    procedure CalculateButtons(const AWidth: Integer; out AButtons: TWMSamaButtonArray; out ATitleX, ATitleW: Integer);
     procedure GetWindowButtonMetrics(out ABtnSize, ABtnY, AX0, AX1, AX2: Double; out ATitleX: Integer);
-    function GetButtonAt(const AX, AY: Integer): Integer;
+    function GetButtonAt(const AX, AY: Integer; const AWidth: Integer = 820): Integer;
+    function IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean;
+
+    // Additional Window Controls (Shade, Keep on Top, Window Menu)
+    procedure ToggleKeepOnTop(const AClient: TXCBWMClient);
+    procedure ToggleShade(const AClient: TXCBWMClient);
+    function IsClientShaded(const AWin: xcb_window_t): Boolean;
+    procedure TriggerWindowMenu(const AClient: TXCBWMClient);
+    procedure DismissWindowMenu();
 
     // Interactive Dragging and Snapping
     procedure BeginDrag(const AClient: TXCBWMClient; const AMode: TXCBDragMode; const ARootX, ARootY: Integer); override;
@@ -141,6 +199,10 @@ type
     property BottomCornerRadius : Integer        read FBottomCornerRadius  write SetBottomCornerRadius;
     property WindowButtonStyle  : Integer        read FWindowButtonStyle   write SetWindowButtonStyle;
     property ThemeDarkMode      : Boolean        read FThemeDarkMode       write SetThemeDarkMode;
+    property ButtonAlignment    : TWMSamaButtonAlignment read FButtonAlignment    write SetButtonAlignment;
+    property ButtonLayout       : AnsiString             read FButtonLayout       write SetButtonLayout;
+    property WindowMenuClient   : TXCBWMClient           read FWindowMenuClient;
+    property WindowMenuRect     : TXCBRect               read FWindowMenuRect;
     property ActiveSnap         : TWMSnapTarget  read FActiveSnap;
     property SnapPreviewRect    : TXCBRect       read FSnapPreviewRect;
     property AltTabActive       : Boolean        read FAltTabActive;
@@ -167,6 +229,11 @@ begin
 
   FWindowButtonStyle := FT_WINDOW_BUTTON_CIRCLE;
   FThemeDarkMode := True;
+  FButtonAlignment := baLeft;
+  SetLength(FShadedWindows, 0);
+  FWindowMenuClient := nil;
+  FWindowMenuRect := TXCBRect.Create(0, 0, 0, 0);
+  SetButtonLayout('close,minimize,maximize:');
   FHoveredWindow := 0;
   FHoveredButton := -1;
   FPressedButton := -1;
@@ -446,6 +513,161 @@ begin
   RequestComposite();
 end;
 
+procedure TWMSamaCompositingWM.SetButtonAlignment(const AValue: TWMSamaButtonAlignment);
+begin
+  if FButtonAlignment = AValue then Exit;
+  FButtonAlignment := AValue;
+  if FButtonAlignment = baLeft then
+    SetButtonLayout('close,minimize,maximize:')
+  else
+    SetButtonLayout(':minimize,maximize,close');
+end;
+
+procedure TWMSamaCompositingWM.SetButtonLayout(const AValue: AnsiString);
+var
+  colonPos: Integer;
+  leftStr, rightStr: AnsiString;
+
+  procedure ParseSide(const ASideStr: AnsiString; const APlacement: TWMSamaButtonPlacement);
+  var
+    rawTokens: TStringArray;
+    token, s: AnsiString;
+    i, j: Integer;
+    k: TWMSamaButtonKind;
+    found: Boolean;
+  begin
+    s := Trim(ASideStr);
+    if s = '' then Exit;
+
+    if Pos(',', s) > 0 then
+    begin
+      rawTokens := s.Split([',']);
+      for i := 0 to High(rawTokens) do
+      begin
+        token := LowerCase(Trim(rawTokens[i]));
+        if token = '' then Continue;
+        found := True;
+        if (token = 'close') or (token = 'c') then k := sbkClose
+        else if (token = 'minimize') or (token = 'min') or (token = 'm') then k := sbkMinimize
+        else if (token = 'maximize') or (token = 'max') or (token = 'x') then k := sbkMaximize
+        else if (token = 'shade') or (token = 's') or (token = 'rollup') then k := sbkShade
+        else if (token = 'pin') or (token = 'p') or (token = 'stick') or (token = 'ontop') or (token = 'above') then k := sbkPin
+        else if (token = 'menu') or (token = 'appmenu') or (token = 'h') or (token = 'burger') then k := sbkMenu
+        else found := False;
+
+        if found then
+        begin
+          SetLength(FButtonLayoutItems, Length(FButtonLayoutItems) + 1);
+          FButtonLayoutItems[High(FButtonLayoutItems)].Kind := k;
+          FButtonLayoutItems[High(FButtonLayoutItems)].Placement := APlacement;
+        end;
+      end;
+    end
+    else
+    begin
+      token := LowerCase(s);
+      found := True;
+      if (token = 'close') then k := sbkClose
+      else if (token = 'minimize') or (token = 'min') then k := sbkMinimize
+      else if (token = 'maximize') or (token = 'max') then k := sbkMaximize
+      else if (token = 'shade') or (token = 'rollup') then k := sbkShade
+      else if (token = 'pin') or (token = 'stick') or (token = 'ontop') or (token = 'above') then k := sbkPin
+      else if (token = 'menu') or (token = 'appmenu') then k := sbkMenu
+      else found := False;
+
+      if found then
+      begin
+        SetLength(FButtonLayoutItems, Length(FButtonLayoutItems) + 1);
+        FButtonLayoutItems[High(FButtonLayoutItems)].Kind := k;
+        FButtonLayoutItems[High(FButtonLayoutItems)].Placement := APlacement;
+      end
+      else
+      begin
+        for j := 1 to Length(token) do
+        begin
+          found := True;
+          case token[j] of
+            'c': k := sbkClose;
+            'm': k := sbkMinimize;
+            'x': k := sbkMaximize;
+            's': k := sbkShade;
+            'p': k := sbkPin;
+            'h': k := sbkMenu;
+          else
+            found := False;
+          end;
+          if found then
+          begin
+            SetLength(FButtonLayoutItems, Length(FButtonLayoutItems) + 1);
+            FButtonLayoutItems[High(FButtonLayoutItems)].Kind := k;
+            FButtonLayoutItems[High(FButtonLayoutItems)].Placement := APlacement;
+          end;
+        end;
+      end;
+    end;
+  end;
+
+var
+  leftCount, rightCount, i: Integer;
+begin
+  colonPos := Pos(':', AValue);
+  if colonPos > 0 then
+  begin
+    leftStr := Copy(AValue, 1, colonPos - 1);
+    rightStr := Copy(AValue, colonPos + 1, Length(AValue) - colonPos);
+  end
+  else
+  begin
+    if FButtonAlignment = baLeft then
+    begin
+      leftStr := AValue;
+      rightStr := '';
+    end
+    else
+    begin
+      leftStr := '';
+      rightStr := AValue;
+    end;
+  end;
+
+  SetLength(FButtonLayoutItems, 0);
+  ParseSide(leftStr, bpLeft);
+  ParseSide(rightStr, bpRight);
+
+  if Length(FButtonLayoutItems) = 0 then
+  begin
+    SetLength(FButtonLayoutItems, 3);
+    FButtonLayoutItems[0].Kind := sbkClose;
+    FButtonLayoutItems[0].Placement := bpLeft;
+    FButtonLayoutItems[1].Kind := sbkMinimize;
+    FButtonLayoutItems[1].Placement := bpLeft;
+    FButtonLayoutItems[2].Kind := sbkMaximize;
+    FButtonLayoutItems[2].Placement := bpLeft;
+    FButtonLayout := 'close,minimize,maximize:';
+    FButtonAlignment := baLeft;
+  end
+  else
+  begin
+    FButtonLayout := AValue;
+    leftCount := 0;
+    rightCount := 0;
+    for i := 0 to High(FButtonLayoutItems) do
+    begin
+      if FButtonLayoutItems[i].Placement = bpLeft then Inc(leftCount)
+      else Inc(rightCount);
+    end;
+    if (leftCount = 0) and (rightCount > 0) then
+      FButtonAlignment := baRight
+    else if (leftCount > 0) and (rightCount = 0) then
+      FButtonAlignment := baLeft;
+  end;
+
+  if (Clients <> nil) and (Clients.Count > 0) then
+    PaintAllFrames();
+  if FCompositor <> nil then
+    RequestComposite();
+end;
+
 procedure TWMSamaCompositingWM.DoOnClientMapped(const AClient: TXCBWMClient);
 var
   targetWin, frameWin: xcb_window_t;
@@ -495,10 +717,26 @@ begin
 end;
 
 procedure TWMSamaCompositingWM.DoOnClientUnmapped(const AClient: TXCBWMClient);
+var
+  i, j: Integer;
 begin
   inherited DoOnClientUnmapped(AClient);
 
-  if (AClient = nil) or (FCompositor = nil) then Exit;
+  if AClient = nil then Exit;
+
+  if FWindowMenuClient = AClient then
+    DismissWindowMenu();
+
+  for i := 0 to High(FShadedWindows) do
+    if FShadedWindows[i].WindowId = AClient.ClientWindow then
+    begin
+      for j := i to High(FShadedWindows) - 1 do
+        FShadedWindows[j] := FShadedWindows[j + 1];
+      SetLength(FShadedWindows, Length(FShadedWindows) - 1);
+      Break;
+    end;
+
+  if FCompositor = nil then Exit;
 
   if AClient.FrameWindow <> 0 then
     FCompositor.UnregisterWindow(AClient.FrameWindow);
@@ -553,6 +791,25 @@ begin
     end;
   end;
 
+  // Ensure all wsAbove windows remain at the very top of stacking order
+  for i := 0 to Clients.Count - 1 do
+  begin
+    cli := TXCBWMClient(Clients[i]);
+    if (cli <> AClient) and (wsAbove in cli.State) then
+    begin
+      if cli.IsReparented and (cli.FrameWindow <> 0) then
+        targetWin := cli.FrameWindow
+      else
+        targetWin := cli.ClientWindow;
+      compWin := FCompositor.FindWindow(targetWin);
+      if compWin <> nil then
+      begin
+        FCompositor.Windows.Extract(compWin);
+        FCompositor.Windows.Add(compWin);
+      end;
+    end;
+  end;
+
   PaintAllFrames();
   RequestComposite();
 end;
@@ -574,8 +831,12 @@ begin
   compWin := FCompositor.FindWindow(targetWin);
   if compWin <> nil then
   begin
-    compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
-                           AClient.CurrentRect.Width, AClient.CurrentRect.Height);
+    if IsClientShaded(AClient.ClientWindow) then
+      compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
+                             AClient.CurrentRect.Width, FTitlebarHeight)
+    else
+      compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
+                             AClient.CurrentRect.Width, AClient.CurrentRect.Height);
 
     if (wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) then
     begin
@@ -599,47 +860,368 @@ begin
   PaintClientFrame(AClient);
 end;
 
-procedure TWMSamaCompositingWM.GetWindowButtonMetrics(out ABtnSize, ABtnY, AX0, AX1, AX2: Double; out ATitleX: Integer);
+procedure TWMSamaCompositingWM.CalculateButtons(const AWidth: Integer; out AButtons: TWMSamaButtonArray; out ATitleX, ATitleW: Integer);
 var
-  gap, mLeft: Double;
+  btnSize, gap, mLeft, mRight, btnY, curX: Double;
+  leftCount, rightCount, i: Integer;
+  totalRightWidth, rightStartX: Double;
+  w: Integer;
 begin
-  ABtnSize := Max(10.0, Round(FTitlebarHeight * 0.44));
-  gap := Max(5.0, Round(ABtnSize * 0.50));
-  mLeft := Max(8.0, Round(ABtnSize * 0.75));
-  ABtnY := (FTitlebarHeight - ABtnSize) * 0.5;
+  w := AWidth;
+  if w <= 0 then
+  begin
+    if (Screen <> nil) and (Screen^.width_in_pixels > 0) then
+      w := Screen^.width_in_pixels
+    else
+      w := 820;
+  end;
 
-  AX0 := mLeft;
-  AX1 := AX0 + ABtnSize + gap;
-  AX2 := AX1 + ABtnSize + gap;
-  ATitleX := Round(AX2 + ABtnSize + mLeft + 2.0);
+  btnSize := Max(10.0, Round(FTitlebarHeight * 0.44));
+  gap := Max(5.0, Round(btnSize * 0.50));
+  mLeft := Max(8.0, Round(btnSize * 0.75));
+  mRight := mLeft;
+  btnY := (FTitlebarHeight - btnSize) * 0.5;
+
+  SetLength(AButtons, Length(FButtonLayoutItems));
+  leftCount := 0;
+  rightCount := 0;
+
+  for i := 0 to High(FButtonLayoutItems) do
+  begin
+    if FButtonLayoutItems[i].Placement = bpLeft then
+      Inc(leftCount)
+    else
+      Inc(rightCount);
+  end;
+
+  // 1. Position Left Buttons
+  curX := mLeft;
+  for i := 0 to High(FButtonLayoutItems) do
+  begin
+    if FButtonLayoutItems[i].Placement = bpLeft then
+    begin
+      AButtons[i].Kind := FButtonLayoutItems[i].Kind;
+      AButtons[i].Placement := bpLeft;
+      AButtons[i].X := curX;
+      AButtons[i].Y := btnY;
+      AButtons[i].Size := btnSize;
+      curX := curX + btnSize + gap;
+    end;
+  end;
+
+  if leftCount > 0 then
+    ATitleX := Round(curX - gap + mLeft + 2.0)
+  else
+    ATitleX := Round(mLeft + 3.0);
+
+  // 2. Position Right Buttons
+  if rightCount > 0 then
+  begin
+    totalRightWidth := (rightCount * btnSize) + ((rightCount - 1) * gap);
+    rightStartX := w - mRight - totalRightWidth;
+    curX := rightStartX;
+    for i := 0 to High(FButtonLayoutItems) do
+    begin
+      if FButtonLayoutItems[i].Placement = bpRight then
+      begin
+        AButtons[i].Kind := FButtonLayoutItems[i].Kind;
+        AButtons[i].Placement := bpRight;
+        AButtons[i].X := curX;
+        AButtons[i].Y := btnY;
+        AButtons[i].Size := btnSize;
+        curX := curX + btnSize + gap;
+      end;
+    end;
+
+    ATitleW := Max(0, Round(rightStartX - ATitleX - 8.0));
+  end
+  else
+  begin
+    ATitleW := Max(0, w - ATitleX - 8);
+  end;
 end;
 
-function TWMSamaCompositingWM.GetButtonAt(const AX, AY: Integer): Integer;
+procedure TWMSamaCompositingWM.GetWindowButtonMetrics(out ABtnSize, ABtnY, AX0, AX1, AX2: Double; out ATitleX: Integer);
 var
-  bSize, bY, x0, x1, x2: Double;
-  titleX: Integer;
+  btns: TWMSamaButtonArray;
+  tW: Integer;
+begin
+  CalculateButtons(820, btns, ATitleX, tW);
+  ABtnSize := Max(10.0, Round(FTitlebarHeight * 0.44));
+  ABtnY := (FTitlebarHeight - ABtnSize) * 0.5;
+  AX0 := 11.0;
+  AX1 := 34.0;
+  AX2 := 57.0;
+  if Length(btns) >= 3 then
+  begin
+    AX0 := btns[0].X;
+    AX1 := btns[1].X;
+    AX2 := btns[2].X;
+  end;
+end;
+
+function TWMSamaCompositingWM.GetButtonAt(const AX, AY: Integer; const AWidth: Integer): Integer;
+var
+  btns: TWMSamaButtonArray;
+  tX, tW, i: Integer;
   pad: Double;
 begin
   Result := -1;
   if (AY < 0) or (AY >= FTitlebarHeight) then Exit;
 
-  GetWindowButtonMetrics(bSize, bY, x0, x1, x2, titleX);
+  CalculateButtons(AWidth, btns, tX, tW);
   pad := 3.0;
 
-  if (AY >= bY - pad) and (AY <= bY + bSize + pad) then
+  for i := 0 to High(btns) do
   begin
-    if (AX >= x0 - pad) and (AX <= x0 + bSize + pad) then
-      Result := 0
-    else if (AX >= x1 - pad) and (AX <= x1 + bSize + pad) then
-      Result := 1
-    else if (AX >= x2 - pad) and (AX <= x2 + bSize + pad) then
-      Result := 2;
+    if (AY >= btns[i].Y - pad) and (AY <= btns[i].Y + btns[i].Size + pad) and
+       (AX >= btns[i].X - pad) and (AX <= btns[i].X + btns[i].Size + pad) then
+      Exit(i);
+  end;
+end;
+
+function TWMSamaCompositingWM.IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean;
+var
+  btns: TWMSamaButtonArray;
+  tX, tW, i: Integer;
+  leftEnd, rightStart: Double;
+begin
+  Result := False;
+  if (AY < 0) or (AY >= FTitlebarHeight) then Exit;
+
+  CalculateButtons(AWidth, btns, tX, tW);
+  if GetButtonAt(AX, AY, AWidth) >= 0 then Exit(False);
+
+  leftEnd := 0.0;
+  rightStart := AWidth;
+
+  for i := 0 to High(btns) do
+  begin
+    if btns[i].Placement = bpLeft then
+    begin
+      if btns[i].X + btns[i].Size > leftEnd then
+        leftEnd := btns[i].X + btns[i].Size;
+    end
+    else
+    begin
+      if btns[i].X < rightStart then
+        rightStart := btns[i].X;
+    end;
+  end;
+
+  if leftEnd > 0 then leftEnd := leftEnd + 2.0;
+  if rightStart < AWidth then rightStart := rightStart - 2.0;
+
+  Result := (AX >= leftEnd) and (AX <= rightStart);
+end;
+
+procedure TWMSamaCompositingWM.ToggleKeepOnTop(const AClient: TXCBWMClient);
+var
+  targetWin: xcb_window_t;
+  compWin: TXCBCompositedWindow;
+  values: array[0..0] of Cardinal;
+begin
+  if AClient = nil then Exit;
+
+  if wsAbove in AClient.State then
+    AClient.State := AClient.State - [wsAbove]
+  else
+    AClient.State := AClient.State + [wsAbove];
+
+  if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+    targetWin := AClient.FrameWindow
+  else
+    targetWin := AClient.ClientWindow;
+
+  // Elevate in compositor stacking order
+  if FCompositor <> nil then
+  begin
+    compWin := FCompositor.FindWindow(targetWin);
+    if (compWin <> nil) and (wsAbove in AClient.State) then
+    begin
+      FCompositor.Windows.Extract(compWin);
+      FCompositor.Windows.Add(compWin);
+    end;
+  end;
+
+  // Elevate in X11
+  if (Connection <> nil) and (wsAbove in AClient.State) then
+  begin
+    values[0] := XCB_STACK_MODE_ABOVE;
+    xcb_configure_window(Connection, targetWin, XCB_CONFIG_WINDOW_STACK_MODE, @values[0]);
+    xcb_flush(Connection);
+  end;
+
+  PaintClientFrame(AClient);
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.ToggleShade(const AClient: TXCBWMClient);
+var
+  i, idx, origH: Integer;
+  targetWin: xcb_window_t;
+  values: array[0..3] of Cardinal;
+  r: TXCBRect;
+  compWin: TXCBCompositedWindow;
+begin
+  if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) then Exit;
+
+  targetWin := AClient.ClientWindow;
+  idx := -1;
+  for i := 0 to High(FShadedWindows) do
+    if FShadedWindows[i].WindowId = targetWin then
+    begin
+      idx := i;
+      Break;
+    end;
+
+  if idx >= 0 then
+  begin
+    // Un-shade: restore original height
+    origH := FShadedWindows[idx].OriginalHeight;
+    for i := idx to High(FShadedWindows) - 1 do
+      FShadedWindows[i] := FShadedWindows[i + 1];
+    SetLength(FShadedWindows, Length(FShadedWindows) - 1);
+
+    AClient.Resize(AClient.CurrentRect.Width, origH);
+    if FCompositor <> nil then
+    begin
+      compWin := FCompositor.FindWindow(AClient.FrameWindow);
+      if compWin <> nil then
+        compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
+                               AClient.CurrentRect.Width, origH);
+    end;
+  end
+  else
+  begin
+    // Shade: record original height and collapse frame to titlebar height
+    SetLength(FShadedWindows, Length(FShadedWindows) + 1);
+    FShadedWindows[High(FShadedWindows)].WindowId := targetWin;
+    FShadedWindows[High(FShadedWindows)].OriginalHeight := AClient.CurrentRect.Height;
+
+    r := AClient.CurrentRect;
+    r.Height := FTitlebarHeight;
+    AClient.CurrentRect := r;
+    if Connection <> nil then
+    begin
+      // Configure outer frame to titlebar height
+      values[0] := AClient.CurrentRect.X;
+      values[1] := AClient.CurrentRect.Y;
+      values[2] := AClient.CurrentRect.Width;
+      values[3] := FTitlebarHeight;
+      xcb_configure_window(Connection, AClient.FrameWindow,
+                           XCB_CONFIG_WINDOW_X or XCB_CONFIG_WINDOW_Y or
+                           XCB_CONFIG_WINDOW_WIDTH or XCB_CONFIG_WINDOW_HEIGHT,
+                           @values[0]);
+
+      // Inner client window clipped below titlebar
+      values[0] := 0;
+      values[1] := FTitlebarHeight;
+      values[2] := AClient.CurrentRect.Width;
+      values[3] := 1;
+      xcb_configure_window(Connection, targetWin,
+                           XCB_CONFIG_WINDOW_X or XCB_CONFIG_WINDOW_Y or
+                           XCB_CONFIG_WINDOW_WIDTH or XCB_CONFIG_WINDOW_HEIGHT,
+                           @values[0]);
+      xcb_flush(Connection);
+    end;
+
+    if FCompositor <> nil then
+    begin
+      compWin := FCompositor.FindWindow(AClient.FrameWindow);
+      if compWin <> nil then
+        compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
+                               AClient.CurrentRect.Width, FTitlebarHeight);
+    end;
+  end;
+
+  PaintClientFrame(AClient);
+  RequestComposite();
+end;
+
+function TWMSamaCompositingWM.IsClientShaded(const AWin: xcb_window_t): Boolean;
+var
+  i: Integer;
+begin
+  Result := False;
+  for i := 0 to High(FShadedWindows) do
+    if FShadedWindows[i].WindowId = AWin then Exit(True);
+end;
+
+procedure TWMSamaCompositingWM.TriggerWindowMenu(const AClient: TXCBWMClient);
+var
+  btns: TWMSamaButtonArray;
+  tX, tW, i, menuBtnX: Integer;
+begin
+  if (AClient = nil) or (FWindowMenuClient = AClient) then
+  begin
+    DismissWindowMenu();
+    Exit;
+  end;
+
+  FWindowMenuClient := AClient;
+  menuBtnX := 8;
+
+  CalculateButtons(AClient.CurrentRect.Width, btns, tX, tW);
+  for i := 0 to High(btns) do
+    if btns[i].Kind = sbkMenu then
+    begin
+      menuBtnX := Round(btns[i].X);
+      Break;
+    end;
+
+  FWindowMenuRect := TXCBRect.Create(
+    Max(10, AClient.CurrentRect.X + menuBtnX - 4),
+    AClient.CurrentRect.Y + FTitlebarHeight + 4,
+    160,
+    154
+  );
+
+  // Grab pointer so menu clicks anywhere on screen are intercepted by WM
+  if (Connection <> nil) and (Screen <> nil) then
+  begin
+    xcb_grab_pointer(
+      Connection,
+      0,
+      Screen^.root,
+      XCB_EVENT_MASK_BUTTON_PRESS or XCB_EVENT_MASK_BUTTON_RELEASE or XCB_EVENT_MASK_POINTER_MOTION,
+      XCB_GRAB_MODE_ASYNC,
+      XCB_GRAB_MODE_ASYNC,
+      XCB_NONE,
+      XCB_NONE,
+      XCB_CURRENT_TIME
+    );
+    xcb_flush(Connection);
+  end;
+
+  PaintClientFrame(AClient);
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.DismissWindowMenu();
+var
+  oldCli: TXCBWMClient;
+begin
+  if FWindowMenuClient <> nil then
+  begin
+    oldCli := FWindowMenuClient;
+    FWindowMenuClient := nil;
+    FWindowMenuRect := TXCBRect.Create(0, 0, 0, 0);
+
+    if Connection <> nil then
+    begin
+      xcb_ungrab_pointer(Connection, XCB_CURRENT_TIME);
+      xcb_flush(Connection);
+    end;
+
+    PaintClientFrame(oldCli);
+    RequestComposite();
   end;
 end;
 
 procedure TWMSamaCompositingWM.PaintClientFrame(const AClient: TXCBWMClient);
 var
-  w, h, th, bw: Integer;
+  w, h, th, bw, i: Integer;
   isActive, isHoveredWin: Boolean;
   frameImg: TFloriaImage;
   canvas: TFloriaCanvasAgg;
@@ -649,9 +1231,9 @@ var
   mask: Cardinal;
   values: array[0..0] of Cardinal;
   compWin: TXCBCompositedWindow;
-  s0, s1, s2, maxKind: Integer;
-  btnSize, btnY, x0, x1, x2: Double;
-  titleX: Integer;
+  kindVal, btnState: Integer;
+  btns: TWMSamaButtonArray;
+  titleX, titleW: Integer;
 begin
   if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) then Exit;
 
@@ -686,35 +1268,40 @@ begin
       end;
 
       // 2. Vector Window Buttons via Floria Toolkit (libft.so)
-      isHoveredWin := (FHoveredWindow <> 0) and (FHoveredWindow = AClient.FrameWindow);
-      if isHoveredWin and (FPressedButton = 0) then s0 := FT_BUTTON_STATE_PRESSED
-      else if isHoveredWin and (FHoveredButton = 0) then s0 := FT_BUTTON_STATE_HOVERED
-      else s0 := FT_BUTTON_STATE_NORMAL;
+      CalculateButtons(w, btns, titleX, titleW);
 
-      if isHoveredWin and (FPressedButton = 1) then s1 := FT_BUTTON_STATE_PRESSED
-      else if isHoveredWin and (FHoveredButton = 1) then s1 := FT_BUTTON_STATE_HOVERED
-      else s1 := FT_BUTTON_STATE_NORMAL;
+      for i := 0 to High(btns) do
+      begin
+        isHoveredWin := (FHoveredWindow <> 0) and (FHoveredWindow = AClient.FrameWindow);
+        if isHoveredWin and (FPressedButton = i) then
+          btnState := FT_BUTTON_STATE_PRESSED
+        else if isHoveredWin and (FHoveredButton = i) then
+          btnState := FT_BUTTON_STATE_HOVERED
+        else if (btns[i].Kind = sbkPin) and (wsAbove in AClient.State) then
+          btnState := FT_BUTTON_STATE_PRESSED
+        else if (btns[i].Kind = sbkShade) and IsClientShaded(AClient.ClientWindow) then
+          btnState := FT_BUTTON_STATE_PRESSED
+        else
+          btnState := FT_BUTTON_STATE_NORMAL;
 
-      if isHoveredWin and (FPressedButton = 2) then s2 := FT_BUTTON_STATE_PRESSED
-      else if isHoveredWin and (FHoveredButton = 2) then s2 := FT_BUTTON_STATE_HOVERED
-      else s2 := FT_BUTTON_STATE_NORMAL;
+        case btns[i].Kind of
+          sbkClose:    kindVal := FT_WINDOW_BUTTON_CLOSE;
+          sbkMinimize: kindVal := FT_WINDOW_BUTTON_MINIMIZE;
+          sbkMaximize:
+          begin
+            if wsMaximizedHorz in AClient.State then
+              kindVal := FT_WINDOW_BUTTON_RESTORE
+            else
+              kindVal := FT_WINDOW_BUTTON_MAXIMIZE;
+          end;
+          sbkShade:    kindVal := FT_WINDOW_BUTTON_SHADE;
+          sbkPin:      kindVal := FT_WINDOW_BUTTON_PIN;
+          sbkMenu:     kindVal := FT_WINDOW_BUTTON_MENU;
+        end;
 
-      if wsMaximizedHorz in AClient.State then
-        maxKind := FT_WINDOW_BUTTON_RESTORE
-      else
-        maxKind := FT_WINDOW_BUTTON_MAXIMIZE;
-
-      GetWindowButtonMetrics(btnSize, btnY, x0, x1, x2, titleX);
-
-      FtDrawWindowButton(canvas, x0, btnY, btnSize, btnSize,
-                         FT_WINDOW_BUTTON_CLOSE, FWindowButtonStyle, s0,
-                         FThemeDarkMode);
-      FtDrawWindowButton(canvas, x1, btnY, btnSize, btnSize,
-                         FT_WINDOW_BUTTON_MINIMIZE, FWindowButtonStyle, s1,
-                         FThemeDarkMode);
-      FtDrawWindowButton(canvas, x2, btnY, btnSize, btnSize,
-                         maxKind, FWindowButtonStyle, s2,
-                         FThemeDarkMode);
+        FtDrawWindowButton(canvas, btns[i].X, btns[i].Y, btns[i].Size, btns[i].Size,
+                           kindVal, FWindowButtonStyle, btnState, FThemeDarkMode);
+      end;
 
       // 3. Window title text (centered vertically with top and bottom margins)
       winTitle := AClient.Title;
@@ -724,9 +1311,9 @@ begin
         winTitle := 'Window';
 
       if isActive then
-        canvas.DrawTextLeft(titleX, 0, Max(0, w - titleX - 8), th, winTitle, nil, 236 / 255, 239 / 255, 244 / 255)
+        canvas.DrawTextLeft(titleX, 0, titleW, th, winTitle, nil, 236 / 255, 239 / 255, 244 / 255)
       else
-        canvas.DrawTextLeft(titleX, 0, Max(0, w - titleX - 8), th, winTitle, nil, 127 / 255, 132 / 255, 156 / 255);
+        canvas.DrawTextLeft(titleX, 0, titleW, th, winTitle, nil, 127 / 255, 132 / 255, 156 / 255);
     finally
       canvas.Free();
     end;
@@ -949,6 +1536,46 @@ begin
       end;
     end;
   end;
+
+  // 3. Render Window Action Menu Overlay HUD
+  if (FWindowMenuClient <> nil) and (FWindowMenuRect.Width > 0) then
+  begin
+    cardX := FWindowMenuRect.X;
+    cardY := FWindowMenuRect.Y;
+    cardW := FWindowMenuRect.Width;
+    cardH := FWindowMenuRect.Height;
+
+    ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 12, 0, 4, 18, 0.0, 0.0, 0.0, 0.50);
+    ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 10, 24 / 255, 25 / 255, 38 / 255, 0.96);
+    ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 10, 1.2, 69 / 255, 71 / 255, 90 / 255, 0.7);
+
+    // Header
+    ACanvas.DrawTextLeft(cardX + 12, cardY + 6, cardW - 24, 20, 'Window Actions', nil, 147 / 255, 153 / 255, 178 / 255);
+    ACanvas.DrawLine(cardX + 8, cardY + 28, cardX + cardW - 8, cardY + 28, 1.0, 49 / 255, 50 / 255, 68 / 255, 0.8);
+
+    // Items:
+    // [0] Minimize
+    ACanvas.DrawTextLeft(cardX + 14, cardY + 32, cardW - 28, 22, '—  Minimize', nil, 236 / 255, 239 / 255, 244 / 255);
+    // [1] Maximize / Restore
+    if wsMaximizedHorz in FWindowMenuClient.State then
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤡  Restore', nil, 236 / 255, 239 / 255, 244 / 255)
+    else
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤢  Maximize', nil, 236 / 255, 239 / 255, 244 / 255);
+    // [2] Keep on Top (Pin)
+    if wsAbove in FWindowMenuClient.State then
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '✓  Always on Top', nil, 137 / 255, 180 / 255, 250 / 255)
+    else
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '•  Always on Top', nil, 205 / 255, 214 / 255, 244 / 255);
+    // [3] Shade / Roll Up
+    if IsClientShaded(FWindowMenuClient.ClientWindow) then
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '✓  Roll Up (Shade)', nil, 137 / 255, 180 / 255, 250 / 255)
+    else
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '▴  Roll Up (Shade)', nil, 205 / 255, 214 / 255, 244 / 255);
+    // Divider
+    ACanvas.DrawLine(cardX + 8, cardY + 128, cardX + cardW - 8, cardY + 128, 1.0, 49 / 255, 50 / 255, 68 / 255, 0.8);
+    // [4] Close
+    ACanvas.DrawTextLeft(cardX + 14, cardY + 132, cardW - 28, 22, '×  Close Window', nil, 243 / 255, 139 / 255, 168 / 255);
+  end;
 end;
 
 function TWMSamaCompositingWM.ProcessEvent(const AEvent: Pxcb_generic_event_t): Boolean;
@@ -958,12 +1585,10 @@ var
   keyEv: Pxcb_key_press_event_t;
   motionEv: Pxcb_motion_notify_event_t;
   leaveEv: Pxcb_leave_notify_event_t;
-  cli, oldCli: TXCBWMClient;
+  cli, oldCli, menuCli: TXCBWMClient;
   localX, localY, bw, th, newBtn: Integer;
   oldWin: xcb_window_t;
-  btnIdx: Integer;
-  btnSize, btnY, bx0, bx1, bx2: Double;
-  titleX: Integer;
+  btnIdx, rx, ry, itemIdx: Integer;
 begin
   Result := False;
   if AEvent = nil then Exit;
@@ -1032,7 +1657,7 @@ begin
         begin
           localX := motionEv^.event_x;
           localY := motionEv^.event_y;
-          newBtn := GetButtonAt(localX, localY);
+          newBtn := GetButtonAt(localX, localY, cli.CurrentRect.Width);
 
           if (newBtn <> FHoveredButton) or (cli.FrameWindow <> FHoveredWindow) then
           begin
@@ -1072,22 +1697,73 @@ begin
 
     XCB_BUTTON_RELEASE:
     begin
+      btnEv := Pxcb_button_release_event_t(AEvent);
       if FPressedButton <> -1 then
       begin
+        btnIdx := FPressedButton;
         FPressedButton := -1;
-        if FHoveredWindow <> 0 then
+        cli := FindClient(btnEv^.event);
+        if cli <> nil then
+        begin
+          PaintClientFrame(cli);
+          localX := btnEv^.event_x;
+          localY := btnEv^.event_y;
+          if (btnIdx >= 0) and (btnIdx <= High(FButtonLayoutItems)) and
+             (FButtonLayoutItems[btnIdx].Kind = sbkMenu) and
+             (GetButtonAt(localX, localY, cli.CurrentRect.Width) = btnIdx) then
+          begin
+            TriggerWindowMenu(cli);
+          end;
+        end
+        else if FHoveredWindow <> 0 then
         begin
           oldCli := FindClient(FHoveredWindow);
           if oldCli <> nil then
             PaintClientFrame(oldCli);
-          RequestComposite();
         end;
+        RequestComposite();
       end;
     end;
 
     XCB_BUTTON_PRESS:
     begin
       btnEv := Pxcb_button_press_event_t(AEvent);
+
+      // Check if Window Menu HUD is active
+      if (FWindowMenuClient <> nil) and (FWindowMenuRect.Width > 0) then
+      begin
+        rx := btnEv^.root_x;
+        ry := btnEv^.root_y;
+        if (rx >= FWindowMenuRect.X) and (rx < FWindowMenuRect.X + FWindowMenuRect.Width) and
+           (ry >= FWindowMenuRect.Y) and (ry < FWindowMenuRect.Y + FWindowMenuRect.Height) then
+        begin
+          menuCli := FWindowMenuClient;
+          DismissWindowMenu();
+          if ry >= FWindowMenuRect.Y + 28 then
+          begin
+            itemIdx := (ry - (FWindowMenuRect.Y + 28)) div 24;
+            case itemIdx of
+              0: menuCli.Minimize();
+              1:
+              begin
+                if wsMaximizedHorz in menuCli.State then
+                  menuCli.Restore()
+                else
+                  menuCli.Maximize();
+              end;
+              2: ToggleKeepOnTop(menuCli);
+              3: ToggleShade(menuCli);
+              4: menuCli.Close();
+            end;
+          end;
+          Exit(True);
+        end
+        else
+        begin
+          DismissWindowMenu();
+        end;
+      end;
+
       cli := FindClient(btnEv^.event);
       if cli <> nil then
       begin
@@ -1116,20 +1792,26 @@ begin
             xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
 
           // A. Handle click on control dots
-          btnIdx := GetButtonAt(localX, localY);
+          btnIdx := GetButtonAt(localX, localY, cli.CurrentRect.Width);
           if (btnIdx >= 0) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             FPressedButton := btnIdx;
             PaintClientFrame(cli);
-            case btnIdx of
-              0: cli.Close();
-              1: cli.Minimize();
-              2:
-              begin
-                if wsMaximizedHorz in cli.State then
-                  cli.Restore()
-                else
-                  cli.Maximize();
+            if (btnIdx >= 0) and (btnIdx <= High(FButtonLayoutItems)) then
+            begin
+              case FButtonLayoutItems[btnIdx].Kind of
+                sbkClose: cli.Close();
+                sbkMinimize: cli.Minimize();
+                sbkMaximize:
+                begin
+                  if wsMaximizedHorz in cli.State then
+                    cli.Restore()
+                  else
+                    cli.Maximize();
+                end;
+                sbkShade: ToggleShade(cli);
+                sbkPin: ToggleKeepOnTop(cli);
+                sbkMenu: ; // Triggered on release for clean pointer grab
               end;
             end;
             Exit(True);
@@ -1142,9 +1824,8 @@ begin
             Exit(True);
           end;
 
-          // C. Handle Double-Click on titlebar to Maximize / Restore
-          GetWindowButtonMetrics(btnSize, btnY, bx0, bx1, bx2, titleX);
-          if (localY >= 0) and (localY < th) and (localX >= titleX - 10) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+          // C. Handle Double-Click or drag on draggable titlebar area
+          if (localY >= 0) and (localY < th) and IsTitlebarDraggable(localX, localY, cli.CurrentRect.Width) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
             begin
