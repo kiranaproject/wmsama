@@ -14,6 +14,7 @@
     <manualUnitPaths>true</manualUnitPaths>
     <unitPaths>
       <path>src/main/pascal</path>
+      <path>../floria-toolkit/src/main/pascal</path>
     </unitPaths>
   </build>
 
