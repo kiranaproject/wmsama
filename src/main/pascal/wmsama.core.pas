@@ -108,6 +108,10 @@ type
     procedure PaintAllFrames();
     procedure PaintClientFrame(const AClient: TXCBWMClient);
 
+    // Window Button Layout and Hit Detection
+    procedure GetWindowButtonMetrics(out ABtnSize, ABtnY, AX0, AX1, AX2: Double; out ATitleX: Integer);
+    function GetButtonAt(const AX, AY: Integer): Integer;
+
     // Interactive Dragging and Snapping
     procedure BeginDrag(const AClient: TXCBWMClient; const AMode: TXCBDragMode; const ARootX, ARootY: Integer); override;
     procedure UpdateDrag(const ARootX, ARootY: Integer); override;
@@ -154,7 +158,7 @@ begin
   inherited Create(AConn, AScreenNum);
 
   WMName := 'wmsama';
-  FTitlebarHeight := 28;
+  FTitlebarHeight := 34;
   metrics := TXCBFrameMetrics.Create(FTitlebarHeight, 0);
   FrameMetrics := metrics;
 
@@ -595,6 +599,44 @@ begin
   PaintClientFrame(AClient);
 end;
 
+procedure TWMSamaCompositingWM.GetWindowButtonMetrics(out ABtnSize, ABtnY, AX0, AX1, AX2: Double; out ATitleX: Integer);
+var
+  gap, mLeft: Double;
+begin
+  ABtnSize := Max(10.0, Round(FTitlebarHeight * 0.44));
+  gap := Max(5.0, Round(ABtnSize * 0.50));
+  mLeft := Max(8.0, Round(ABtnSize * 0.75));
+  ABtnY := (FTitlebarHeight - ABtnSize) * 0.5;
+
+  AX0 := mLeft;
+  AX1 := AX0 + ABtnSize + gap;
+  AX2 := AX1 + ABtnSize + gap;
+  ATitleX := Round(AX2 + ABtnSize + mLeft + 2.0);
+end;
+
+function TWMSamaCompositingWM.GetButtonAt(const AX, AY: Integer): Integer;
+var
+  bSize, bY, x0, x1, x2: Double;
+  titleX: Integer;
+  pad: Double;
+begin
+  Result := -1;
+  if (AY < 0) or (AY >= FTitlebarHeight) then Exit;
+
+  GetWindowButtonMetrics(bSize, bY, x0, x1, x2, titleX);
+  pad := 3.0;
+
+  if (AY >= bY - pad) and (AY <= bY + bSize + pad) then
+  begin
+    if (AX >= x0 - pad) and (AX <= x0 + bSize + pad) then
+      Result := 0
+    else if (AX >= x1 - pad) and (AX <= x1 + bSize + pad) then
+      Result := 1
+    else if (AX >= x2 - pad) and (AX <= x2 + bSize + pad) then
+      Result := 2;
+  end;
+end;
+
 procedure TWMSamaCompositingWM.PaintClientFrame(const AClient: TXCBWMClient);
 var
   w, h, th, bw: Integer;
@@ -608,7 +650,8 @@ var
   values: array[0..0] of Cardinal;
   compWin: TXCBCompositedWindow;
   s0, s1, s2, maxKind: Integer;
-  btnSize, btnY: Double;
+  btnSize, btnY, x0, x1, x2: Double;
+  titleX: Integer;
 begin
   if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) then Exit;
 
@@ -661,20 +704,19 @@ begin
       else
         maxKind := FT_WINDOW_BUTTON_MAXIMIZE;
 
-      btnSize := 13.0;
-      btnY := (th - btnSize) * 0.5;
+      GetWindowButtonMetrics(btnSize, btnY, x0, x1, x2, titleX);
 
-      FtDrawWindowButton(canvas, 8.0, btnY, btnSize, btnSize,
+      FtDrawWindowButton(canvas, x0, btnY, btnSize, btnSize,
                          FT_WINDOW_BUTTON_CLOSE, FWindowButtonStyle, s0,
                          FThemeDarkMode);
-      FtDrawWindowButton(canvas, 27.0, btnY, btnSize, btnSize,
+      FtDrawWindowButton(canvas, x1, btnY, btnSize, btnSize,
                          FT_WINDOW_BUTTON_MINIMIZE, FWindowButtonStyle, s1,
                          FThemeDarkMode);
-      FtDrawWindowButton(canvas, 46.0, btnY, btnSize, btnSize,
+      FtDrawWindowButton(canvas, x2, btnY, btnSize, btnSize,
                          maxKind, FWindowButtonStyle, s2,
                          FThemeDarkMode);
 
-      // 3. Window title text
+      // 3. Window title text (centered vertically with top and bottom margins)
       winTitle := AClient.Title;
       if winTitle = '' then
         winTitle := AClient.WindowClass;
@@ -682,9 +724,9 @@ begin
         winTitle := 'Window';
 
       if isActive then
-        canvas.DrawTextLeft(68, 0, Max(0, w - 76), th, winTitle, nil, 236 / 255, 239 / 255, 244 / 255)
+        canvas.DrawTextLeft(titleX, 0, Max(0, w - titleX - 8), th, winTitle, nil, 236 / 255, 239 / 255, 244 / 255)
       else
-        canvas.DrawTextLeft(68, 0, Max(0, w - 76), th, winTitle, nil, 127 / 255, 132 / 255, 156 / 255);
+        canvas.DrawTextLeft(titleX, 0, Max(0, w - titleX - 8), th, winTitle, nil, 127 / 255, 132 / 255, 156 / 255);
     finally
       canvas.Free();
     end;
@@ -726,17 +768,6 @@ end;
 
 procedure TWMSamaCompositingWM.BeginDrag(const AClient: TXCBWMClient; const AMode: TXCBDragMode; const ARootX, ARootY: Integer);
 begin
-  if (AClient <> nil) and (AMode = dmMove) then
-  begin
-    // Un-maximize if moving from maximized state
-    if wsMaximizedHorz in AClient.State then
-    begin
-      AClient.Restore();
-      // Center restored window horizontally under cursor
-      AClient.Move(Max(0, ARootX - (AClient.CurrentRect.Width div 2)), Max(0, ARootY - 12));
-    end;
-  end;
-
   inherited BeginDrag(AClient, AMode, ARootX, ARootY);
 end;
 
@@ -744,6 +775,12 @@ procedure TWMSamaCompositingWM.UpdateDrag(const ARootX, ARootY: Integer);
 var
   sw, sh, threshold: Integer;
 begin
+  if (DragClient <> nil) and (DragMode = dmMove) and (wsMaximizedHorz in DragClient.State) then
+  begin
+    DragClient.Restore();
+    DragClient.Move(Max(0, ARootX - (DragClient.CurrentRect.Width div 2)), Max(0, ARootY - (FTitlebarHeight div 2)));
+  end;
+
   inherited UpdateDrag(ARootX, ARootY);
 
   if (DragClient = nil) or (DragMode <> dmMove) or (FCompositor = nil) then Exit;
@@ -924,6 +961,9 @@ var
   cli, oldCli: TXCBWMClient;
   localX, localY, bw, th, newBtn: Integer;
   oldWin: xcb_window_t;
+  btnIdx: Integer;
+  btnSize, btnY, bx0, bx1, bx2: Double;
+  titleX: Integer;
 begin
   Result := False;
   if AEvent = nil then Exit;
@@ -992,14 +1032,7 @@ begin
         begin
           localX := motionEv^.event_x;
           localY := motionEv^.event_y;
-          th := FTitlebarHeight;
-          newBtn := -1;
-          if (localY >= 3) and (localY <= th - 3) then
-          begin
-            if (localX >= 6) and (localX <= 22) then newBtn := 0
-            else if (localX >= 25) and (localX <= 41) then newBtn := 1
-            else if (localX >= 44) and (localX <= 60) then newBtn := 2;
-          end;
+          newBtn := GetButtonAt(localX, localY);
 
           if (newBtn <> FHoveredButton) or (cli.FrameWindow <> FHoveredWindow) then
           begin
@@ -1083,37 +1116,23 @@ begin
             xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
 
           // A. Handle click on control dots
-          if (localY >= 3) and (localY <= th - 3) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+          btnIdx := GetButtonAt(localX, localY);
+          if (btnIdx >= 0) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
-            // Close button: X in [6..22]
-            if (localX >= 6) and (localX <= 22) then
-            begin
-              FPressedButton := 0;
-              PaintClientFrame(cli);
-              cli.Close();
-              Exit(True);
+            FPressedButton := btnIdx;
+            PaintClientFrame(cli);
+            case btnIdx of
+              0: cli.Close();
+              1: cli.Minimize();
+              2:
+              begin
+                if wsMaximizedHorz in cli.State then
+                  cli.Restore()
+                else
+                  cli.Maximize();
+              end;
             end;
-
-            // Minimize button: X in [25..41]
-            if (localX >= 25) and (localX <= 41) then
-            begin
-              FPressedButton := 1;
-              PaintClientFrame(cli);
-              cli.Minimize();
-              Exit(True);
-            end;
-
-            // Maximize button: X in [44..60]
-            if (localX >= 44) and (localX <= 60) then
-            begin
-              FPressedButton := 2;
-              PaintClientFrame(cli);
-              if wsMaximizedHorz in cli.State then
-                cli.Restore()
-              else
-                cli.Maximize();
-              Exit(True);
-            end;
+            Exit(True);
           end;
 
           // B. Right-click on titlebar to resize window
@@ -1124,7 +1143,8 @@ begin
           end;
 
           // C. Handle Double-Click on titlebar to Maximize / Restore
-          if (localY >= 0) and (localY < th) and (localX >= 60) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+          GetWindowButtonMetrics(btnSize, btnY, bx0, bx1, bx2, titleX);
+          if (localY >= 0) and (localY < th) and (localX >= titleX - 10) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
             begin

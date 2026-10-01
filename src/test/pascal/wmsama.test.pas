@@ -38,7 +38,7 @@ begin
   try
     AssertNotNull('WM instance created', wm);
     AssertEquals('WM name is wmsama', 'wmsama', wm.WMName);
-    AssertEquals('Default titlebar height', 28, wm.TitlebarHeight);
+    AssertEquals('Default titlebar height', 34, wm.TitlebarHeight);
     AssertEquals('Default top corner radius', 12, wm.CornerRadius);
     AssertEquals('Default bottom corner radius', 12, wm.BottomCornerRadius);
     AssertTrue('Compositor enabled by default', wm.CompositorEnabled);
@@ -186,22 +186,39 @@ procedure TWMSamaTest.TestFrameMetricsAndTitlebar();
 var
   wm: TWMSamaCompositingWM;
   metrics: TXCBFrameMetrics;
+  btnSize, btnY, x0, x1, x2: Double;
+  titleX: Integer;
 begin
   wm := TWMSamaCompositingWM.Create(nil, 0);
   try
     metrics := wm.FrameMetrics;
-    AssertEquals('FrameMetrics titlebar height', 28, metrics.TitlebarHeight);
-    AssertEquals('FrameMetrics top inset matches titlebar', 28, metrics.Insets.Top);
+    AssertEquals('FrameMetrics titlebar height', 34, metrics.TitlebarHeight);
+    AssertEquals('FrameMetrics top inset matches titlebar', 34, metrics.Insets.Top);
     AssertEquals('FrameMetrics left inset is 0', 0, metrics.Insets.Left);
     AssertEquals('FrameMetrics right inset is 0', 0, metrics.Insets.Right);
     AssertEquals('FrameMetrics bottom inset is 0', 0, metrics.Insets.Bottom);
 
-    // Update titlebar height
-    wm.TitlebarHeight := 32;
-    AssertEquals('Updated titlebar height', 32, wm.TitlebarHeight);
+    // Test automatic button scaling and hit testing with default 34px titlebar
+    wm.GetWindowButtonMetrics(btnSize, btnY, x0, x1, x2, titleX);
+    AssertTrue('Button size scaled for 34px titlebar', Abs(btnSize - 15.0) < 0.01);
+    AssertTrue('Button Y centered in 34px titlebar', Abs(btnY - 9.5) < 0.01);
+    AssertEquals('Hit close button', 0, wm.GetButtonAt(Round(x0), Round(btnY + 2)));
+    AssertEquals('Hit minimize button', 1, wm.GetButtonAt(Round(x1), Round(btnY + 2)));
+    AssertEquals('Hit maximize button', 2, wm.GetButtonAt(Round(x2), Round(btnY + 2)));
+    AssertEquals('Hit title text is not button', -1, wm.GetButtonAt(titleX, 10));
+
+    // Update titlebar height to 40
+    wm.TitlebarHeight := 40;
+    AssertEquals('Updated titlebar height', 40, wm.TitlebarHeight);
     metrics := wm.FrameMetrics;
-    AssertEquals('FrameMetrics titlebar height updated', 32, metrics.TitlebarHeight);
-    AssertEquals('FrameMetrics top inset updated', 32, metrics.Insets.Top);
+    AssertEquals('FrameMetrics titlebar height updated', 40, metrics.TitlebarHeight);
+    AssertEquals('FrameMetrics top inset updated', 40, metrics.Insets.Top);
+
+    // Verify automatic button scaling with 40px titlebar
+    wm.GetWindowButtonMetrics(btnSize, btnY, x0, x1, x2, titleX);
+    AssertTrue('Button size scaled for 40px titlebar', Abs(btnSize - 18.0) < 0.01);
+    AssertTrue('Button Y centered in 40px titlebar', Abs(btnY - 11.0) < 0.01);
+    AssertEquals('Hit close button in 40px', 0, wm.GetButtonAt(Round(x0), Round(btnY + 2)));
   finally
     wm.Free();
   end;
