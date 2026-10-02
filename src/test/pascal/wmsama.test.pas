@@ -545,22 +545,28 @@ begin
     cli.CurrentRect := TXCBRect.Create(100, 100, 400, 300);
     cli.RestoredRect := cli.CurrentRect;
 
-    // 1. Floating Window: Corner hit tests
-    AssertEquals('Top-Left corner', Integer(dmResizeTopLeft), Integer(wm.GetResizeModeForPoint(cli, 102, 102)));
-    AssertEquals('Top-Right corner', Integer(dmResizeTopRight), Integer(wm.GetResizeModeForPoint(cli, 498, 102)));
-    AssertEquals('Bottom-Left corner', Integer(dmResizeBottomLeft), Integer(wm.GetResizeModeForPoint(cli, 105, 395)));
-    AssertEquals('Bottom-Right corner', Integer(dmResizeBottomRight), Integer(wm.GetResizeModeForPoint(cli, 495, 395)));
+    // 1. Floating Window: Outer Corner hit tests (outside window boundary)
+    AssertEquals('Top-Left corner (outer)', Integer(dmResizeTopLeft), Integer(wm.GetResizeModeForPoint(cli, 96, 96)));
+    AssertEquals('Top-Right corner (outer)', Integer(dmResizeTopRight), Integer(wm.GetResizeModeForPoint(cli, 504, 96)));
+    AssertEquals('Bottom-Left corner (outer)', Integer(dmResizeBottomLeft), Integer(wm.GetResizeModeForPoint(cli, 96, 404)));
+    AssertEquals('Bottom-Right corner (outer)', Integer(dmResizeBottomRight), Integer(wm.GetResizeModeForPoint(cli, 504, 404)));
 
-    // 2. Floating Window: Edge hit tests
-    AssertEquals('Top edge (height only)', Integer(dmResizeTop), Integer(wm.GetResizeModeForPoint(cli, 250, 102)));
-    AssertEquals('Bottom edge (height only)', Integer(dmResizeBottom), Integer(wm.GetResizeModeForPoint(cli, 250, 396)));
-    AssertEquals('Left edge (width only)', Integer(dmResizeLeft), Integer(wm.GetResizeModeForPoint(cli, 102, 200)));
-    AssertEquals('Right edge (width only)', Integer(dmResizeRight), Integer(wm.GetResizeModeForPoint(cli, 496, 200)));
+    // 2. Floating Window: Outer Edge hit tests (outside window boundary)
+    AssertEquals('Top edge (height only, outer)', Integer(dmResizeTop), Integer(wm.GetResizeModeForPoint(cli, 250, 96)));
+    AssertEquals('Bottom edge (height only, outer)', Integer(dmResizeBottom), Integer(wm.GetResizeModeForPoint(cli, 250, 404)));
+    AssertEquals('Left edge (width only, outer)', Integer(dmResizeLeft), Integer(wm.GetResizeModeForPoint(cli, 96, 200)));
+    AssertEquals('Right edge (width only, outer)', Integer(dmResizeRight), Integer(wm.GetResizeModeForPoint(cli, 504, 200)));
 
-    // 3. Floating Window: Draggable / Content interiors return dmNone
+    // 3. Floating Window: Client application interior and edges MUST return dmNone
+    // This ensures selecting text inside xterm from column 0 or any edge never triggers resize!
+    AssertEquals('Client app left edge (text selection protected)', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 102, 200)));
+    AssertEquals('Client app right edge (text selection protected)', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 496, 200)));
+    AssertEquals('Client app bottom edge', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 396)));
+    AssertEquals('Client app bottom-left', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 105, 395)));
+    AssertEquals('Client app bottom-right', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 495, 395)));
     AssertEquals('Titlebar center draggable', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 120)));
     AssertEquals('Client app interior', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 250)));
-    AssertEquals('Outside window', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 50, 50)));
+    AssertEquals('Far outside window', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 50, 50)));
 
     // 4. Maximized Window: Resizing completely disabled
     cli.Maximize();
@@ -572,7 +578,7 @@ begin
     AssertEquals('Maximized corners return dmNone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 2, 2)));
     cli.Restore();
 
-    // 5. Tiled Right Window: Only left divider edge allowed to resize width
+    // 5. Tiled Right Window: Only left divider outer margin allowed to resize width
     cli.TileRight();
     AssertTrue('Window is tiled right', wsTiledRight in cli.State);
     origX := cli.CurrentRect.X;
@@ -581,14 +587,15 @@ begin
     origH := cli.CurrentRect.Height;
 
     // Hit-testing tiled right
-    AssertEquals('Tiled Right inner left edge allows dmResizeLeft', Integer(dmResizeLeft), Integer(wm.GetResizeModeForPoint(cli, origX + 2, 300)));
+    AssertEquals('Tiled Right outer left divider allows dmResizeLeft', Integer(dmResizeLeft), Integer(wm.GetResizeModeForPoint(cli, origX - 4, 300)));
+    AssertEquals('Tiled Right client interior protects text selection', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, origX + 2, 300)));
     AssertEquals('Tiled Right top edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, origX + 100, 2)));
     AssertEquals('Tiled Right bottom edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, origX + 100, origH - 2)));
     AssertEquals('Tiled Right outer right edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, origX + origW - 2, 300)));
 
     // Interactive drag update on Tiled Right
-    wm.BeginDrag(cli, dmResizeLeft, origX, 300);
-    wm.UpdateDrag(origX - 70, 360); // Drag divider 70px left (expanding width); DeltaY must be locked!
+    wm.BeginDrag(cli, dmResizeLeft, origX - 4, 300);
+    wm.UpdateDrag(origX - 74, 360); // Drag divider 70px left (expanding width); DeltaY must be locked!
     AssertEquals('Tiled Right width expanded by 70', origW + 70, cli.CurrentRect.Width);
     AssertEquals('Tiled Right X moved left by 70', origX - 70, cli.CurrentRect.X);
     AssertEquals('Tiled Right height strictly locked to full height', origH, cli.CurrentRect.Height);
@@ -600,7 +607,7 @@ begin
     AssertEquals('Floating RestoredRect Width intact', 400, cli.RestoredRect.Width);
     AssertEquals('Floating RestoredRect Height intact', 300, cli.RestoredRect.Height);
 
-    // 7. Tiled Left Window: Only right divider edge allowed to resize width
+    // 7. Tiled Left Window: Only right divider outer margin allowed to resize width
     cli.TileLeft();
     AssertTrue('Window is tiled left', wsTiledLeft in cli.State);
     origX := cli.CurrentRect.X;
@@ -609,14 +616,15 @@ begin
     origH := cli.CurrentRect.Height;
 
     // Hit-testing tiled left
-    AssertEquals('Tiled Left inner right edge allows dmResizeRight', Integer(dmResizeRight), Integer(wm.GetResizeModeForPoint(cli, origW - 2, 300)));
+    AssertEquals('Tiled Left outer right divider allows dmResizeRight', Integer(dmResizeRight), Integer(wm.GetResizeModeForPoint(cli, origW + 4, 300)));
+    AssertEquals('Tiled Left client interior protects text selection', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, origW - 2, 300)));
     AssertEquals('Tiled Left outer left edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 2, 300)));
     AssertEquals('Tiled Left top edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 100, 2)));
     AssertEquals('Tiled Left bottom edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 100, origH - 2)));
 
     // Interactive drag update on Tiled Left
-    wm.BeginDrag(cli, dmResizeRight, origW, 300);
-    wm.UpdateDrag(origW + 90, 380); // Drag divider 90px right (expanding width); DeltaY must be locked!
+    wm.BeginDrag(cli, dmResizeRight, origW + 4, 300);
+    wm.UpdateDrag(origW + 94, 380); // Drag divider 90px right (expanding width); DeltaY must be locked!
     AssertEquals('Tiled Left width expanded by 90', origW + 90, cli.CurrentRect.Width);
     AssertEquals('Tiled Left X strictly locked to 0', 0, cli.CurrentRect.X);
     AssertEquals('Tiled Left height strictly locked to full height', origH, cli.CurrentRect.Height);

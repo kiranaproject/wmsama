@@ -1100,7 +1100,11 @@ end;
 
 function TWMSamaCompositingWM.GetResizeModeForPoint(const AClient: TXCBWMClient; const ARootX, ARootY: Integer): TXCBDragMode;
 var
-  rx, ry, fw, fh: Integer;
+  wx, wy, ww, wh: Integer;
+  margin, cornerSize: Integer;
+  inOuterX, inOuterY: Boolean;
+  isLeft, isRight, isTop, isBottom: Boolean;
+  isCornerLeft, isCornerRight, isCornerTop, isCornerBottom: Boolean;
 begin
   Result := dmNone;
   if AClient = nil then Exit;
@@ -1110,51 +1114,71 @@ begin
      (wsFullscreen in AClient.State) then
     Exit;
 
-  rx := ARootX - AClient.CurrentRect.X;
-  ry := ARootY - AClient.CurrentRect.Y;
-  fw := AClient.CurrentRect.Width;
-  fh := AClient.CurrentRect.Height;
+  wx := AClient.CurrentRect.X;
+  wy := AClient.CurrentRect.Y;
+  ww := AClient.CurrentRect.Width;
+  wh := AClient.CurrentRect.Height;
 
-  if (rx < 0) or (ry < 0) or (rx >= fw) or (ry >= fh) then Exit;
+  margin := 8;
+  cornerSize := 16;
 
-  // Tiled Right window: pinned to right screen edge; only allow resizing width on its left divider edge
-  if (wsTiledRight in AClient.State) then
+  // Tiled Right window: pinned to right screen edge; only allow resizing width on its left divider outer margin
+  if wsTiledRight in AClient.State then
   begin
-    if rx < 8 then
-      Result := dmResizeLeft;
+    // Left divider: outer margin [wx - margin .. wx)
+    if (ARootX >= wx - margin) and (ARootX < wx) and (ARootY >= wy) and (ARootY < wy + wh) then
+      Exit(dmResizeLeft);
     Exit;
   end;
 
-  // Tiled Left window: pinned to left screen edge; only allow resizing width on its right divider edge
-  if (wsTiledLeft in AClient.State) then
+  // Tiled Left window: pinned to left screen edge; only allow resizing width on its right divider outer margin
+  if wsTiledLeft in AClient.State then
   begin
-    if rx >= fw - 8 then
-      Result := dmResizeRight;
+    // Right divider: outer margin [wx + ww .. wx + ww + margin)
+    if (ARootX >= wx + ww) and (ARootX < wx + ww + margin) and (ARootY >= wy) and (ARootY < wy + wh) then
+      Exit(dmResizeRight);
     Exit;
   end;
 
-  // Floating window: 8-directional resizing
-  // Corner detection:
-  // Top corners (10px x 10px to avoid overlapping titlebar buttons)
-  if (rx < 10) and (ry < 10) then
+  // Floating Window:
+  // Clicks INSIDE the window (titlebar or client content) NEVER trigger resize!
+  // Titlebar is for dragging/moving (dmMove) and controls; client is for app interaction (text selection).
+  if (ARootX >= wx) and (ARootX < wx + ww) and (ARootY >= wy) and (ARootY < wy + wh) then
+    Exit(dmNone);
+
+  // Check if point is within outer margin surrounding the window
+  inOuterX := (ARootX >= wx - margin) and (ARootX < wx + ww + margin);
+  inOuterY := (ARootY >= wy - margin) and (ARootY < wy + wh + margin);
+  if not (inOuterX and inOuterY) then Exit(dmNone);
+
+  isLeft   := (ARootX < wx);
+  isRight  := (ARootX >= wx + ww);
+  isTop    := (ARootY < wy);
+  isBottom := (ARootY >= wy + wh);
+
+  isCornerLeft   := (ARootX < wx + cornerSize);
+  isCornerRight  := (ARootX >= wx + ww - cornerSize);
+  isCornerTop    := (ARootY < wy + cornerSize);
+  isCornerBottom := (ARootY >= wy + wh - cornerSize);
+
+  // Outer Corners (8-directional)
+  if (isLeft or isTop) and isCornerLeft and isCornerTop then
     Exit(dmResizeTopLeft);
-  if (rx >= fw - 10) and (ry < 10) then
+  if (isRight or isTop) and isCornerRight and isCornerTop then
     Exit(dmResizeTopRight);
-
-  // Bottom corners (16px x 16px)
-  if (rx < 16) and (ry >= fh - 16) then
+  if (isLeft or isBottom) and isCornerLeft and isCornerBottom then
     Exit(dmResizeBottomLeft);
-  if (rx >= fw - 16) and (ry >= fh - 16) then
+  if (isRight or isBottom) and isCornerRight and isCornerBottom then
     Exit(dmResizeBottomRight);
 
-  // Edges
-  if ry < 6 then
+  // Outer Edges
+  if isTop then
     Exit(dmResizeTop);
-  if ry >= fh - 8 then
+  if isBottom then
     Exit(dmResizeBottom);
-  if rx < 8 then
+  if isLeft then
     Exit(dmResizeLeft);
-  if rx >= fw - 8 then
+  if isRight then
     Exit(dmResizeRight);
 end;
 
@@ -1740,10 +1764,10 @@ var
   geomReply: Pxcb_get_geometry_reply_t;
   geomRect: TXCBRect;
   compWin: TXCBCompositedWindow;
-  cli, oldCli, menuCli: TXCBWMClient;
+  cli, oldCli, menuCli, targetCli, candidateCli: TXCBWMClient;
   localX, localY, bw, th, newBtn: Integer;
   oldWin: xcb_window_t;
-  btnIdx, rx, ry, itemIdx: Integer;
+  btnIdx, rx, ry, itemIdx, i: Integer;
   resizeMode: TXCBDragMode;
 begin
   Result := False;
@@ -1931,25 +1955,66 @@ begin
         end;
       end;
 
+      // Check if clicked on outer resize margin on root window
+      if (Screen <> nil) and (btnEv^.event = Screen^.root) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+      begin
+        targetCli := nil;
+        resizeMode := dmNone;
+        if (ActiveClient <> nil) and not (wsMinimized in ActiveClient.State) then
+        begin
+          resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
+          if resizeMode <> dmNone then
+            targetCli := ActiveClient;
+        end;
+
+        if targetCli = nil then
+        begin
+          for i := Clients.Count - 1 downto 0 do
+          begin
+            candidateCli := TXCBWMClient(Clients[i]);
+            if candidateCli.IsReparented and not (wsMinimized in candidateCli.State) then
+            begin
+              resizeMode := GetResizeModeForPoint(candidateCli, btnEv^.root_x, btnEv^.root_y);
+              if resizeMode <> dmNone then
+              begin
+                targetCli := candidateCli;
+                Break;
+              end;
+            end;
+          end;
+        end;
+
+        if (targetCli <> nil) and (resizeMode <> dmNone) then
+        begin
+          targetCli.Activate();
+          BeginDrag(targetCli, resizeMode, btnEv^.root_x, btnEv^.root_y);
+          Exit(True);
+        end;
+      end;
+
       cli := FindClient(btnEv^.event);
       if cli <> nil then
       begin
-        // 1. Direct clicks on client application window (perimeter resize or pass-through focus)
+        // 1. Direct clicks on client application window (pass-through / click-to-focus)
         if btnEv^.event = cli.ClientWindow then
         begin
-          cli.Activate();
-          if btnEv^.detail = XCB_BUTTON_INDEX_1 then
+          // Check if this click falls in the outer resize zone of an overlapping window in front (e.g. ActiveClient)
+          if (ActiveClient <> nil) and (ActiveClient <> cli) and
+             not (wsMinimized in ActiveClient.State) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
-            resizeMode := GetResizeModeForPoint(cli, btnEv^.root_x, btnEv^.root_y);
+            resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
             if resizeMode <> dmNone then
             begin
               if Connection <> nil then
                 xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
-              BeginDrag(cli, resizeMode, btnEv^.root_x, btnEv^.root_y);
+              BeginDrag(ActiveClient, resizeMode, btnEv^.root_x, btnEv^.root_y);
               Exit(True);
             end;
           end;
 
+          // Pure client window click (inside xterm or app): activate client and replay pointer immediately!
+          // (No resize inside ClientWindow, guaranteeing that text selection in xterm never accidentally triggers resize!)
+          cli.Activate();
           if Connection <> nil then
           begin
             xcb_allow_events(Connection, XCB_ALLOW_REPLAY_POINTER, btnEv^.time);
@@ -2003,13 +2068,14 @@ begin
             Exit(True);
           end;
 
-          // C. Handle perimeter resizing on FrameWindow (top edge, top corners, side edges)
-          if btnEv^.detail = XCB_BUTTON_INDEX_1 then
+          // C. Handle perimeter resizing if cursor is in outer resize zone of an active window on top
+          if (ActiveClient <> nil) and (ActiveClient <> cli) and
+             not (wsMinimized in ActiveClient.State) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
-            resizeMode := GetResizeModeForPoint(cli, btnEv^.root_x, btnEv^.root_y);
+            resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
             if resizeMode <> dmNone then
             begin
-              BeginDrag(cli, resizeMode, btnEv^.root_x, btnEv^.root_y);
+              BeginDrag(ActiveClient, resizeMode, btnEv^.root_x, btnEv^.root_y);
               Exit(True);
             end;
           end;
