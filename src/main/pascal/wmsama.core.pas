@@ -778,7 +778,8 @@ begin
     compWin.BlurRadius := FBlurRadius;
 
     // Apply 4-corner rounded radii (both top and bottom)
-    if (wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) then
+    if (wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) or
+       (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
     begin
       compWin.CornerRadius := 0;
       compWin.BottomCornerRadius := 0;
@@ -856,7 +857,8 @@ begin
       else
         compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FShadowRadius, FShadowOffsetY, FShadowOpacity);
 
-      if (wsFullscreen in cli.State) or (wsMaximizedHorz in cli.State) then
+      if (wsFullscreen in cli.State) or (wsMaximizedHorz in cli.State) or
+         (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
       begin
         compWin.CornerRadius := 0;
         compWin.BottomCornerRadius := 0;
@@ -916,7 +918,8 @@ begin
       compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
                              AClient.CurrentRect.Width, AClient.CurrentRect.Height);
 
-    if (wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) then
+    if (wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) or
+       (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
     begin
       compWin.CornerRadius := 0;
       compWin.BottomCornerRadius := 0;
@@ -1368,7 +1371,7 @@ begin
           sbkMinimize: kindVal := FT_WINDOW_BUTTON_MINIMIZE;
           sbkMaximize:
           begin
-            if wsMaximizedHorz in AClient.State then
+            if (wsMaximizedHorz in AClient.State) or (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
               kindVal := FT_WINDOW_BUTTON_RESTORE
             else
               kindVal := FT_WINDOW_BUTTON_MAXIMIZE;
@@ -1440,11 +1443,18 @@ end;
 procedure TWMSamaCompositingWM.UpdateDrag(const ARootX, ARootY: Integer);
 var
   sw, sh, threshold: Integer;
+  newX, newY: Integer;
 begin
-  if (DragClient <> nil) and (DragMode = dmMove) and (wsMaximizedHorz in DragClient.State) then
+  if (DragClient <> nil) and (DragMode = dmMove) and
+     ((wsMaximizedHorz in DragClient.State) or (wsTiledLeft in DragClient.State) or (wsTiledRight in DragClient.State)) then
   begin
     DragClient.Restore();
-    DragClient.Move(Max(0, ARootX - (DragClient.CurrentRect.Width div 2)), Max(0, ARootY - (FTitlebarHeight div 2)));
+    // Center title bar horizontally under cursor
+    newX := ARootX - (DragClient.CurrentRect.Width div 2);
+    // Position cursor in the middle of title bar vertically (clamp to top of screen)
+    newY := Max(0, ARootY - (FTitlebarHeight div 2));
+    DragClient.Move(newX, newY);
+    UpdateDragOrigin(ARootX, ARootY, TXCBRect.Create(newX, newY, DragClient.CurrentRect.Width, DragClient.CurrentRect.Height));
   end;
 
   inherited UpdateDrag(ARootX, ARootY);
@@ -1489,7 +1499,6 @@ procedure TWMSamaCompositingWM.EndDrag();
 var
   cli: TXCBWMClient;
   snap: TWMSnapTarget;
-  sw, sh: Integer;
 begin
   cli := DragClient;
   snap := FActiveSnap;
@@ -1501,16 +1510,13 @@ begin
 
   if (cli <> nil) and (snap <> snapNone) and (FCompositor <> nil) then
   begin
-    sw := FCompositor.ScreenWidth;
-    sh := FCompositor.ScreenHeight;
-
     case snap of
       snapMaximize:
         cli.Maximize();
       snapLeftHalf:
-        cli.SetGeometry(0, 0, sw div 2, sh);
+        cli.TileLeft();
       snapRightHalf:
-        cli.SetGeometry(sw div 2, 0, sw - (sw div 2), sh);
+        cli.TileRight();
     end;
   end;
 
@@ -1636,7 +1642,7 @@ begin
     // [0] Minimize
     ACanvas.DrawTextLeft(cardX + 14, cardY + 32, cardW - 28, 22, '—  Minimize', nil, 236 / 255, 239 / 255, 244 / 255);
     // [1] Maximize / Restore
-    if wsMaximizedHorz in FWindowMenuClient.State then
+    if (wsMaximizedHorz in FWindowMenuClient.State) or (wsTiledLeft in FWindowMenuClient.State) or (wsTiledRight in FWindowMenuClient.State) then
       ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤡  Restore', nil, 236 / 255, 239 / 255, 244 / 255)
     else
       ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤢  Maximize', nil, 236 / 255, 239 / 255, 244 / 255);
@@ -1845,7 +1851,7 @@ begin
               0: menuCli.Minimize();
               1:
               begin
-                if wsMaximizedHorz in menuCli.State then
+                if (wsMaximizedHorz in menuCli.State) or (wsTiledLeft in menuCli.State) or (wsTiledRight in menuCli.State) then
                   menuCli.Restore()
                 else
                   menuCli.Maximize();
@@ -1903,7 +1909,7 @@ begin
                 sbkMinimize: cli.Minimize();
                 sbkMaximize:
                 begin
-                  if wsMaximizedHorz in cli.State then
+                  if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
                     cli.Restore()
                   else
                     cli.Maximize();
@@ -1928,7 +1934,7 @@ begin
           begin
             if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
             begin
-              if wsMaximizedHorz in cli.State then
+              if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
                 cli.Restore()
               else
                 cli.Maximize();

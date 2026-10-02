@@ -263,6 +263,25 @@ begin
     wm.EndDrag();
     AssertEquals('Client snapped to right half', wm.Compositor.ScreenWidth - (wm.Compositor.ScreenWidth div 2), cli.CurrentRect.Width);
     AssertEquals('Client X is right half start', wm.Compositor.ScreenWidth div 2, cli.CurrentRect.X);
+
+    // 4. Test dragging from right half restores pre-tiled size and centers under cursor
+    wm.BeginDrag(cli, dmMove, wm.Compositor.ScreenWidth - 100, 20);
+    wm.UpdateDrag(500, 200); // Drag to middle of screen
+    AssertEquals('Client restored to pre-tiled width 800', 800, cli.CurrentRect.Width);
+    AssertEquals('Client restored to pre-tiled height 600', 600, cli.CurrentRect.Height);
+    AssertEquals('Client centered under cursor X', 500 - (800 div 2), cli.CurrentRect.X);
+    wm.EndDrag();
+
+    // 5. Test dragging from maximized restores pre-tiled size and centers under cursor
+    cli.Maximize();
+    AssertTrue('Client maximized', wsMaximizedHorz in cli.State);
+    wm.BeginDrag(cli, dmMove, 700, 10);
+    wm.UpdateDrag(600, 150);
+    AssertFalse('Client unmaximized', wsMaximizedHorz in cli.State);
+    AssertEquals('Client restored to pre-tiled width 800', 800, cli.CurrentRect.Width);
+    AssertEquals('Client restored to pre-tiled height 600', 600, cli.CurrentRect.Height);
+    AssertEquals('Client centered under cursor X (600 - 400)', 200, cli.CurrentRect.X);
+    wm.EndDrag();
   finally
     wm.Free();
   end;
