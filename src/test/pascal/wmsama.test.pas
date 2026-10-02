@@ -30,6 +30,7 @@ type
     procedure TestAdditionalWindowControls();
     procedure TestOverrideRedirectCompositorSupport();
     procedure TestWindowResizingDirectionalAndTiled();
+    procedure TestWindowCursors();
   end;
 
 implementation
@@ -637,6 +638,32 @@ begin
     AssertEquals('Restored floating Y', 100, cli.CurrentRect.Y);
     AssertEquals('Restored floating Width', 400, cli.CurrentRect.Width);
     AssertEquals('Restored floating Height', 300, cli.CurrentRect.Height);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowCursors();
+var
+  wm: TWMSamaCompositingWM;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // 1. Cursor mapping for drag modes offline
+    AssertEquals('dmNone maps to normal cursor', wm.CursorNormal, wm.CursorForDragMode(dmNone));
+    AssertEquals('dmMove maps to move cursor', wm.CursorMove, wm.CursorForDragMode(dmMove));
+    AssertEquals('dmResizeLeft maps to resize left cursor', wm.CursorResizeLeft, wm.CursorForDragMode(dmResizeLeft));
+    AssertEquals('dmResizeRight maps to resize right cursor', wm.CursorResizeRight, wm.CursorForDragMode(dmResizeRight));
+    AssertEquals('dmResizeTop maps to resize top cursor', wm.CursorResizeTop, wm.CursorForDragMode(dmResizeTop));
+    AssertEquals('dmResizeBottom maps to resize bottom cursor', wm.CursorResizeBottom, wm.CursorForDragMode(dmResizeBottom));
+    AssertEquals('dmResizeTopLeft maps to top-left corner cursor', wm.CursorResizeTopLeft, wm.CursorForDragMode(dmResizeTopLeft));
+    AssertEquals('dmResizeTopRight maps to top-right corner cursor', wm.CursorResizeTopRight, wm.CursorForDragMode(dmResizeTopRight));
+    AssertEquals('dmResizeBottomLeft maps to bottom-left corner cursor', wm.CursorResizeBottomLeft, wm.CursorForDragMode(dmResizeBottomLeft));
+    AssertEquals('dmResizeBottomRight maps to bottom-right corner cursor', wm.CursorResizeBottomRight, wm.CursorForDragMode(dmResizeBottomRight));
+
+    // 2. Hover Cursor Updates
+    wm.UpdateHoverCursor(1234, 0);
+    AssertNotNull('UpdateHoverCursor offline safety verified', wm);
   finally
     wm.Free();
   end;

@@ -179,6 +179,7 @@ type
     procedure BeginDrag(const AClient: TXCBWMClient; const AMode: TXCBDragMode; const ARootX, ARootY: Integer); override;
     procedure UpdateDrag(const ARootX, ARootY: Integer); override;
     procedure EndDrag(); override;
+    procedure UpdateHoverCursor(const ACursor: xcb_cursor_t; const AEventWindow: xcb_window_t);
 
     // Alt+Tab HUD controls
     procedure TriggerAltTabForward();
@@ -1605,7 +1606,39 @@ begin
     end;
   end;
 
+  if (Screen <> nil) and (CursorNormal <> 0) then
+    UpdateHoverCursor(CursorNormal, Screen^.root);
+
   RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.UpdateHoverCursor(const ACursor: xcb_cursor_t; const AEventWindow: xcb_window_t);
+var
+  targetWin: xcb_window_t;
+begin
+  if (Connection = nil) or (ACursor = 0) then Exit;
+
+  targetWin := AEventWindow;
+  if (targetWin = 0) and (Screen <> nil) then
+    targetWin := Screen^.root;
+
+  if (Screen <> nil) and (targetWin = Screen^.root) then
+  begin
+    if CurrentRootCursor <> ACursor then
+    begin
+      SetWindowCursor(Screen^.root, ACursor);
+      CurrentRootCursor := ACursor;
+    end;
+  end
+  else
+  begin
+    SetWindowCursor(targetWin, ACursor);
+    if (Screen <> nil) and (CurrentRootCursor <> CursorNormal) then
+    begin
+      SetWindowCursor(Screen^.root, CursorNormal);
+      CurrentRootCursor := CursorNormal;
+    end;
+  end;
 end;
 
 procedure TWMSamaCompositingWM.TriggerAltTabForward();
@@ -1868,12 +1901,48 @@ begin
             PaintClientFrame(oldCli);
           RequestComposite();
         end;
+
+        // Cursor hover detection on draggable resize margins
+        targetCli := nil;
+        resizeMode := dmNone;
+        if (ActiveClient <> nil) and not (wsMinimized in ActiveClient.State) then
+        begin
+          resizeMode := GetResizeModeForPoint(ActiveClient, motionEv^.root_x, motionEv^.root_y);
+          if resizeMode <> dmNone then
+            targetCli := ActiveClient;
+        end;
+
+        if targetCli = nil then
+        begin
+          for i := Clients.Count - 1 downto 0 do
+          begin
+            candidateCli := TXCBWMClient(Clients[i]);
+            if candidateCli.IsReparented and not (wsMinimized in candidateCli.State) then
+            begin
+              resizeMode := GetResizeModeForPoint(candidateCli, motionEv^.root_x, motionEv^.root_y);
+              if resizeMode <> dmNone then
+              begin
+                targetCli := candidateCli;
+                Break;
+              end;
+            end;
+          end;
+        end;
+
+        if (targetCli <> nil) and (resizeMode <> dmNone) then
+          UpdateHoverCursor(CursorForDragMode(resizeMode), motionEv^.event)
+        else
+          UpdateHoverCursor(CursorNormal, motionEv^.event);
       end;
     end;
 
     XCB_LEAVE_NOTIFY:
     begin
       leaveEv := Pxcb_leave_notify_event_t(AEvent);
+      if (Screen <> nil) and (leaveEv^.event = Screen^.root) then
+      begin
+        CurrentRootCursor := 0;
+      end;
       if (FHoveredWindow <> 0) and (leaveEv^.event = FHoveredWindow) then
       begin
         oldWin := FHoveredWindow;
