@@ -166,6 +166,7 @@ type
     procedure GetWindowButtonMetrics(out ABtnSize, ABtnY, AX0, AX1, AX2: Double; out ATitleX: Integer);
     function GetButtonAt(const AX, AY: Integer; const AWidth: Integer = 820): Integer;
     function IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean;
+    function GetResizeModeForPoint(const AClient: TXCBWMClient; const ARootX, ARootY: Integer): TXCBDragMode;
 
     // Additional Window Controls (Shade, Keep on Top, Window Menu)
     procedure ToggleKeepOnTop(const AClient: TXCBWMClient);
@@ -1097,6 +1098,66 @@ begin
   Result := (AX >= leftEnd) and (AX <= rightStart);
 end;
 
+function TWMSamaCompositingWM.GetResizeModeForPoint(const AClient: TXCBWMClient; const ARootX, ARootY: Integer): TXCBDragMode;
+var
+  rx, ry, fw, fh: Integer;
+begin
+  Result := dmNone;
+  if AClient = nil then Exit;
+
+  // Maximized and fullscreen windows cannot be resized
+  if (wsMaximizedHorz in AClient.State) or (wsMaximizedVert in AClient.State) or
+     (wsFullscreen in AClient.State) then
+    Exit;
+
+  rx := ARootX - AClient.CurrentRect.X;
+  ry := ARootY - AClient.CurrentRect.Y;
+  fw := AClient.CurrentRect.Width;
+  fh := AClient.CurrentRect.Height;
+
+  if (rx < 0) or (ry < 0) or (rx >= fw) or (ry >= fh) then Exit;
+
+  // Tiled Right window: pinned to right screen edge; only allow resizing width on its left divider edge
+  if (wsTiledRight in AClient.State) then
+  begin
+    if rx < 8 then
+      Result := dmResizeLeft;
+    Exit;
+  end;
+
+  // Tiled Left window: pinned to left screen edge; only allow resizing width on its right divider edge
+  if (wsTiledLeft in AClient.State) then
+  begin
+    if rx >= fw - 8 then
+      Result := dmResizeRight;
+    Exit;
+  end;
+
+  // Floating window: 8-directional resizing
+  // Corner detection:
+  // Top corners (10px x 10px to avoid overlapping titlebar buttons)
+  if (rx < 10) and (ry < 10) then
+    Exit(dmResizeTopLeft);
+  if (rx >= fw - 10) and (ry < 10) then
+    Exit(dmResizeTopRight);
+
+  // Bottom corners (16px x 16px)
+  if (rx < 16) and (ry >= fh - 16) then
+    Exit(dmResizeBottomLeft);
+  if (rx >= fw - 16) and (ry >= fh - 16) then
+    Exit(dmResizeBottomRight);
+
+  // Edges
+  if ry < 6 then
+    Exit(dmResizeTop);
+  if ry >= fh - 8 then
+    Exit(dmResizeBottom);
+  if rx < 8 then
+    Exit(dmResizeLeft);
+  if rx >= fw - 8 then
+    Exit(dmResizeRight);
+end;
+
 procedure TWMSamaCompositingWM.ToggleKeepOnTop(const AClient: TXCBWMClient);
 var
   targetWin: xcb_window_t;
@@ -1683,6 +1744,7 @@ var
   localX, localY, bw, th, newBtn: Integer;
   oldWin: xcb_window_t;
   btnIdx, rx, ry, itemIdx: Integer;
+  resizeMode: TXCBDragMode;
 begin
   Result := False;
   if AEvent = nil then Exit;
@@ -1872,10 +1934,22 @@ begin
       cli := FindClient(btnEv^.event);
       if cli <> nil then
       begin
-        // 1. Direct clicks on client application window (pass-through / click-to-focus)
+        // 1. Direct clicks on client application window (perimeter resize or pass-through focus)
         if btnEv^.event = cli.ClientWindow then
         begin
           cli.Activate();
+          if btnEv^.detail = XCB_BUTTON_INDEX_1 then
+          begin
+            resizeMode := GetResizeModeForPoint(cli, btnEv^.root_x, btnEv^.root_y);
+            if resizeMode <> dmNone then
+            begin
+              if Connection <> nil then
+                xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
+              BeginDrag(cli, resizeMode, btnEv^.root_x, btnEv^.root_y);
+              Exit(True);
+            end;
+          end;
+
           if Connection <> nil then
           begin
             xcb_allow_events(Connection, XCB_ALLOW_REPLAY_POINTER, btnEv^.time);
@@ -1922,14 +1996,25 @@ begin
             Exit(True);
           end;
 
-          // B. Right-click on titlebar to resize window
+          // B. Right-click on titlebar to resize window (legacy shortcut)
           if (localY >= 0) and (localY < th) and (btnEv^.detail = XCB_BUTTON_INDEX_3) then
           begin
             BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
             Exit(True);
           end;
 
-          // C. Handle Double-Click or drag on draggable titlebar area
+          // C. Handle perimeter resizing on FrameWindow (top edge, top corners, side edges)
+          if btnEv^.detail = XCB_BUTTON_INDEX_1 then
+          begin
+            resizeMode := GetResizeModeForPoint(cli, btnEv^.root_x, btnEv^.root_y);
+            if resizeMode <> dmNone then
+            begin
+              BeginDrag(cli, resizeMode, btnEv^.root_x, btnEv^.root_y);
+              Exit(True);
+            end;
+          end;
+
+          // D. Handle Double-Click or drag on draggable titlebar area
           if (localY >= 0) and (localY < th) and IsTitlebarDraggable(localX, localY, cli.CurrentRect.Width) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
@@ -1952,7 +2037,7 @@ begin
             Exit(True);
           end;
 
-          // D. Handle Border Resizing when border width > 0
+          // E. Handle Border Resizing when border width > 0
           if (bw > 0) and ((localY >= th) or (localX < bw) or (localX >= cli.CurrentRect.Width - bw) or (localY >= cli.CurrentRect.Height - bw)) then
           begin
             BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);

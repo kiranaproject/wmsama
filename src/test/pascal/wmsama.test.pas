@@ -29,6 +29,7 @@ type
     procedure TestButtonAlignmentAndPlacement();
     procedure TestAdditionalWindowControls();
     procedure TestOverrideRedirectCompositorSupport();
+    procedure TestWindowResizingDirectionalAndTiled();
   end;
 
 implementation
@@ -527,6 +528,107 @@ begin
     // Unregistration upon unmap / destroy
     wm.Compositor.UnregisterWindow(popupWin);
     AssertNull('Popup window unregistered from compositor', wm.Compositor.FindWindow(popupWin));
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowResizingDirectionalAndTiled();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  origW, origH, origX, origY: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(5555);
+    cli.CurrentRect := TXCBRect.Create(100, 100, 400, 300);
+    cli.RestoredRect := cli.CurrentRect;
+
+    // 1. Floating Window: Corner hit tests
+    AssertEquals('Top-Left corner', Integer(dmResizeTopLeft), Integer(wm.GetResizeModeForPoint(cli, 102, 102)));
+    AssertEquals('Top-Right corner', Integer(dmResizeTopRight), Integer(wm.GetResizeModeForPoint(cli, 498, 102)));
+    AssertEquals('Bottom-Left corner', Integer(dmResizeBottomLeft), Integer(wm.GetResizeModeForPoint(cli, 105, 395)));
+    AssertEquals('Bottom-Right corner', Integer(dmResizeBottomRight), Integer(wm.GetResizeModeForPoint(cli, 495, 395)));
+
+    // 2. Floating Window: Edge hit tests
+    AssertEquals('Top edge (height only)', Integer(dmResizeTop), Integer(wm.GetResizeModeForPoint(cli, 250, 102)));
+    AssertEquals('Bottom edge (height only)', Integer(dmResizeBottom), Integer(wm.GetResizeModeForPoint(cli, 250, 396)));
+    AssertEquals('Left edge (width only)', Integer(dmResizeLeft), Integer(wm.GetResizeModeForPoint(cli, 102, 200)));
+    AssertEquals('Right edge (width only)', Integer(dmResizeRight), Integer(wm.GetResizeModeForPoint(cli, 496, 200)));
+
+    // 3. Floating Window: Draggable / Content interiors return dmNone
+    AssertEquals('Titlebar center draggable', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 120)));
+    AssertEquals('Client app interior', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 250)));
+    AssertEquals('Outside window', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 50, 50)));
+
+    // 4. Maximized Window: Resizing completely disabled
+    cli.Maximize();
+    AssertTrue('Window is maximized', wsMaximizedHorz in cli.State);
+    AssertEquals('Maximized top edge returns dmNone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 2)));
+    AssertEquals('Maximized bottom edge returns dmNone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 1078)));
+    AssertEquals('Maximized left edge returns dmNone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 2, 200)));
+    AssertEquals('Maximized right edge returns dmNone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 1918, 200)));
+    AssertEquals('Maximized corners return dmNone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 2, 2)));
+    cli.Restore();
+
+    // 5. Tiled Right Window: Only left divider edge allowed to resize width
+    cli.TileRight();
+    AssertTrue('Window is tiled right', wsTiledRight in cli.State);
+    origX := cli.CurrentRect.X;
+    origY := cli.CurrentRect.Y;
+    origW := cli.CurrentRect.Width;
+    origH := cli.CurrentRect.Height;
+
+    // Hit-testing tiled right
+    AssertEquals('Tiled Right inner left edge allows dmResizeLeft', Integer(dmResizeLeft), Integer(wm.GetResizeModeForPoint(cli, origX + 2, 300)));
+    AssertEquals('Tiled Right top edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, origX + 100, 2)));
+    AssertEquals('Tiled Right bottom edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, origX + 100, origH - 2)));
+    AssertEquals('Tiled Right outer right edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, origX + origW - 2, 300)));
+
+    // Interactive drag update on Tiled Right
+    wm.BeginDrag(cli, dmResizeLeft, origX, 300);
+    wm.UpdateDrag(origX - 70, 360); // Drag divider 70px left (expanding width); DeltaY must be locked!
+    AssertEquals('Tiled Right width expanded by 70', origW + 70, cli.CurrentRect.Width);
+    AssertEquals('Tiled Right X moved left by 70', origX - 70, cli.CurrentRect.X);
+    AssertEquals('Tiled Right height strictly locked to full height', origH, cli.CurrentRect.Height);
+    AssertEquals('Tiled Right Y strictly locked to 0', 0, cli.CurrentRect.Y);
+    AssertEquals('Tiled Right right-edge stays pinned to screen edge', origX + origW, cli.CurrentRect.X + cli.CurrentRect.Width);
+    wm.EndDrag();
+
+    // 6. Restored Rect integrity: Resizing tiled width does NOT overwrite restored floating rect
+    AssertEquals('Floating RestoredRect Width intact', 400, cli.RestoredRect.Width);
+    AssertEquals('Floating RestoredRect Height intact', 300, cli.RestoredRect.Height);
+
+    // 7. Tiled Left Window: Only right divider edge allowed to resize width
+    cli.TileLeft();
+    AssertTrue('Window is tiled left', wsTiledLeft in cli.State);
+    origX := cli.CurrentRect.X;
+    origY := cli.CurrentRect.Y;
+    origW := cli.CurrentRect.Width;
+    origH := cli.CurrentRect.Height;
+
+    // Hit-testing tiled left
+    AssertEquals('Tiled Left inner right edge allows dmResizeRight', Integer(dmResizeRight), Integer(wm.GetResizeModeForPoint(cli, origW - 2, 300)));
+    AssertEquals('Tiled Left outer left edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 2, 300)));
+    AssertEquals('Tiled Left top edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 100, 2)));
+    AssertEquals('Tiled Left bottom edge disallowed', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 100, origH - 2)));
+
+    // Interactive drag update on Tiled Left
+    wm.BeginDrag(cli, dmResizeRight, origW, 300);
+    wm.UpdateDrag(origW + 90, 380); // Drag divider 90px right (expanding width); DeltaY must be locked!
+    AssertEquals('Tiled Left width expanded by 90', origW + 90, cli.CurrentRect.Width);
+    AssertEquals('Tiled Left X strictly locked to 0', 0, cli.CurrentRect.X);
+    AssertEquals('Tiled Left height strictly locked to full height', origH, cli.CurrentRect.Height);
+    AssertEquals('Tiled Left Y strictly locked to 0', 0, cli.CurrentRect.Y);
+    wm.EndDrag();
+
+    // 8. Restore returns cleanly to remembered floating dimensions
+    cli.Restore();
+    AssertEquals('Restored floating X', 100, cli.CurrentRect.X);
+    AssertEquals('Restored floating Y', 100, cli.CurrentRect.Y);
+    AssertEquals('Restored floating Width', 400, cli.CurrentRect.Width);
+    AssertEquals('Restored floating Height', 300, cli.CurrentRect.Height);
   finally
     wm.Free();
   end;
