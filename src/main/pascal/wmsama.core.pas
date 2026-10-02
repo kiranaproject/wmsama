@@ -926,6 +926,7 @@ begin
       compWin.CornerRadius := FCornerRadius;
       compWin.BottomCornerRadius := FBottomCornerRadius;
     end;
+    compWin.MarkDamaged();
   end;
 
   PaintClientFrame(AClient);
