@@ -100,6 +100,7 @@ type
     FHoveredWindow      : xcb_window_t;
     FHoveredButton      : Integer;
     FPressedButton      : Integer;
+    FPressedWindow      : xcb_window_t;
     FHoverCursorWindow  : xcb_window_t;
     FHoverCursor        : xcb_cursor_t;
 
@@ -215,6 +216,10 @@ type
     property SnapPreviewRect    : TXCBRect       read FSnapPreviewRect;
     property AltTabActive       : Boolean        read FAltTabActive;
     property AltTabIndex        : Integer        read FAltTabIndex;
+    property HoveredButton      : Integer        read FHoveredButton;
+    property HoveredWindow      : xcb_window_t   read FHoveredWindow;
+    property PressedButton      : Integer        read FPressedButton;
+    property PressedWindow      : xcb_window_t   read FPressedWindow;
   end;
 
 implementation
@@ -245,6 +250,7 @@ begin
   FHoveredWindow := 0;
   FHoveredButton := -1;
   FPressedButton := -1;
+  FPressedWindow := 0;
 
   FCompositorEnabled := True;
   FNeedsComposite := False;
@@ -809,6 +815,12 @@ begin
 
   if FWindowMenuClient = AClient then
     DismissWindowMenu();
+
+  if (AClient.FrameWindow <> 0) and (AClient.FrameWindow = FPressedWindow) then
+  begin
+    FPressedButton := -1;
+    FPressedWindow := 0;
+  end;
 
   for i := 0 to High(FShadedWindows) do
     if FShadedWindows[i].WindowId = AClient.ClientWindow then
@@ -1459,9 +1471,9 @@ begin
       for i := 0 to High(btns) do
       begin
         isHoveredWin := (FHoveredWindow <> 0) and (FHoveredWindow = AClient.FrameWindow);
-        if isHoveredWin and (FPressedButton = i) then
+        if (FPressedWindow = AClient.FrameWindow) and (FPressedButton = i) and (FHoveredButton = i) then
           btnState := FT_BUTTON_STATE_PRESSED
-        else if isHoveredWin and (FHoveredButton = i) then
+        else if (FPressedButton = -1) and isHoveredWin and (FHoveredButton = i) then
           btnState := FT_BUTTON_STATE_HOVERED
         else if (btns[i].Kind = sbkPin) and (wsAbove in AClient.State) then
           btnState := FT_BUTTON_STATE_PRESSED
@@ -1822,8 +1834,8 @@ var
   compWin: TXCBCompositedWindow;
   cli, oldCli, menuCli, targetCli, candidateCli: TXCBWMClient;
   localX, localY, bw, th, newBtn: Integer;
-  oldWin: xcb_window_t;
-  btnIdx, rx, ry, itemIdx, i: Integer;
+  oldWin, pressedWin: xcb_window_t;
+  btnIdx, releasedBtn, rx, ry, itemIdx, i: Integer;
   resizeMode: TXCBDragMode;
 begin
   Result := False;
@@ -1986,30 +1998,58 @@ begin
     XCB_BUTTON_RELEASE:
     begin
       btnEv := Pxcb_button_release_event_t(AEvent);
-      if FPressedButton <> -1 then
+      if (FPressedButton <> -1) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
       begin
         btnIdx := FPressedButton;
+        pressedWin := FPressedWindow;
         FPressedButton := -1;
+        FPressedWindow := 0;
+
         cli := FindClient(btnEv^.event);
-        if cli <> nil then
+        if (cli <> nil) and (cli.FrameWindow = pressedWin) then
         begin
-          PaintClientFrame(cli);
           localX := btnEv^.event_x;
           localY := btnEv^.event_y;
-          if (btnIdx >= 0) and (btnIdx <= High(FButtonLayoutItems)) and
-             (FButtonLayoutItems[btnIdx].Kind = sbkMenu) and
-             (GetButtonAt(localX, localY, cli.CurrentRect.Width) = btnIdx) then
+          releasedBtn := GetButtonAt(localX, localY, cli.CurrentRect.Width);
+
+          FHoveredButton := releasedBtn;
+          FHoveredWindow := cli.FrameWindow;
+          PaintClientFrame(cli);
+          RequestComposite();
+
+          // ONLY trigger button action if released within the SAME button's click bound area!
+          if (releasedBtn = btnIdx) and (btnIdx >= 0) and (btnIdx <= High(FButtonLayoutItems)) then
           begin
-            TriggerWindowMenu(cli);
+            case FButtonLayoutItems[btnIdx].Kind of
+              sbkClose: cli.Close();
+              sbkMinimize: cli.Minimize();
+              sbkMaximize:
+              begin
+                if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
+                  cli.Restore()
+                else
+                  cli.Maximize();
+              end;
+              sbkShade: ToggleShade(cli);
+              sbkPin: ToggleKeepOnTop(cli);
+              sbkMenu: TriggerWindowMenu(cli);
+            end;
+            Exit(True);
           end;
         end
-        else if FHoveredWindow <> 0 then
+        else
         begin
-          oldCli := FindClient(FHoveredWindow);
-          if oldCli <> nil then
-            PaintClientFrame(oldCli);
+          if pressedWin <> 0 then
+          begin
+            oldCli := FindClient(pressedWin);
+            if oldCli <> nil then
+            begin
+              FHoveredButton := -1;
+              PaintClientFrame(oldCli);
+            end;
+          end;
+          RequestComposite();
         end;
-        RequestComposite();
       end;
     end;
 
@@ -2144,29 +2184,16 @@ begin
           if Connection <> nil then
             xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
 
-          // A. Handle click on control dots
+          // A. Handle click on control dots (actions trigger on mouse button release)
           btnIdx := GetButtonAt(localX, localY, cli.CurrentRect.Width);
           if (btnIdx >= 0) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             FPressedButton := btnIdx;
+            FPressedWindow := cli.FrameWindow;
+            FHoveredButton := btnIdx;
+            FHoveredWindow := cli.FrameWindow;
             PaintClientFrame(cli);
-            if (btnIdx >= 0) and (btnIdx <= High(FButtonLayoutItems)) then
-            begin
-              case FButtonLayoutItems[btnIdx].Kind of
-                sbkClose: cli.Close();
-                sbkMinimize: cli.Minimize();
-                sbkMaximize:
-                begin
-                  if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
-                    cli.Restore()
-                  else
-                    cli.Maximize();
-                end;
-                sbkShade: ToggleShade(cli);
-                sbkPin: ToggleKeepOnTop(cli);
-                sbkMenu: ; // Triggered on release for clean pointer grab
-              end;
-            end;
+            RequestComposite();
             Exit(True);
           end;
 

@@ -31,6 +31,7 @@ type
     procedure TestOverrideRedirectCompositorSupport();
     procedure TestWindowResizingDirectionalAndTiled();
     procedure TestWindowCursors();
+    procedure TestWindowButtonReleaseAndCancel();
   end;
 
 implementation
@@ -664,6 +665,93 @@ begin
     // 2. Hover Cursor Updates
     wm.UpdateHoverCursor(1234, 0);
     AssertNotNull('UpdateHoverCursor offline safety verified', wm);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowButtonReleaseAndCancel();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  pressEv: xcb_button_press_event_t;
+  releaseEv: xcb_button_release_event_t;
+  motionEv: xcb_motion_notify_event_t;
+  btnIdx: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(7001);
+    cli.IsReparented := True;
+    cli.FrameWindow := 7002;
+    cli.SetGeometry(100, 100, 500, 350);
+
+    // Default button layout: 'close,minimize,maximize:'
+    // Close is btn 0, Minimize is btn 1, Maximize is btn 2
+    btnIdx := wm.GetButtonAt(64, 17, 500);
+    AssertEquals('Button at (64, 17) is maximize button (idx 2)', 2, btnIdx);
+
+    // 1. Mouse Button 1 Down on Maximize Button
+    FillChar(pressEv, SizeOf(pressEv), 0);
+    pressEv.response_type := XCB_BUTTON_PRESS;
+    pressEv.detail := XCB_BUTTON_INDEX_1;
+    pressEv.event := cli.FrameWindow;
+    pressEv.event_x := 64;
+    pressEv.event_y := 17;
+    wm.ProcessEvent(Pxcb_generic_event_t(@pressEv));
+
+    // Must be in pressed state, but NOT yet maximized!
+    AssertEquals('PressedButton recorded as 2', 2, wm.PressedButton);
+    AssertEquals('PressedWindow recorded as FrameWindow', cli.FrameWindow, wm.PressedWindow);
+    AssertFalse('Client NOT maximized on button press', wsMaximizedHorz in cli.State);
+
+    // 2. Drag cursor outside the button (to cancel)
+    FillChar(motionEv, SizeOf(motionEv), 0);
+    motionEv.response_type := XCB_MOTION_NOTIFY;
+    motionEv.event := cli.FrameWindow;
+    motionEv.event_x := 200; // Far in titlebar center
+    motionEv.event_y := 17;
+    wm.ProcessEvent(Pxcb_generic_event_t(@motionEv));
+    AssertEquals('HoveredButton now -1 outside button', -1, wm.HoveredButton);
+
+    // 3. Release mouse outside the button
+    FillChar(releaseEv, SizeOf(releaseEv), 0);
+    releaseEv.response_type := XCB_BUTTON_RELEASE;
+    releaseEv.detail := XCB_BUTTON_INDEX_1;
+    releaseEv.event := cli.FrameWindow;
+    releaseEv.event_x := 200; // Released outside!
+    releaseEv.event_y := 17;
+    wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
+
+    // Pressed state cleared, action CANCELLED (still not maximized)
+    AssertEquals('PressedButton reset to -1', -1, wm.PressedButton);
+    AssertFalse('Client still NOT maximized after cancel release', wsMaximizedHorz in cli.State);
+
+    // 4. Mouse Button 1 Down on Maximize Button again
+    wm.ProcessEvent(Pxcb_generic_event_t(@pressEv));
+    AssertEquals('PressedButton recorded as 2 again', 2, wm.PressedButton);
+    AssertFalse('Client still NOT maximized on press', wsMaximizedHorz in cli.State);
+
+    // 5. Release mouse INSIDE the Maximize Button
+    FillChar(releaseEv, SizeOf(releaseEv), 0);
+    releaseEv.response_type := XCB_BUTTON_RELEASE;
+    releaseEv.detail := XCB_BUTTON_INDEX_1;
+    releaseEv.event := cli.FrameWindow;
+    releaseEv.event_x := 64; // Released within button bounds!
+    releaseEv.event_y := 17;
+    wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
+
+    // Maximize action MUST now be executed!
+    AssertEquals('PressedButton reset to -1 after execute', -1, wm.PressedButton);
+    AssertTrue('Client successfully maximized on release within bounds!', wsMaximizedHorz in cli.State);
+
+    // 6. Test Restore button on release within bounds
+    // Window is now maximized, button 2 is restore button
+    wm.ProcessEvent(Pxcb_generic_event_t(@pressEv));
+    AssertTrue('Client still maximized on press', wsMaximizedHorz in cli.State);
+
+    wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
+    AssertFalse('Client successfully restored on release within bounds!', wsMaximizedHorz in cli.State);
   finally
     wm.Free();
   end;
