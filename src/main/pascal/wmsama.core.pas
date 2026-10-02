@@ -100,6 +100,8 @@ type
     FHoveredWindow      : xcb_window_t;
     FHoveredButton      : Integer;
     FPressedButton      : Integer;
+    FHoverCursorWindow  : xcb_window_t;
+    FHoverCursor        : xcb_cursor_t;
 
     // Shaded Windows and Window Menu Overlay
     FShadedWindows      : array of TWMSamaShadedWindow;
@@ -1142,10 +1144,26 @@ begin
   end;
 
   // Floating Window:
-  // Clicks INSIDE the window (titlebar or client content) NEVER trigger resize!
-  // Titlebar is for dragging/moving (dmMove) and controls; client is for app interaction (text selection).
-  if (ARootX >= wx) and (ARootX < wx + ww) and (ARootY >= wy) and (ARootY < wy + wh) then
+  // Clicks INSIDE client content area NEVER trigger resize!
+  // This guarantees that text selection inside xterm from column 0 or any edge is 100% protected.
+  if (ARootX >= wx) and (ARootX < wx + ww) and (ARootY >= wy + FTitlebarHeight) and (ARootY < wy + wh) then
     Exit(dmNone);
+
+  // Titlebar top edge and corners (on FrameWindow)
+  if (ARootY >= wy) and (ARootY < wy + FTitlebarHeight) then
+  begin
+    // Top-Left corner (within cornerSize on titlebar)
+    if (ARootX >= wx) and (ARootX < wx + cornerSize) and (ARootY < wy + cornerSize) then
+      Exit(dmResizeTopLeft);
+    // Top-Right corner (within cornerSize on titlebar)
+    if (ARootX >= wx + ww - cornerSize) and (ARootX < wx + ww) and (ARootY < wy + cornerSize) then
+      Exit(dmResizeTopRight);
+    // Top edge (top 4px of titlebar)
+    if (ARootX >= wx + cornerSize) and (ARootX < wx + ww - cornerSize) and (ARootY < wy + 4) then
+      Exit(dmResizeTop);
+    // Center / rest of titlebar is for dragging window position (dmNone)
+    Exit(dmNone);
+  end;
 
   // Check if point is within outer margin surrounding the window
   inOuterX := (ARootX >= wx - margin) and (ARootX < wx + ww + margin);
@@ -1622,6 +1640,11 @@ begin
   if (targetWin = 0) and (Screen <> nil) then
     targetWin := Screen^.root;
 
+  if (targetWin = FHoverCursorWindow) and (ACursor = FHoverCursor) then Exit;
+
+  FHoverCursorWindow := targetWin;
+  FHoverCursor := ACursor;
+
   if (Screen <> nil) and (targetWin = Screen^.root) then
   begin
     if CurrentRootCursor <> ACursor then
@@ -1939,6 +1962,11 @@ begin
     XCB_LEAVE_NOTIFY:
     begin
       leaveEv := Pxcb_leave_notify_event_t(AEvent);
+      if leaveEv^.event = FHoverCursorWindow then
+      begin
+        FHoverCursorWindow := 0;
+        FHoverCursor := 0;
+      end;
       if (Screen <> nil) and (leaveEv^.event = Screen^.root) then
       begin
         CurrentRootCursor := 0;
@@ -2064,6 +2092,18 @@ begin
       cli := FindClient(btnEv^.event);
       if cli <> nil then
       begin
+        // 0. Direct clicks on outer resize frame window (InputOnly window)
+        if (cli.ResizeWindow <> 0) and (btnEv^.event = cli.ResizeWindow) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+        begin
+          resizeMode := GetResizeModeForPoint(cli, btnEv^.root_x, btnEv^.root_y);
+          if resizeMode <> dmNone then
+          begin
+            cli.Activate();
+            BeginDrag(cli, resizeMode, btnEv^.root_x, btnEv^.root_y);
+            Exit(True);
+          end;
+        end;
+
         // 1. Direct clicks on client application window (pass-through / click-to-focus)
         if btnEv^.event = cli.ClientWindow then
         begin
@@ -2149,7 +2189,18 @@ begin
             end;
           end;
 
-          // D. Handle Double-Click or drag on draggable titlebar area
+          // D. Handle titlebar top edge and top corners resizing
+          if (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+          begin
+            resizeMode := GetResizeModeForPoint(cli, btnEv^.root_x, btnEv^.root_y);
+            if resizeMode <> dmNone then
+            begin
+              BeginDrag(cli, resizeMode, btnEv^.root_x, btnEv^.root_y);
+              Exit(True);
+            end;
+          end;
+
+          // E. Handle Double-Click or drag on draggable titlebar area
           if (localY >= 0) and (localY < th) and IsTitlebarDraggable(localX, localY, cli.CurrentRect.Width) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
