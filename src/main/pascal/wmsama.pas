@@ -78,8 +78,8 @@ begin
   CompositorEnabled := True;
   BlurEnabled := False;
   BlurRadius := 15;
-  ShadowRadius := 14;
-  ShadowOpacity := 0.35;
+  ShadowRadius := 12;
+  ShadowOpacity := 0.22;
   CornerRadius := 12;
   BottomCornerRadius := 12;
   ButtonStyle := FT_WINDOW_BUTTON_CIRCLE;
@@ -113,12 +113,12 @@ begin
     else if (Arg = '--shadow-radius') and (I < ParamCount) then
     begin
       Inc(I);
-      ShadowRadius := StrToIntDef(ParamStr(I), 14);
+      ShadowRadius := StrToIntDef(ParamStr(I), 12);
     end
     else if (Arg = '--shadow-opacity') and (I < ParamCount) then
     begin
       Inc(I);
-      ShadowOpacity := StrToFloatDef(ParamStr(I), 0.35);
+      ShadowOpacity := StrToFloatDef(ParamStr(I), 0.22);
     end
     else if (Arg = '--corner-radius') and (I < ParamCount) then
     begin

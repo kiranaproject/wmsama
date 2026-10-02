@@ -252,13 +252,13 @@ begin
   FBlurRadius := 15;
 
   FShadowEnabled := True;
-  FShadowRadius := 14;
-  FShadowOffsetY := 4;
-  FShadowOpacity := 0.35;
+  FShadowRadius := 10;
+  FShadowOffsetY := 1;
+  FShadowOpacity := 0.14;
 
-  FActiveShadowRadius := 20;
-  FActiveShadowOffsetY := 6;
-  FActiveShadowOpacity := 0.48;
+  FActiveShadowRadius := 14;
+  FActiveShadowOffsetY := 1;
+  FActiveShadowOpacity := 0.22;
 
   FLastClickTime := 0;
   FLastClickWindow := 0;
@@ -383,7 +383,7 @@ begin
                   begin
                     compWin.CornerRadius := 6;
                     compWin.BottomCornerRadius := 6;
-                    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 12, 4, 0.40);
+                    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
                     FCompositor.Windows.Extract(compWin);
                     FCompositor.Windows.Add(compWin);
                     compWin.MarkDamaged();
@@ -2255,7 +2255,7 @@ begin
                 begin
                   compWin.CornerRadius := 6;
                   compWin.BottomCornerRadius := 6;
-                  compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 12, 4, 0.40);
+                  compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
                   // Float popup menu to top of compositor stacking order
                   FCompositor.Windows.Extract(compWin);
                   FCompositor.Windows.Add(compWin);
