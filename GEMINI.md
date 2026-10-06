@@ -33,3 +33,8 @@ All code in this project must adhere strictly to the conventions documented in [
     - Inactive: `Radius: 10px`, `OffsetY: 1px`, `Opacity: 0.14`.
     - Popups / Menus: `Radius: 10px`, `OffsetY: 1px`, `Opacity: 0.20`.
 
+## Linux Windowing & Display Server Policy
+
+- **Strictly X11/XCB Only (No Wayland)**:
+  - `wmsama` is a dedicated native X11 window manager and compositor built on `libxcb` and `florialib`. Never reference, propose, or insert Wayland into code, architecture, or documentation.
+
