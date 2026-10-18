@@ -34,6 +34,7 @@ type
     procedure TestWindowButtonReleaseAndCancel();
     procedure TestWindowSnappingWithStrutsAndWorkarea();
     procedure TestWindowMinimizeAndRestoreCompositor();
+    procedure TestUndecoratedAndSplashCornerRadius();
   end;
 
 implementation
@@ -887,6 +888,88 @@ begin
     cli1.Restore();
     AssertFalse('cli1 unminimized via Restore', wsMinimized in cli1.State);
     AssertTrue('comp1 visible via Restore', comp1.IsVisible);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestUndecoratedAndSplashCornerRadius();
+var
+  wm: TWMSamaCompositingWM;
+  cliNormal, cliSplash, cliDock, cliBorderless, cliMenu: TXCBWMClient;
+  compNormal, compSplash, compDock, compBorderless, compMenu: TXCBCompositedWindow;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.CornerRadius := 12;
+    wm.BottomCornerRadius := 12;
+
+    // 1. Regular decorated window
+    cliNormal := wm.ManageWindow(9001);
+    cliNormal.SetGeometry(50, 50, 500, 350);
+    compNormal := wm.Compositor.FindWindow(cliNormal.ClientWindow);
+    AssertNotNull('compNormal registered', compNormal);
+    AssertEquals('Normal window has top corner radius 12', 12, compNormal.CornerRadius);
+    AssertEquals('Normal window has bottom corner radius 12', 12, compNormal.BottomCornerRadius);
+
+    // 2. Splash screen (e.g. Lazarus or Inkscape splash) -> MUST be 0
+    cliSplash := TXCBWMClient.Create(9002, wm);
+    cliSplash.WindowType := wtSplash;
+    cliSplash.SetGeometry(200, 150, 400, 300);
+    wm.Clients.Add(cliSplash);
+    compSplash := wm.Compositor.RegisterWindow(cliSplash.ClientWindow, cliSplash.CurrentRect, 0);
+    wm.ApplyClientCornerRadius(cliSplash, compSplash);
+    AssertNotNull('compSplash registered', compSplash);
+    AssertEquals('Splash screen corner radius is 0', 0, compSplash.CornerRadius);
+    AssertEquals('Splash screen bottom corner radius is 0', 0, compSplash.BottomCornerRadius);
+
+    // 3. Panel / Dock window -> MUST be 0
+    cliDock := TXCBWMClient.Create(9003, wm);
+    cliDock.WindowType := wtDock;
+    cliDock.SetGeometry(0, 730, 1024, 38);
+    wm.Clients.Add(cliDock);
+    compDock := wm.Compositor.RegisterWindow(cliDock.ClientWindow, cliDock.CurrentRect, 0);
+    wm.ApplyClientCornerRadius(cliDock, compDock);
+    AssertNotNull('compDock registered', compDock);
+    AssertEquals('Panel / Dock corner radius is 0', 0, compDock.CornerRadius);
+    AssertEquals('Panel / Dock bottom corner radius is 0', 0, compDock.BottomCornerRadius);
+
+    // 4. Borderless window (undecorated) -> MUST be 0
+    cliBorderless := TXCBWMClient.Create(9004, wm);
+    cliBorderless.Borderless := True;
+    cliBorderless.SetGeometry(100, 100, 300, 200);
+    wm.Clients.Add(cliBorderless);
+    compBorderless := wm.Compositor.RegisterWindow(cliBorderless.ClientWindow, cliBorderless.CurrentRect, 0);
+    wm.ApplyClientCornerRadius(cliBorderless, compBorderless);
+    AssertNotNull('compBorderless registered', compBorderless);
+    AssertEquals('Borderless window corner radius is 0', 0, compBorderless.CornerRadius);
+    AssertEquals('Borderless window bottom corner radius is 0', 0, compBorderless.BottomCornerRadius);
+
+    // 5. Popup menu -> MUST have rounded corners (6)
+    cliMenu := TXCBWMClient.Create(9005, wm);
+    cliMenu.WindowType := wtPopupMenu;
+    cliMenu.SetGeometry(150, 150, 180, 240);
+    wm.Clients.Add(cliMenu);
+    compMenu := wm.Compositor.RegisterWindow(cliMenu.ClientWindow, cliMenu.CurrentRect, 0);
+    wm.ApplyClientCornerRadius(cliMenu, compMenu);
+    AssertNotNull('compMenu registered', compMenu);
+    AssertEquals('Popup menu corner radius is 6', 6, compMenu.CornerRadius);
+    AssertEquals('Popup menu bottom corner radius is 6', 6, compMenu.BottomCornerRadius);
+
+    // 6. Test updating WM CornerRadius:
+    // Only decorated windows should update. Undecorated (splash, dock, borderless) must STAY 0! Menu stays 6!
+    wm.CornerRadius := 16;
+    wm.BottomCornerRadius := 18;
+    AssertEquals('Normal window updated top corner radius to 16', 16, compNormal.CornerRadius);
+    AssertEquals('Normal window updated bottom corner radius to 18', 18, compNormal.BottomCornerRadius);
+    AssertEquals('Splash screen remains 0', 0, compSplash.CornerRadius);
+    AssertEquals('Splash screen bottom remains 0', 0, compSplash.BottomCornerRadius);
+    AssertEquals('Dock remains 0', 0, compDock.CornerRadius);
+    AssertEquals('Dock bottom remains 0', 0, compDock.BottomCornerRadius);
+    AssertEquals('Borderless remains 0', 0, compBorderless.CornerRadius);
+    AssertEquals('Borderless bottom remains 0', 0, compBorderless.BottomCornerRadius);
+    AssertEquals('Menu remains 6', 6, compMenu.CornerRadius);
+    AssertEquals('Menu bottom remains 6', 6, compMenu.BottomCornerRadius);
   finally
     wm.Free();
   end;

@@ -150,6 +150,9 @@ type
     procedure DoOnClientRestored(const AClient: TXCBWMClient); override;
     procedure DoOnFramePaint(const AClient: TXCBWMClient; const ARect: TXCBRect); override;
   public
+    function IsWindowMenu(const AWindow: xcb_window_t): Boolean;
+    procedure ApplyClientCornerRadius(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
+
     constructor Create(AConn: Pxcb_connection_t = nil; const AScreenNum: Integer = 0);
     destructor Destroy(); override;
 
@@ -389,8 +392,16 @@ begin
                   compWin := FCompositor.RegisterWindow(children[i], geomRect, 0);
                   if compWin <> nil then
                   begin
-                    compWin.CornerRadius := 6;
-                    compWin.BottomCornerRadius := 6;
+                    if IsWindowMenu(children[i]) then
+                    begin
+                      compWin.CornerRadius := 6;
+                      compWin.BottomCornerRadius := 6;
+                    end
+                    else
+                    begin
+                      compWin.CornerRadius := 0;
+                      compWin.BottomCornerRadius := 0;
+                    end;
                     compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
                     FCompositor.Windows.Extract(compWin);
                     FCompositor.Windows.Add(compWin);
@@ -553,10 +564,136 @@ begin
   PaintAllFrames();
 end;
 
+function TWMSamaCompositingWM.IsWindowMenu(const AWindow: xcb_window_t): Boolean;
+var
+  cli: TXCBWMClient;
+  propCookie: xcb_get_property_cookie_t;
+  propReply: Pxcb_get_property_reply_t;
+  atomsPtr: Pxcb_atom_t;
+  atomsLen, i: Integer;
+  atom: xcb_atom_t;
+  roleCookie: xcb_get_property_cookie_t;
+  roleReply: Pxcb_get_property_reply_t;
+  roleStr: AnsiString;
+  classCookie: xcb_get_property_cookie_t;
+  classReply: Pxcb_get_property_reply_t;
+  classStr: AnsiString;
+begin
+  Result := False;
+  if (Connection = nil) or (AWindow = 0) then Exit;
+
+  // 1. If it's a managed client, check client type
+  cli := FindClient(AWindow);
+  if cli <> nil then
+    Exit(cli.IsMenu());
+
+  // 2. Check _NET_WM_WINDOW_TYPE
+  if EwmhInitialized then
+  begin
+    propCookie := xcb_get_property(Connection, 0, AWindow, Ewmh._NET_WM_WINDOW_TYPE, XCB_ATOM_ATOM, 0, 8);
+    propReply := xcb_get_property_reply(Connection, propCookie, nil);
+    if propReply <> nil then
+    begin
+      try
+        atomsLen := xcb_get_property_value_length(propReply) div SizeOf(xcb_atom_t);
+        if atomsLen > 0 then
+        begin
+          atomsPtr := Pxcb_atom_t(xcb_get_property_value(propReply));
+          for i := 0 to atomsLen - 1 do
+          begin
+            atom := atomsPtr[i];
+            // If it's explicitly a splash screen or dock or tooltip or desktop, it's NOT a menu
+            if (atom = Ewmh._NET_WM_WINDOW_TYPE_SPLASH) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_DOCK) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_DESKTOP) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_TOOLTIP) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_NOTIFICATION) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_NORMAL) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_DIALOG) then
+              Exit(False);
+
+            if (atom = Ewmh._NET_WM_WINDOW_TYPE_POPUP_MENU) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_DROPDOWN_MENU) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_MENU) or
+               (atom = Ewmh._NET_WM_WINDOW_TYPE_COMBO) then
+              Exit(True);
+          end;
+        end;
+      finally
+        xcb_free(propReply);
+      end;
+    end;
+  end;
+
+  // 3. Check WM_WINDOW_ROLE
+  roleCookie := xcb_get_property(Connection, 0, AWindow, InternAtom(Connection, 'WM_WINDOW_ROLE'), XCB_ATOM_STRING, 0, 32);
+  roleReply := xcb_get_property_reply(Connection, roleCookie, nil);
+  if roleReply <> nil then
+  begin
+    try
+      if xcb_get_property_value_length(roleReply) > 0 then
+      begin
+        SetString(roleStr, PAnsiChar(xcb_get_property_value(roleReply)), xcb_get_property_value_length(roleReply));
+        roleStr := LowerCase(Trim(roleStr));
+        if (roleStr = 'popup') or (roleStr = 'menu') or (roleStr = 'dropdown') or
+           (roleStr = 'popup-menu') or (roleStr = 'combobox') then
+          Exit(True);
+      end;
+    finally
+      xcb_free(roleReply);
+    end;
+  end;
+
+  // 4. Check WM_CLASS
+  classCookie := xcb_get_property(Connection, 0, AWindow, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 0, 64);
+  classReply := xcb_get_property_reply(Connection, classCookie, nil);
+  if classReply <> nil then
+  begin
+    try
+      if xcb_get_property_value_length(classReply) > 0 then
+      begin
+        SetString(classStr, PAnsiChar(xcb_get_property_value(classReply)), xcb_get_property_value_length(classReply));
+        classStr := LowerCase(classStr);
+        // If it mentions splash, definitely not a menu
+        if Pos('splash', classStr) > 0 then
+          Exit(False);
+        if (Pos('menu', classStr) > 0) or (Pos('popup', classStr) > 0) or (Pos('dropdown', classStr) > 0) then
+          Exit(True);
+      end;
+    finally
+      xcb_free(classReply);
+    end;
+  end;
+end;
+
+procedure TWMSamaCompositingWM.ApplyClientCornerRadius(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
+begin
+  if (AClient = nil) or (ACompWin = nil) then Exit;
+
+  if AClient.IsMenu() then
+  begin
+    ACompWin.CornerRadius := 6;
+    ACompWin.BottomCornerRadius := 6;
+  end
+  else if AClient.IsDecorated() and
+          not ((wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) or
+               (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State)) then
+  begin
+    ACompWin.CornerRadius := FCornerRadius;
+    ACompWin.BottomCornerRadius := FBottomCornerRadius;
+  end
+  else
+  begin
+    ACompWin.CornerRadius := 0;
+    ACompWin.BottomCornerRadius := 0;
+  end;
+end;
+
 procedure TWMSamaCompositingWM.SetCornerRadius(const AValue: Integer);
 var
   i: Integer;
   compWin: TXCBCompositedWindow;
+  cli: TXCBWMClient;
 begin
   FCornerRadius := Max(0, AValue);
   if FCompositor <> nil then
@@ -564,7 +701,11 @@ begin
     for i := 0 to FCompositor.Windows.Count - 1 do
     begin
       compWin := TXCBCompositedWindow(FCompositor.Windows[i]);
-      compWin.CornerRadius := FCornerRadius;
+      cli := FindClient(compWin.Window);
+      if cli <> nil then
+        ApplyClientCornerRadius(cli, compWin)
+      else if not IsWindowMenu(compWin.Window) then
+        compWin.CornerRadius := 0;
     end;
     RequestComposite();
   end;
@@ -574,6 +715,7 @@ procedure TWMSamaCompositingWM.SetBottomCornerRadius(const AValue: Integer);
 var
   i: Integer;
   compWin: TXCBCompositedWindow;
+  cli: TXCBWMClient;
 begin
   FBottomCornerRadius := Max(0, AValue);
   if FCompositor <> nil then
@@ -581,7 +723,11 @@ begin
     for i := 0 to FCompositor.Windows.Count - 1 do
     begin
       compWin := TXCBCompositedWindow(FCompositor.Windows[i]);
-      compWin.BottomCornerRadius := FBottomCornerRadius;
+      cli := FindClient(compWin.Window);
+      if cli <> nil then
+        ApplyClientCornerRadius(cli, compWin)
+      else if not IsWindowMenu(compWin.Window) then
+        compWin.BottomCornerRadius := 0;
     end;
     RequestComposite();
   end;
@@ -789,18 +935,7 @@ begin
     compWin.HasBackdropBlur := FBlurEnabled;
     compWin.BlurRadius := FBlurRadius;
 
-    // Apply 4-corner rounded radii (both top and bottom)
-    if (wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) or
-       (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
-    begin
-      compWin.CornerRadius := 0;
-      compWin.BottomCornerRadius := 0;
-    end
-    else
-    begin
-      compWin.CornerRadius := FCornerRadius;
-      compWin.BottomCornerRadius := FBottomCornerRadius;
-    end;
+    ApplyClientCornerRadius(AClient, compWin);
   end;
 
   PaintClientFrame(AClient);
@@ -943,17 +1078,7 @@ begin
       else
         compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FShadowRadius, FShadowOffsetY, FShadowOpacity);
 
-      if (wsFullscreen in cli.State) or (wsMaximizedHorz in cli.State) or
-         (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
-      begin
-        compWin.CornerRadius := 0;
-        compWin.BottomCornerRadius := 0;
-      end
-      else
-      begin
-        compWin.CornerRadius := FCornerRadius;
-        compWin.BottomCornerRadius := FBottomCornerRadius;
-      end;
+      ApplyClientCornerRadius(cli, compWin);
     end;
   end;
 
@@ -1004,17 +1129,7 @@ begin
       compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
                              AClient.CurrentRect.Width, AClient.CurrentRect.Height);
 
-    if (wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) or
-       (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
-    begin
-      compWin.CornerRadius := 0;
-      compWin.BottomCornerRadius := 0;
-    end
-    else
-    begin
-      compWin.CornerRadius := FCornerRadius;
-      compWin.BottomCornerRadius := FBottomCornerRadius;
-    end;
+    ApplyClientCornerRadius(AClient, compWin);
     compWin.MarkDamaged();
   end;
 
@@ -2355,8 +2470,16 @@ begin
                 compWin := FCompositor.RegisterWindow(mapEv^.window, geomRect, 0);
                 if compWin <> nil then
                 begin
-                  compWin.CornerRadius := 6;
-                  compWin.BottomCornerRadius := 6;
+                  if IsWindowMenu(mapEv^.window) then
+                  begin
+                    compWin.CornerRadius := 6;
+                    compWin.BottomCornerRadius := 6;
+                  end
+                  else
+                  begin
+                    compWin.CornerRadius := 0;
+                    compWin.BottomCornerRadius := 0;
+                  end;
                   compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
                   // Float popup menu to top of compositor stacking order
                   FCompositor.Windows.Extract(compWin);
