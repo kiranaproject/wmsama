@@ -122,6 +122,10 @@ type
     FAltTabActive       : Boolean;
     FAltTabIndex        : Integer;
 
+    // Drag velocity tracking
+    FLastDragX          : Integer;
+    FLastDragY          : Integer;
+
     procedure SetCompositorEnabled(const AValue: Boolean);
     procedure SetBlurEnabled(const AValue: Boolean);
     procedure SetBlurRadius(const AValue: Integer);
@@ -148,6 +152,7 @@ type
     procedure DoOnClientConfigure(const AClient: TXCBWMClient); override;
     procedure DoOnClientMinimized(const AClient: TXCBWMClient); override;
     procedure DoOnClientRestored(const AClient: TXCBWMClient); override;
+    procedure DoOnMonitorsChanged(); override;
     procedure DoOnFramePaint(const AClient: TXCBWMClient; const ARect: TXCBRect); override;
   public
     function IsWindowMenu(const AWindow: xcb_window_t): Boolean;
@@ -324,24 +329,45 @@ procedure TWMSamaCompositingWM.GrabGlobalKeys();
 const
   TAB_KEYCODE = 23;
   SPACE_KEYCODE = 65;
+  LEFT_KEYCODE = 113;
+  RIGHT_KEYCODE = 114;
+  UP_KEYCODE = 111;
+  DOWN_KEYCODE = 116;
   MOD_ALT = 8;
+  MOD_SUPER_SHIFT = 65; // Mod4 (64) + Shift (1)
   MOD_NUMLOCK = 16;
   MOD_CAPSLOCK = 2;
 var
-  mods: array[0..3] of Word;
+  alt_mods: array[0..3] of Word;
+  super_mods: array[0..3] of Word;
   i: Integer;
 begin
   if (Connection = nil) or (Screen = nil) then Exit;
-  mods[0] := MOD_ALT;
-  mods[1] := MOD_ALT or MOD_NUMLOCK;
-  mods[2] := MOD_ALT or MOD_CAPSLOCK;
-  mods[3] := MOD_ALT or MOD_NUMLOCK or MOD_CAPSLOCK;
+  alt_mods[0] := MOD_ALT;
+  alt_mods[1] := MOD_ALT or MOD_NUMLOCK;
+  alt_mods[2] := MOD_ALT or MOD_CAPSLOCK;
+  alt_mods[3] := MOD_ALT or MOD_NUMLOCK or MOD_CAPSLOCK;
+
+  super_mods[0] := MOD_SUPER_SHIFT;
+  super_mods[1] := MOD_SUPER_SHIFT or MOD_NUMLOCK;
+  super_mods[2] := MOD_SUPER_SHIFT or MOD_CAPSLOCK;
+  super_mods[3] := MOD_SUPER_SHIFT or MOD_NUMLOCK or MOD_CAPSLOCK;
 
   for i := 0 to 3 do
   begin
-    xcb_grab_key(Connection, 1, Screen^.root, mods[i], TAB_KEYCODE,
+    xcb_grab_key(Connection, 1, Screen^.root, alt_mods[i], TAB_KEYCODE,
                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-    xcb_grab_key(Connection, 1, Screen^.root, mods[i], SPACE_KEYCODE,
+    xcb_grab_key(Connection, 1, Screen^.root, alt_mods[i], SPACE_KEYCODE,
+                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+
+    // Multi-monitor keyboard navigation: Super + Shift + Arrow keys
+    xcb_grab_key(Connection, 1, Screen^.root, super_mods[i], LEFT_KEYCODE,
+                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+    xcb_grab_key(Connection, 1, Screen^.root, super_mods[i], RIGHT_KEYCODE,
+                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+    xcb_grab_key(Connection, 1, Screen^.root, super_mods[i], UP_KEYCODE,
+                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+    xcb_grab_key(Connection, 1, Screen^.root, super_mods[i], DOWN_KEYCODE,
                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
   end;
   xcb_flush(Connection);
@@ -1784,23 +1810,36 @@ end;
 
 procedure TWMSamaCompositingWM.BeginDrag(const AClient: TXCBWMClient; const AMode: TXCBDragMode; const ARootX, ARootY: Integer);
 begin
+  FLastDragX := ARootX;
+  FLastDragY := ARootY;
   inherited BeginDrag(AClient, AMode, ARootX, ARootY);
 end;
 
 procedure TWMSamaCompositingWM.UpdateDrag(const ARootX, ARootY: Integer);
 var
-  sw, sh, threshold: Integer;
+  sw, sh, threshold, deltaDist: Integer;
   newX, newY: Integer;
   wa: TXCBRect;
+  targetMon: TXCBMonitor;
+  hasLeftNeighbor, hasRightNeighbor, hasTopNeighbor: Boolean;
 begin
+  deltaDist := Sqr(ARootX - FLastDragX) + Sqr(ARootY - FLastDragY);
+  FLastDragX := ARootX;
+  FLastDragY := ARootY;
+
   if (DragClient <> nil) and (DragMode = dmMove) and
      ((wsMaximizedHorz in DragClient.State) or (wsTiledLeft in DragClient.State) or (wsTiledRight in DragClient.State)) then
   begin
     DragClient.Restore();
     // Center title bar horizontally under cursor
     newX := ARootX - (DragClient.CurrentRect.Width div 2);
-    // Position cursor in the middle of title bar vertically (clamp to top of workarea)
-    newY := Max(Workarea.Y, ARootY - (FTitlebarHeight div 2));
+    // Position cursor in the middle of title bar vertically (clamp to top of target monitor workarea)
+    targetMon := MonitorForPoint(ARootX, ARootY);
+    if targetMon <> nil then
+      newY := Max(targetMon.Workarea.Y, ARootY - (FTitlebarHeight div 2))
+    else
+      newY := Max(Workarea.Y, ARootY - (FTitlebarHeight div 2));
+
     DragClient.Move(newX, newY);
     UpdateDragOrigin(ARootX, ARootY, TXCBRect.Create(newX, newY, DragClient.CurrentRect.Width, DragClient.CurrentRect.Height));
   end;
@@ -1811,30 +1850,78 @@ begin
 
   sw := FCompositor.ScreenWidth;
   sh := FCompositor.ScreenHeight;
-  wa := Workarea;
+
+  targetMon := MonitorForPoint(ARootX, ARootY);
+  if targetMon <> nil then
+    wa := targetMon.Workarea
+  else
+    wa := Workarea;
+
   if (wa.Width <= 0) or (wa.Height <= 0) then
     wa := TXCBRect.Create(0, 0, sw, sh);
 
+  hasLeftNeighbor := (targetMon <> nil) and (AdjacentMonitor(targetMon, dirLeft) <> targetMon);
+  hasRightNeighbor := (targetMon <> nil) and (AdjacentMonitor(targetMon, dirRight) <> targetMon);
+  hasTopNeighbor := (targetMon <> nil) and (AdjacentMonitor(targetMon, dirUp) <> targetMon);
+
   threshold := 14;
 
-  // Detect edge snapping triggers bounded by Workarea
+  // Detect edge snapping triggers bounded by current monitor Workarea
+  // If moving toward an interior boundary, high velocity (>20px/step, deltaDist > 400) passes through seamlessly;
+  // slow motion / lingering (deltaDist <= 196, i.e. <= 14px) engages resistance and half-screen snap.
   if ARootY <= wa.Y + threshold then
   begin
-    FActiveSnap := snapMaximize;
-    FSnapPreviewRect := wa;
-    RequestComposite();
+    if (not hasTopNeighbor) or (deltaDist <= 196) then
+    begin
+      FActiveSnap := snapMaximize;
+      FSnapPreviewRect := wa;
+      RequestComposite();
+    end
+    else
+    begin
+      if FActiveSnap <> snapNone then
+      begin
+        FActiveSnap := snapNone;
+        FSnapPreviewRect := TXCBRect.Create(0, 0, 0, 0);
+        RequestComposite();
+      end;
+    end;
   end
   else if ARootX <= wa.X + threshold then
   begin
-    FActiveSnap := snapLeftHalf;
-    FSnapPreviewRect := TXCBRect.Create(wa.X, wa.Y, wa.Width div 2, wa.Height);
-    RequestComposite();
+    if (not hasLeftNeighbor) or (deltaDist <= 196) then
+    begin
+      FActiveSnap := snapLeftHalf;
+      FSnapPreviewRect := TXCBRect.Create(wa.X, wa.Y, wa.Width div 2, wa.Height);
+      RequestComposite();
+    end
+    else
+    begin
+      if FActiveSnap <> snapNone then
+      begin
+        FActiveSnap := snapNone;
+        FSnapPreviewRect := TXCBRect.Create(0, 0, 0, 0);
+        RequestComposite();
+      end;
+    end;
   end
   else if ARootX >= wa.Right() - threshold then
   begin
-    FActiveSnap := snapRightHalf;
-    FSnapPreviewRect := TXCBRect.Create(wa.X + (wa.Width div 2), wa.Y, wa.Width - (wa.Width div 2), wa.Height);
-    RequestComposite();
+    if (not hasRightNeighbor) or (deltaDist <= 196) then
+    begin
+      FActiveSnap := snapRightHalf;
+      FSnapPreviewRect := TXCBRect.Create(wa.X + (wa.Width div 2), wa.Y, wa.Width - (wa.Width div 2), wa.Height);
+      RequestComposite();
+    end
+    else
+    begin
+      if FActiveSnap <> snapNone then
+      begin
+        FActiveSnap := snapNone;
+        FSnapPreviewRect := TXCBRect.Create(0, 0, 0, 0);
+        RequestComposite();
+      end;
+    end;
   end
   else
   begin
@@ -1845,6 +1932,32 @@ begin
       RequestComposite();
     end;
   end;
+end;
+
+procedure TWMSamaCompositingWM.DoOnMonitorsChanged();
+var
+  totalW, totalH, i: Integer;
+  m: TXCBMonitor;
+begin
+  inherited DoOnMonitorsChanged();
+
+  // Recompute root bounding box across all active monitors
+  totalW := 0;
+  totalH := 0;
+  for i := 0 to MonitorCount - 1 do
+  begin
+    m := GetMonitor(i);
+    if m <> nil then
+    begin
+      if m.Rect.Right() > totalW then totalW := m.Rect.Right();
+      if m.Rect.Bottom() > totalH then totalH := m.Rect.Bottom();
+    end;
+  end;
+
+  if (FCompositor <> nil) and (totalW > 0) and (totalH > 0) then
+    FCompositor.Resize(totalW, totalH);
+
+  RequestComposite();
 end;
 
 procedure TWMSamaCompositingWM.EndDrag();
@@ -1947,6 +2060,8 @@ var
   itemX, itemY, itemW, itemH, i: Integer;
   cli: TXCBWMClient;
   titleStr: AnsiString;
+  targetMon: TXCBMonitor;
+  hudArea: TXCBRect;
 begin
   if (FCompositor = nil) or (ACanvas = nil) then Exit;
   sw := FCompositor.ScreenWidth;
@@ -1967,10 +2082,20 @@ begin
   // 2. Render Alt+Tab Window Switcher Overlay HUD
   if FAltTabActive and (Clients.Count > 0) then
   begin
-    cardW := Min(Workarea.Width - 40, Max(360, Clients.Count * 130 + 40));
+    targetMon := nil;
+    if ActiveClient <> nil then
+      targetMon := MonitorForClient(ActiveClient);
+    if targetMon = nil then
+      targetMon := PrimaryMonitor;
+    if targetMon <> nil then
+      hudArea := targetMon.Workarea
+    else
+      hudArea := Workarea;
+
+    cardW := Min(hudArea.Width - 40, Max(360, Clients.Count * 130 + 40));
     cardH := 120;
-    cardX := Workarea.X + (Workarea.Width - cardW) div 2;
-    cardY := Workarea.Y + (Workarea.Height - cardH) div 2;
+    cardX := hudArea.X + (hudArea.Width - cardW) div 2;
+    cardY := hudArea.Y + (hudArea.Height - cardH) div 2;
 
     // Card shadow and dark frosted glass background
     ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 16, 0, 8, 24, 0.0, 0.0, 0.0, 0.55);
@@ -2069,6 +2194,7 @@ var
   geomRect: TXCBRect;
   compWin: TXCBCompositedWindow;
   cli, oldCli, menuCli, targetCli, candidateCli: TXCBWMClient;
+  curMon, adjMon: TXCBMonitor;
   localX, localY, bw, th, newBtn: Integer;
   oldWin, pressedWin: xcb_window_t;
   btnIdx, releasedBtn, rx, ry, itemIdx, i: Integer;
@@ -2125,6 +2251,32 @@ begin
         if Connection <> nil then
           xcb_ungrab_keyboard(Connection, XCB_CURRENT_TIME);
         TriggerAltTabDismiss();
+        Exit(True);
+      end
+      else if ((keyEv^.state and (64 or 1)) = (64 or 1)) and // Mod4 (Super) + Shift
+              ((keyEv^.detail = 113) or (keyEv^.detail = 114) or (keyEv^.detail = 111) or (keyEv^.detail = 116)) then
+      begin
+        targetCli := ActiveClient;
+        if targetCli <> nil then
+        begin
+          curMon := MonitorForClient(targetCli);
+          if curMon <> nil then
+          begin
+            case keyEv^.detail of
+              113: adjMon := AdjacentMonitor(curMon, dirLeft);
+              114: adjMon := AdjacentMonitor(curMon, dirRight);
+              111: adjMon := AdjacentMonitor(curMon, dirUp);
+              116: adjMon := AdjacentMonitor(curMon, dirDown);
+            else
+              adjMon := curMon;
+            end;
+            if (adjMon <> nil) and (adjMon <> curMon) then
+            begin
+              MoveClientToMonitor(targetCli, adjMon);
+              RequestComposite();
+            end;
+          end;
+        end;
         Exit(True);
       end;
     end;

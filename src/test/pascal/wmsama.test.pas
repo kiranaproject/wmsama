@@ -37,6 +37,9 @@ type
     procedure TestWindowMinimizeAndRestoreCompositor();
     procedure TestUndecoratedAndSplashCornerRadius();
     procedure TestCSDAndAltClickDragging();
+    procedure TestMultiMonitorSnappingAndResistance();
+    procedure TestMultiMonitorKeyboardNavigation();
+    procedure TestMultiMonitorAltTabAndAutoMigration();
   end;
 
 implementation
@@ -1107,6 +1110,140 @@ begin
     AssertEquals('CSD set Y', 250, cliCSD.CurrentRect.Y);
     AssertEquals('CSD set Width', 750, cliCSD.CurrentRect.Width);
     AssertEquals('CSD set Height', 500, cliCSD.CurrentRect.Height);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestMultiMonitorSnappingAndResistance();
+var
+  wm: TWMSamaCompositingWM;
+  mon1, mon2: TXCBMonitor;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // Set up dual monitors: Mon1 (0, 0, 1920, 1080) and Mon2 (1920, 0, 1920, 1080)
+    wm.Monitors.Clear();
+    mon1 := TXCBMonitor.Create('DP-1', TXCBRect.Create(0, 0, 1920, 1080), True, 0);
+    mon2 := TXCBMonitor.Create('HDMI-1', TXCBRect.Create(1920, 0, 1920, 1080), False, 1);
+    wm.Monitors.Add(mon1);
+    wm.Monitors.Add(mon2);
+    wm.RecomputeWorkareas();
+
+    cli := wm.ManageWindow(1234);
+    cli.CurrentRect := TXCBRect.Create(200, 200, 600, 400);
+
+    // 1. Drag near interior boundary (Mon1 right edge = 1920)
+    wm.BeginDrag(cli, dmMove, 1000, 500);
+
+    // Slow drag / lingering (delta = 4px <= 14px) engages resistance and right-half snap on Mon1
+    wm.UpdateDrag(1912, 500);
+    wm.UpdateDrag(1916, 500);
+    AssertEquals('ActiveSnap is snapRightHalf on slow motion', Integer(snapRightHalf), Integer(wm.ActiveSnap));
+    AssertEquals('Snap preview X is right half of Mon1', 960, wm.SnapPreviewRect.X);
+    AssertEquals('Snap preview Width is 960', 960, wm.SnapPreviewRect.Width);
+
+    // Fast flick across interior boundary (delta = 30px > 20px) passes through freely without snap
+    wm.UpdateDrag(1946, 500);
+    AssertEquals('ActiveSnap is snapNone on fast movement across boundary', Integer(snapNone), Integer(wm.ActiveSnap));
+    AssertEquals('Snap preview cleared', 0, wm.SnapPreviewRect.Width);
+
+    wm.EndDrag();
+
+    // 2. Drag near exterior boundary (Mon1 left edge = 0)
+    wm.BeginDrag(cli, dmMove, 500, 500);
+    // Left edge has no neighbor, so snap triggers
+    wm.UpdateDrag(5, 500);
+    AssertEquals('ActiveSnap is snapLeftHalf on exterior boundary', Integer(snapLeftHalf), Integer(wm.ActiveSnap));
+    AssertEquals('Snap preview X is Mon1 left half', 0, wm.SnapPreviewRect.X);
+    AssertEquals('Snap preview Width is 960', 960, wm.SnapPreviewRect.Width);
+    wm.EndDrag();
+
+    // Tiled on Mon1
+    AssertTrue('Window tiled left on Mon1', wsTiledLeft in cli.State);
+    AssertEquals('Tiled left width', 960, cli.CurrentRect.Width);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestMultiMonitorKeyboardNavigation();
+var
+  wm: TWMSamaCompositingWM;
+  mon1, mon2: TXCBMonitor;
+  cli: TXCBWMClient;
+  keyEv: xcb_key_press_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Monitors.Clear();
+    mon1 := TXCBMonitor.Create('DP-1', TXCBRect.Create(0, 0, 1920, 1080), True, 0);
+    mon2 := TXCBMonitor.Create('HDMI-1', TXCBRect.Create(1920, 0, 1920, 1080), False, 1);
+    wm.Monitors.Add(mon1);
+    wm.Monitors.Add(mon2);
+    wm.RecomputeWorkareas();
+
+    cli := wm.ManageWindow(4321);
+    cli.CurrentRect := TXCBRect.Create(100, 100, 600, 400);
+    wm.ActiveClient := cli;
+
+    // Send Super + Shift + Right (keycode 114, state 65)
+    FillChar(keyEv, SizeOf(keyEv), 0);
+    keyEv.response_type := XCB_KEY_PRESS;
+    keyEv.detail := 114;
+    keyEv.state := 65; // Mod4 + Shift
+
+    AssertTrue('Processed Super+Shift+Right', wm.ProcessEvent(Pxcb_generic_event_t(@keyEv)));
+    AssertSame('Client moved to Mon2', mon2, cli.CurrentMonitor());
+    AssertEquals('Client X shifted to Mon2', 1920 + 100, cli.CurrentRect.X);
+
+    // Send Super + Shift + Left (keycode 113, state 65)
+    keyEv.detail := 113;
+    AssertTrue('Processed Super+Shift+Left', wm.ProcessEvent(Pxcb_generic_event_t(@keyEv)));
+    AssertSame('Client moved back to Mon1', mon1, cli.CurrentMonitor());
+    AssertEquals('Client X shifted to Mon1', 100, cli.CurrentRect.X);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestMultiMonitorAltTabAndAutoMigration();
+var
+  wm: TWMSamaCompositingWM;
+  mon1, mon2: TXCBMonitor;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Monitors.Clear();
+    mon1 := TXCBMonitor.Create('DP-1', TXCBRect.Create(0, 0, 1920, 1080), True, 0);
+    mon2 := TXCBMonitor.Create('HDMI-1', TXCBRect.Create(1920, 0, 1920, 1080), False, 1);
+    wm.Monitors.Add(mon1);
+    wm.Monitors.Add(mon2);
+    wm.RecomputeWorkareas();
+
+    cli := wm.ManageWindow(9876);
+    cli.CurrentRect := TXCBRect.Create(2100, 200, 600, 400); // Placed on Mon2
+    wm.ActiveClient := cli;
+
+    // Alt+Tab HUD
+    wm.TriggerAltTabForward();
+    AssertTrue('AltTab active', wm.AltTabActive);
+    wm.RenderComposite(); // Verifies no crash rendering HUD centered on Mon2
+
+    wm.TriggerAltTabDismiss();
+    AssertFalse('AltTab dismissed', wm.AltTabActive);
+
+    // Simulate Mon2 disconnect
+    wm.Monitors.Remove(mon2);
+    AssertEquals('Mon1 is only remaining monitor', 1, wm.MonitorCount);
+    wm.DoOnMonitorsChanged();
+
+    // Client must have auto-migrated to Mon1
+    AssertSame('Client migrated to Mon1', mon1, cli.CurrentMonitor());
+    AssertTrue('Client within Mon1 X', cli.CurrentRect.X >= mon1.Workarea.X);
+    AssertTrue('Client right edge within Mon1', cli.CurrentRect.Right() <= mon1.Workarea.Right());
   finally
     wm.Free();
   end;
