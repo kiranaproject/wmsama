@@ -911,65 +911,80 @@ begin
     AssertNotNull('compNormal registered', compNormal);
     AssertEquals('Normal window has top corner radius 12', 12, compNormal.CornerRadius);
     AssertEquals('Normal window has bottom corner radius 12', 12, compNormal.BottomCornerRadius);
+    AssertTrue('Normal window has shadow enabled', compNormal.ShadowConfig.Enabled);
 
-    // 2. Splash screen (e.g. Lazarus or Inkscape splash) -> MUST be 0
+    // 2. Splash screen (e.g. Lazarus or Inkscape splash) -> MUST be 0 corners, NO shadow
     cliSplash := TXCBWMClient.Create(9002, wm);
     cliSplash.WindowType := wtSplash;
     cliSplash.SetGeometry(200, 150, 400, 300);
     wm.Clients.Add(cliSplash);
     compSplash := wm.Compositor.RegisterWindow(cliSplash.ClientWindow, cliSplash.CurrentRect, 0);
     wm.ApplyClientCornerRadius(cliSplash, compSplash);
+    wm.ApplyClientShadow(cliSplash, compSplash);
     AssertNotNull('compSplash registered', compSplash);
     AssertEquals('Splash screen corner radius is 0', 0, compSplash.CornerRadius);
     AssertEquals('Splash screen bottom corner radius is 0', 0, compSplash.BottomCornerRadius);
+    AssertFalse('Splash screen shadow is disabled', compSplash.ShadowConfig.Enabled);
 
-    // 3. Panel / Dock window -> MUST be 0
+    // 3. Panel / Dock window -> MUST be 0 corners, NO shadow
     cliDock := TXCBWMClient.Create(9003, wm);
     cliDock.WindowType := wtDock;
     cliDock.SetGeometry(0, 730, 1024, 38);
     wm.Clients.Add(cliDock);
     compDock := wm.Compositor.RegisterWindow(cliDock.ClientWindow, cliDock.CurrentRect, 0);
     wm.ApplyClientCornerRadius(cliDock, compDock);
+    wm.ApplyClientShadow(cliDock, compDock);
     AssertNotNull('compDock registered', compDock);
     AssertEquals('Panel / Dock corner radius is 0', 0, compDock.CornerRadius);
     AssertEquals('Panel / Dock bottom corner radius is 0', 0, compDock.BottomCornerRadius);
+    AssertFalse('Panel / Dock shadow is disabled', compDock.ShadowConfig.Enabled);
 
-    // 4. Borderless window (undecorated) -> MUST be 0
+    // 4. Borderless window (undecorated) -> MUST be 0 corners, NO shadow
     cliBorderless := TXCBWMClient.Create(9004, wm);
     cliBorderless.Borderless := True;
     cliBorderless.SetGeometry(100, 100, 300, 200);
     wm.Clients.Add(cliBorderless);
     compBorderless := wm.Compositor.RegisterWindow(cliBorderless.ClientWindow, cliBorderless.CurrentRect, 0);
     wm.ApplyClientCornerRadius(cliBorderless, compBorderless);
+    wm.ApplyClientShadow(cliBorderless, compBorderless);
     AssertNotNull('compBorderless registered', compBorderless);
     AssertEquals('Borderless window corner radius is 0', 0, compBorderless.CornerRadius);
     AssertEquals('Borderless window bottom corner radius is 0', 0, compBorderless.BottomCornerRadius);
+    AssertFalse('Borderless window shadow is disabled', compBorderless.ShadowConfig.Enabled);
 
-    // 5. Popup menu -> MUST have rounded corners (6)
+    // 5. Popup menu -> MUST have rounded corners (6) and shadow
     cliMenu := TXCBWMClient.Create(9005, wm);
     cliMenu.WindowType := wtPopupMenu;
     cliMenu.SetGeometry(150, 150, 180, 240);
     wm.Clients.Add(cliMenu);
     compMenu := wm.Compositor.RegisterWindow(cliMenu.ClientWindow, cliMenu.CurrentRect, 0);
     wm.ApplyClientCornerRadius(cliMenu, compMenu);
+    wm.ApplyClientShadow(cliMenu, compMenu);
     AssertNotNull('compMenu registered', compMenu);
     AssertEquals('Popup menu corner radius is 6', 6, compMenu.CornerRadius);
     AssertEquals('Popup menu bottom corner radius is 6', 6, compMenu.BottomCornerRadius);
+    AssertTrue('Popup menu shadow is enabled', compMenu.ShadowConfig.Enabled);
 
-    // 6. Test updating WM CornerRadius:
-    // Only decorated windows should update. Undecorated (splash, dock, borderless) must STAY 0! Menu stays 6!
+    // 6. Test updating WM CornerRadius and Shadow:
+    // Only decorated windows should update. Undecorated (splash, dock, borderless) must STAY 0 and NO shadow! Menu stays 6 and shadowed!
     wm.CornerRadius := 16;
     wm.BottomCornerRadius := 18;
+    wm.ShadowRadius := 20;
     AssertEquals('Normal window updated top corner radius to 16', 16, compNormal.CornerRadius);
     AssertEquals('Normal window updated bottom corner radius to 18', 18, compNormal.BottomCornerRadius);
+    AssertTrue('Normal window shadow remains enabled', compNormal.ShadowConfig.Enabled);
     AssertEquals('Splash screen remains 0', 0, compSplash.CornerRadius);
     AssertEquals('Splash screen bottom remains 0', 0, compSplash.BottomCornerRadius);
+    AssertFalse('Splash screen shadow remains disabled', compSplash.ShadowConfig.Enabled);
     AssertEquals('Dock remains 0', 0, compDock.CornerRadius);
     AssertEquals('Dock bottom remains 0', 0, compDock.BottomCornerRadius);
+    AssertFalse('Dock shadow remains disabled', compDock.ShadowConfig.Enabled);
     AssertEquals('Borderless remains 0', 0, compBorderless.CornerRadius);
     AssertEquals('Borderless bottom remains 0', 0, compBorderless.BottomCornerRadius);
+    AssertFalse('Borderless shadow remains disabled', compBorderless.ShadowConfig.Enabled);
     AssertEquals('Menu remains 6', 6, compMenu.CornerRadius);
     AssertEquals('Menu bottom remains 6', 6, compMenu.BottomCornerRadius);
+    AssertTrue('Menu shadow remains enabled', compMenu.ShadowConfig.Enabled);
   finally
     wm.Free();
   end;

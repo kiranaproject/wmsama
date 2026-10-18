@@ -152,6 +152,8 @@ type
   public
     function IsWindowMenu(const AWindow: xcb_window_t): Boolean;
     procedure ApplyClientCornerRadius(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
+    procedure ApplyClientShadow(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
+    procedure UpdateAllWindowShadows();
 
     constructor Create(AConn: Pxcb_connection_t = nil; const AScreenNum: Integer = 0);
     destructor Destroy(); override;
@@ -396,13 +398,14 @@ begin
                     begin
                       compWin.CornerRadius := 6;
                       compWin.BottomCornerRadius := 6;
+                      compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
                     end
                     else
                     begin
                       compWin.CornerRadius := 0;
                       compWin.BottomCornerRadius := 0;
+                      compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
                     end;
-                    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
                     FCompositor.Windows.Extract(compWin);
                     FCompositor.Windows.Add(compWin);
                     compWin.MarkDamaged();
@@ -514,43 +517,43 @@ end;
 procedure TWMSamaCompositingWM.SetShadowEnabled(const AValue: Boolean);
 begin
   FShadowEnabled := AValue;
-  RequestComposite();
+  UpdateAllWindowShadows();
 end;
 
 procedure TWMSamaCompositingWM.SetShadowRadius(const AValue: Integer);
 begin
   FShadowRadius := Max(0, AValue);
-  RequestComposite();
+  UpdateAllWindowShadows();
 end;
 
 procedure TWMSamaCompositingWM.SetShadowOffsetY(const AValue: Integer);
 begin
   FShadowOffsetY := AValue;
-  RequestComposite();
+  UpdateAllWindowShadows();
 end;
 
 procedure TWMSamaCompositingWM.SetShadowOpacity(const AValue: Single);
 begin
   FShadowOpacity := AValue;
-  RequestComposite();
+  UpdateAllWindowShadows();
 end;
 
 procedure TWMSamaCompositingWM.SetActiveShadowRadius(const AValue: Integer);
 begin
   FActiveShadowRadius := Max(0, AValue);
-  RequestComposite();
+  UpdateAllWindowShadows();
 end;
 
 procedure TWMSamaCompositingWM.SetActiveShadowOffsetY(const AValue: Integer);
 begin
   FActiveShadowOffsetY := AValue;
-  RequestComposite();
+  UpdateAllWindowShadows();
 end;
 
 procedure TWMSamaCompositingWM.SetActiveShadowOpacity(const AValue: Single);
 begin
   FActiveShadowOpacity := AValue;
-  RequestComposite();
+  UpdateAllWindowShadows();
 end;
 
 procedure TWMSamaCompositingWM.SetTitlebarHeight(const AValue: Integer);
@@ -687,6 +690,53 @@ begin
     ACompWin.CornerRadius := 0;
     ACompWin.BottomCornerRadius := 0;
   end;
+end;
+
+procedure TWMSamaCompositingWM.ApplyClientShadow(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
+begin
+  if (AClient = nil) or (ACompWin = nil) then Exit;
+
+  if AClient.IsMenu() then
+  begin
+    ACompWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
+  end
+  else if AClient.IsDecorated() and
+          not ((wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) or
+               (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State)) then
+  begin
+    if AClient = ActiveClient then
+      ACompWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FActiveShadowRadius, FActiveShadowOffsetY, FActiveShadowOpacity)
+    else
+      ACompWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FShadowRadius, FShadowOffsetY, FShadowOpacity);
+  end
+  else
+  begin
+    // Undecorated windows (splash screens, docks/panels, borderless, tooltips,
+    // notifications, or maximized/tiled windows) must NOT have shadows.
+    ACompWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
+  end;
+end;
+
+procedure TWMSamaCompositingWM.UpdateAllWindowShadows();
+var
+  i: Integer;
+  compWin: TXCBCompositedWindow;
+  cli: TXCBWMClient;
+begin
+  if FCompositor = nil then Exit;
+
+  for i := 0 to FCompositor.Windows.Count - 1 do
+  begin
+    compWin := TXCBCompositedWindow(FCompositor.Windows[i]);
+    cli := FindClient(compWin.Window);
+    if cli <> nil then
+      ApplyClientShadow(cli, compWin)
+    else if IsWindowMenu(compWin.Window) then
+      compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20)
+    else
+      compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
+  end;
+  RequestComposite();
 end;
 
 procedure TWMSamaCompositingWM.SetCornerRadius(const AValue: Integer);
@@ -927,10 +977,7 @@ begin
   compWin := FCompositor.RegisterWindow(targetWin, AClient.CurrentRect, frameWin);
   if compWin <> nil then
   begin
-    if AClient = ActiveClient then
-      compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FActiveShadowRadius, FActiveShadowOffsetY, FActiveShadowOpacity)
-    else
-      compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FShadowRadius, FShadowOffsetY, FShadowOpacity);
+    ApplyClientShadow(AClient, compWin);
 
     compWin.HasBackdropBlur := FBlurEnabled;
     compWin.BlurRadius := FBlurRadius;
@@ -1070,14 +1117,12 @@ begin
     begin
       if cli = AClient then
       begin
-        compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FActiveShadowRadius, FActiveShadowOffsetY, FActiveShadowOpacity);
         // Move active window to top of stacking order in compositor
         FCompositor.Windows.Extract(compWin);
         FCompositor.Windows.Add(compWin);
-      end
-      else
-        compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FShadowRadius, FShadowOffsetY, FShadowOpacity);
+      end;
 
+      ApplyClientShadow(cli, compWin);
       ApplyClientCornerRadius(cli, compWin);
     end;
   end;
@@ -1129,6 +1174,7 @@ begin
       compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
                              AClient.CurrentRect.Width, AClient.CurrentRect.Height);
 
+    ApplyClientShadow(AClient, compWin);
     ApplyClientCornerRadius(AClient, compWin);
     compWin.MarkDamaged();
   end;
@@ -2474,13 +2520,14 @@ begin
                   begin
                     compWin.CornerRadius := 6;
                     compWin.BottomCornerRadius := 6;
+                    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
                   end
                   else
                   begin
                     compWin.CornerRadius := 0;
                     compWin.BottomCornerRadius := 0;
+                    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
                   end;
-                  compWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, 10, 1, 0.20);
                   // Float popup menu to top of compositor stacking order
                   FCompositor.Windows.Extract(compWin);
                   FCompositor.Windows.Add(compWin);
