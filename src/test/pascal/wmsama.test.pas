@@ -7,6 +7,7 @@ interface
 uses
   Classes, SysUtils, fpcunit, testregistry,
   Floria.XCB,
+  Floria.XCB.EWMH,
   Floria.XCB.WM,
   Floria.XCB.WM.Compositor,
   Floria.Image.Core,
@@ -35,6 +36,7 @@ type
     procedure TestWindowSnappingWithStrutsAndWorkarea();
     procedure TestWindowMinimizeAndRestoreCompositor();
     procedure TestUndecoratedAndSplashCornerRadius();
+    procedure TestCSDAndAltClickDragging();
   end;
 
 implementation
@@ -985,6 +987,126 @@ begin
     AssertEquals('Menu remains 6', 6, compMenu.CornerRadius);
     AssertEquals('Menu bottom remains 6', 6, compMenu.BottomCornerRadius);
     AssertTrue('Menu shadow remains enabled', compMenu.ShadowConfig.Enabled);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestCSDAndAltClickDragging();
+var
+  wm: TWMSamaCompositingWM;
+  cliCSD: TXCBWMClient;
+  compCSD: TXCBCompositedWindow;
+  MockEwmh: xcb_ewmh_connection_t;
+  btnEv: xcb_button_press_event_t;
+  msgEv: xcb_client_message_event_t;
+  data32: PCardinalArray;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    FillChar(MockEwmh, SizeOf(MockEwmh), 0);
+    MockEwmh._NET_WM_MOVERESIZE := 2001;
+    MockEwmh._NET_MOVERESIZE_WINDOW := 2002;
+    MockEwmh._NET_REQUEST_FRAME_EXTENTS := 2003;
+    wm.Ewmh := MockEwmh;
+    wm.EwmhInitialized := True;
+
+    cliCSD := TXCBWMClient.Create(7777, wm);
+    cliCSD.Borderless := True;
+    cliCSD.CurrentRect := TXCBRect.Create(100, 100, 600, 400);
+    wm.Clients.Add(cliCSD);
+    compCSD := wm.Compositor.RegisterWindow(cliCSD.ClientWindow, cliCSD.CurrentRect, 0);
+    wm.ApplyClientCornerRadius(cliCSD, compCSD);
+    wm.ApplyClientShadow(cliCSD, compCSD);
+
+    AssertFalse('CSD is not decorated', cliCSD.IsDecorated());
+    AssertEquals('CSD corner radius 0', 0, compCSD.CornerRadius);
+    AssertFalse('CSD shadow disabled', compCSD.ShadowConfig.Enabled);
+
+    // 1. Test Alt + Left-Click on CSD window -> initiates dmMove
+    FillChar(btnEv, SizeOf(btnEv), 0);
+    btnEv.response_type := XCB_BUTTON_PRESS;
+    btnEv.event := 7777;
+    btnEv.root_x := 150;
+    btnEv.root_y := 150;
+    btnEv.state := 8; // Mod1 (Alt)
+    btnEv.detail := XCB_BUTTON_INDEX_1;
+
+    AssertTrue('Handled Alt+Button1', wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    AssertEquals('DragMode is dmMove', Integer(dmMove), Integer(wm.DragMode));
+    AssertSame('DragClient is cliCSD', cliCSD, wm.DragClient);
+    AssertSame('ActiveClient is cliCSD', cliCSD, wm.ActiveClient);
+
+    // Update drag motion
+    wm.UpdateDrag(200, 220); // dx = +50, dy = +70
+    AssertEquals('Moved X', 150, cliCSD.CurrentRect.X);
+    AssertEquals('Moved Y', 170, cliCSD.CurrentRect.Y);
+    wm.EndDrag();
+    AssertEquals('DragMode is dmNone after end', Integer(dmNone), Integer(wm.DragMode));
+    AssertNull('DragClient is nil after end', wm.DragClient);
+
+    // 2. Test Alt + Right-Click on CSD window -> initiates dmResize
+    FillChar(btnEv, SizeOf(btnEv), 0);
+    btnEv.response_type := XCB_BUTTON_PRESS;
+    btnEv.event := 7777;
+    btnEv.root_x := 150;
+    btnEv.root_y := 150;
+    btnEv.state := 8; // Mod1 (Alt)
+    btnEv.detail := XCB_BUTTON_INDEX_3;
+
+    AssertTrue('Handled Alt+Button3', wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    AssertEquals('DragMode is dmResize', Integer(dmResize), Integer(wm.DragMode));
+    AssertSame('DragClient is cliCSD', cliCSD, wm.DragClient);
+
+    // Update drag resize
+    wm.UpdateDrag(250, 200); // dx = +100, dy = +50
+    AssertEquals('Resized Width', 700, cliCSD.CurrentRect.Width);
+    AssertEquals('Resized Height', 450, cliCSD.CurrentRect.Height);
+    wm.EndDrag();
+
+    // 3. Test _NET_WM_MOVERESIZE client message from CSD titlebar (e.g. VS Code / GTK)
+    FillChar(msgEv, SizeOf(msgEv), 0);
+    msgEv.response_type := XCB_CLIENT_MESSAGE;
+    msgEv.window := 7777;
+    msgEv.type_ := 2001;
+    data32 := PCardinalArray(@msgEv.data.raw[0]);
+    data32^[0] := 250; // x_root
+    data32^[1] := 210; // y_root
+    data32^[2] := 8;   // _NET_WM_MOVERESIZE_MOVE
+    data32^[3] := 1;   // button 1
+    data32^[4] := 1;   // source normal application
+
+    AssertTrue('Handled _NET_WM_MOVERESIZE', wm.ProcessEvent(Pxcb_generic_event_t(@msgEv)));
+    AssertEquals('DragMode is dmMove via EWMH', Integer(dmMove), Integer(wm.DragMode));
+    AssertSame('DragClient is cliCSD via EWMH', cliCSD, wm.DragClient);
+
+    wm.UpdateDrag(300, 260); // dx = +50, dy = +50
+    AssertEquals('CSD moved X via EWMH', 200, cliCSD.CurrentRect.X); // 150 + 50
+    AssertEquals('CSD moved Y via EWMH', 220, cliCSD.CurrentRect.Y); // 170 + 50
+
+    // Cancel drag via direction 11
+    data32^[2] := 11; // _NET_WM_MOVERESIZE_CANCEL
+    AssertTrue('Handled _NET_WM_MOVERESIZE_CANCEL', wm.ProcessEvent(Pxcb_generic_event_t(@msgEv)));
+    AssertEquals('DragMode is dmNone after cancel', Integer(dmNone), Integer(wm.DragMode));
+    AssertNull('DragClient is nil after cancel', wm.DragClient);
+
+    // 4. Test _NET_MOVERESIZE_WINDOW client message (programmatic move/resize)
+    FillChar(msgEv, SizeOf(msgEv), 0);
+    msgEv.response_type := XCB_CLIENT_MESSAGE;
+    msgEv.window := 7777;
+    msgEv.type_ := 2002;
+    data32 := PCardinalArray(@msgEv.data.raw[0]);
+    data32^[0] := (1 shl 8) or (1 shl 9) or (1 shl 10) or (1 shl 11); // x, y, width, height flags
+    data32^[1] := 300; // x
+    data32^[2] := 250; // y
+    data32^[3] := 750; // width
+    data32^[4] := 500; // height
+
+    AssertTrue('Handled _NET_MOVERESIZE_WINDOW', wm.ProcessEvent(Pxcb_generic_event_t(@msgEv)));
+    AssertEquals('CSD set X', 300, cliCSD.CurrentRect.X);
+    AssertEquals('CSD set Y', 250, cliCSD.CurrentRect.Y);
+    AssertEquals('CSD set Width', 750, cliCSD.CurrentRect.Width);
+    AssertEquals('CSD set Height', 500, cliCSD.CurrentRect.Height);
   finally
     wm.Free();
   end;

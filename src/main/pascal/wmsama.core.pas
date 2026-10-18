@@ -2397,6 +2397,24 @@ begin
             end;
           end;
 
+          // Alt + Left Click to move, Alt + Right Click to resize ANY window (including CSD windows)
+          if (btnEv^.state and 8) <> 0 then
+          begin
+            cli.Activate();
+            if Connection <> nil then
+              xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
+            if btnEv^.detail = XCB_BUTTON_INDEX_1 then
+            begin
+              BeginDrag(cli, dmMove, btnEv^.root_x, btnEv^.root_y);
+              Exit(True);
+            end
+            else if btnEv^.detail = XCB_BUTTON_INDEX_3 then
+            begin
+              BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
+              Exit(True);
+            end;
+          end;
+
           // Pure client window click (inside xterm or app): activate client and replay pointer immediately!
           // (No resize inside ClientWindow, guaranteeing that text selection in xterm never accidentally triggers resize!)
           cli.Activate();
