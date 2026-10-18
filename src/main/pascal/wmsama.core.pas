@@ -1560,6 +1560,7 @@ procedure TWMSamaCompositingWM.UpdateDrag(const ARootX, ARootY: Integer);
 var
   sw, sh, threshold: Integer;
   newX, newY: Integer;
+  wa: TXCBRect;
 begin
   if (DragClient <> nil) and (DragMode = dmMove) and
      ((wsMaximizedHorz in DragClient.State) or (wsTiledLeft in DragClient.State) or (wsTiledRight in DragClient.State)) then
@@ -1567,8 +1568,8 @@ begin
     DragClient.Restore();
     // Center title bar horizontally under cursor
     newX := ARootX - (DragClient.CurrentRect.Width div 2);
-    // Position cursor in the middle of title bar vertically (clamp to top of screen)
-    newY := Max(0, ARootY - (FTitlebarHeight div 2));
+    // Position cursor in the middle of title bar vertically (clamp to top of workarea)
+    newY := Max(Workarea.Y, ARootY - (FTitlebarHeight div 2));
     DragClient.Move(newX, newY);
     UpdateDragOrigin(ARootX, ARootY, TXCBRect.Create(newX, newY, DragClient.CurrentRect.Width, DragClient.CurrentRect.Height));
   end;
@@ -1579,25 +1580,29 @@ begin
 
   sw := FCompositor.ScreenWidth;
   sh := FCompositor.ScreenHeight;
+  wa := Workarea;
+  if (wa.Width <= 0) or (wa.Height <= 0) then
+    wa := TXCBRect.Create(0, 0, sw, sh);
+
   threshold := 14;
 
-  // Detect edge snapping triggers
-  if ARootY <= threshold then
+  // Detect edge snapping triggers bounded by Workarea
+  if ARootY <= wa.Y + threshold then
   begin
     FActiveSnap := snapMaximize;
-    FSnapPreviewRect := TXCBRect.Create(0, 0, sw, sh);
+    FSnapPreviewRect := wa;
     RequestComposite();
   end
-  else if ARootX <= threshold then
+  else if ARootX <= wa.X + threshold then
   begin
     FActiveSnap := snapLeftHalf;
-    FSnapPreviewRect := TXCBRect.Create(0, 0, sw div 2, sh);
+    FSnapPreviewRect := TXCBRect.Create(wa.X, wa.Y, wa.Width div 2, wa.Height);
     RequestComposite();
   end
-  else if ARootX >= sw - threshold then
+  else if ARootX >= wa.Right() - threshold then
   begin
     FActiveSnap := snapRightHalf;
-    FSnapPreviewRect := TXCBRect.Create(sw div 2, 0, sw - (sw div 2), sh);
+    FSnapPreviewRect := TXCBRect.Create(wa.X + (wa.Width div 2), wa.Y, wa.Width - (wa.Width div 2), wa.Height);
     RequestComposite();
   end
   else
@@ -1731,10 +1736,10 @@ begin
   // 2. Render Alt+Tab Window Switcher Overlay HUD
   if FAltTabActive and (Clients.Count > 0) then
   begin
-    cardW := Min(sw - 40, Max(360, Clients.Count * 130 + 40));
+    cardW := Min(Workarea.Width - 40, Max(360, Clients.Count * 130 + 40));
     cardH := 120;
-    cardX := (sw - cardW) div 2;
-    cardY := (sh - cardH) div 2;
+    cardX := Workarea.X + (Workarea.Width - cardW) div 2;
+    cardY := Workarea.Y + (Workarea.Height - cardH) div 2;
 
     // Card shadow and dark frosted glass background
     ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 16, 0, 8, 24, 0.0, 0.0, 0.0, 0.55);

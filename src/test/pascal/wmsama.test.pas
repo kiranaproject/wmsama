@@ -32,6 +32,7 @@ type
     procedure TestWindowResizingDirectionalAndTiled();
     procedure TestWindowCursors();
     procedure TestWindowButtonReleaseAndCancel();
+    procedure TestWindowSnappingWithStrutsAndWorkarea();
   end;
 
 implementation
@@ -752,6 +753,83 @@ begin
 
     wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
     AssertFalse('Client successfully restored on release within bounds!', wsMaximizedHorz in cli.State);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowSnappingWithStrutsAndWorkarea();
+var
+  wm: TWMSamaCompositingWM;
+  dockTop, dockBottom: TXCBWMClient;
+  cli: TXCBWMClient;
+  s: TXCBStrutPartial;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // Add top dock with 38px strut
+    dockTop := wm.ManageWindow(7001);
+    dockTop.WindowType := wtDock;
+    s := TXCBStrutPartial.Create();
+    s.Top := 38;
+    dockTop.Strut := s;
+
+    // Add bottom dock with 40px strut
+    dockBottom := wm.ManageWindow(7002);
+    dockBottom.WindowType := wtDock;
+    s := TXCBStrutPartial.Create();
+    s.Bottom := 40;
+    dockBottom.Strut := s;
+
+    wm.RecomputeWorkarea();
+
+    AssertEquals('Workarea Y is 38', 38, wm.Workarea.Y);
+    AssertEquals('Workarea Height is screen - 78', wm.Compositor.ScreenHeight - 78, wm.Workarea.Height);
+
+    // Create client window
+    cli := wm.ManageWindow(7003);
+    cli.SetGeometry(100, 100, 800, 600);
+
+    // 1. Drag toward top threshold within workarea (e.g. Y = 40)
+    wm.BeginDrag(cli, dmMove, 500, 200);
+    wm.UpdateDrag(500, 40); // 40 <= 38 + 14 threshold
+    AssertEquals('Snap mode is maximize', Ord(snapMaximize), Ord(wm.ActiveSnap));
+    AssertEquals('Snap preview Y matches Workarea Y', 38, wm.SnapPreviewRect.Y);
+    AssertEquals('Snap preview Height matches Workarea Height', wm.Workarea.Height, wm.SnapPreviewRect.Height);
+    AssertEquals('Snap preview Width matches Workarea Width', wm.Workarea.Width, wm.SnapPreviewRect.Width);
+    wm.EndDrag();
+
+    AssertTrue('Client maximized', wsMaximizedHorz in cli.State);
+    AssertEquals('Client maximized Y is 38', 38, cli.CurrentRect.Y);
+    AssertEquals('Client maximized Height matches Workarea', wm.Workarea.Height, cli.CurrentRect.Height);
+
+    // 2. Drag toward left edge
+    wm.BeginDrag(cli, dmMove, 500, 200);
+    wm.UpdateDrag(5, 300); // Drag to left threshold
+    AssertEquals('Snap mode is left half', Ord(snapLeftHalf), Ord(wm.ActiveSnap));
+    AssertEquals('Snap preview Y is Workarea Y', 38, wm.SnapPreviewRect.Y);
+    AssertEquals('Snap preview Height is Workarea Height', wm.Workarea.Height, wm.SnapPreviewRect.Height);
+    AssertEquals('Snap preview Width is Workarea Width div 2', wm.Workarea.Width div 2, wm.SnapPreviewRect.Width);
+    wm.EndDrag();
+
+    AssertTrue('Client tiled left', wsTiledLeft in cli.State);
+    AssertEquals('Client tiled Y is 38', 38, cli.CurrentRect.Y);
+    AssertEquals('Client tiled Height matches Workarea', wm.Workarea.Height, cli.CurrentRect.Height);
+    AssertEquals('Client tiled Width matches Workarea half', wm.Workarea.Width div 2, cli.CurrentRect.Width);
+
+    // 3. Drag toward right edge
+    wm.BeginDrag(cli, dmMove, 500, 200);
+    wm.UpdateDrag(wm.Workarea.Right() - 5, 300);
+    AssertEquals('Snap mode is right half', Ord(snapRightHalf), Ord(wm.ActiveSnap));
+    AssertEquals('Snap preview X is right half start', wm.Workarea.X + (wm.Workarea.Width div 2), wm.SnapPreviewRect.X);
+    AssertEquals('Snap preview Y is Workarea Y', 38, wm.SnapPreviewRect.Y);
+    AssertEquals('Snap preview Width is remaining width', wm.Workarea.Width - (wm.Workarea.Width div 2), wm.SnapPreviewRect.Width);
+    wm.EndDrag();
+
+    AssertTrue('Client tiled right', wsTiledRight in cli.State);
+    AssertEquals('Client tiled X is right half start', wm.Workarea.X + (wm.Workarea.Width div 2), cli.CurrentRect.X);
+    AssertEquals('Client tiled Y is 38', 38, cli.CurrentRect.Y);
+    AssertEquals('Client tiled Height matches Workarea', wm.Workarea.Height, cli.CurrentRect.Height);
   finally
     wm.Free();
   end;
