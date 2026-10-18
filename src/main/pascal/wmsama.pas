@@ -8,7 +8,7 @@ program wmsama;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, BaseUnix,
+  SysUtils, Math, BaseUnix,
   Floria.XCB,
   Floria.XCB.WM,
   Floria.XCB.WM.Compositor,
@@ -71,6 +71,7 @@ begin
 end;
 
 begin
+  SetExceptionMask([exInvalidOp, exDenormalized, exZeroDivide, exOverflow, exUnderflow, exPrecision]);
   WriteLn('wmsama — X11 Compositing Window Manager (Samarinda DE)');
   WriteLn('Powered by florialib, AggPas & XCB');
 
