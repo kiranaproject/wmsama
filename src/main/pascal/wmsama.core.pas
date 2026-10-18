@@ -146,6 +146,8 @@ type
     procedure DoOnClientUnmapped(const AClient: TXCBWMClient); override;
     procedure DoOnClientActivated(const AClient: TXCBWMClient); override;
     procedure DoOnClientConfigure(const AClient: TXCBWMClient); override;
+    procedure DoOnClientMinimized(const AClient: TXCBWMClient); override;
+    procedure DoOnClientRestored(const AClient: TXCBWMClient); override;
     procedure DoOnFramePaint(const AClient: TXCBWMClient; const ARect: TXCBRect); override;
   public
     constructor Create(AConn: Pxcb_connection_t = nil; const AScreenNum: Integer = 0);
@@ -821,6 +823,11 @@ begin
     FPressedButton := -1;
     FPressedWindow := 0;
   end;
+  if (AClient.FrameWindow <> 0) and (AClient.FrameWindow = FHoveredWindow) then
+  begin
+    FHoveredButton := -1;
+    FHoveredWindow := 0;
+  end;
 
   for i := 0 to High(FShadedWindows) do
     if FShadedWindows[i].WindowId = AClient.ClientWindow then
@@ -837,6 +844,69 @@ begin
     FCompositor.UnregisterWindow(AClient.FrameWindow);
   FCompositor.UnregisterWindow(AClient.ClientWindow);
 
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.DoOnClientMinimized(const AClient: TXCBWMClient);
+var
+  compWin: TXCBCompositedWindow;
+  targetWin: xcb_window_t;
+begin
+  inherited DoOnClientMinimized(AClient);
+
+  if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+    targetWin := AClient.FrameWindow
+  else
+    targetWin := AClient.ClientWindow;
+
+  compWin := FCompositor.FindWindow(targetWin);
+  if compWin <> nil then
+    compWin.IsVisible := False;
+
+  if (targetWin <> 0) and (targetWin = FHoveredWindow) then
+  begin
+    FHoveredWindow := 0;
+    FHoveredButton := -1;
+  end;
+  if (targetWin <> 0) and (targetWin = FPressedWindow) then
+  begin
+    FPressedWindow := 0;
+    FPressedButton := -1;
+  end;
+
+  if FWindowMenuClient = AClient then
+    DismissWindowMenu();
+
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.DoOnClientRestored(const AClient: TXCBWMClient);
+var
+  compWin: TXCBCompositedWindow;
+  targetWin: xcb_window_t;
+begin
+  inherited DoOnClientRestored(AClient);
+
+  if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+    targetWin := AClient.FrameWindow
+  else
+    targetWin := AClient.ClientWindow;
+
+  compWin := FCompositor.FindWindow(targetWin);
+  if compWin <> nil then
+  begin
+    compWin.IsVisible := True;
+    compWin.UpdatePixmap();
+    compWin.MarkDamaged();
+  end
+  else
+    DoOnClientMapped(AClient);
+
+  PaintClientFrame(AClient);
   RequestComposite();
 end;
 
@@ -1433,7 +1503,7 @@ var
   btns: TWMSamaButtonArray;
   titleX, titleW: Integer;
 begin
-  if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) then Exit;
+  if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) or (wsMinimized in AClient.State) then Exit;
 
   w := AClient.CurrentRect.Width;
   h := AClient.CurrentRect.Height;

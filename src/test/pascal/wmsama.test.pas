@@ -33,6 +33,7 @@ type
     procedure TestWindowCursors();
     procedure TestWindowButtonReleaseAndCancel();
     procedure TestWindowSnappingWithStrutsAndWorkarea();
+    procedure TestWindowMinimizeAndRestoreCompositor();
   end;
 
 implementation
@@ -830,6 +831,62 @@ begin
     AssertEquals('Client tiled X is right half start', wm.Workarea.X + (wm.Workarea.Width div 2), cli.CurrentRect.X);
     AssertEquals('Client tiled Y is 38', 38, cli.CurrentRect.Y);
     AssertEquals('Client tiled Height matches Workarea', wm.Workarea.Height, cli.CurrentRect.Height);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowMinimizeAndRestoreCompositor();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2: TXCBWMClient;
+  comp1, comp2: TXCBCompositedWindow;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli1 := wm.ManageWindow(5001);
+    cli2 := wm.ManageWindow(5002);
+    cli1.SetGeometry(100, 100, 400, 300);
+    cli2.SetGeometry(200, 200, 400, 300);
+
+    cli1.Activate();
+    AssertSame('cli1 is active', cli1, wm.ActiveClient);
+
+    comp1 := wm.Compositor.FindWindow(cli1.ClientWindow);
+    comp2 := wm.Compositor.FindWindow(cli2.ClientWindow);
+    AssertNotNull('comp1 registered', comp1);
+    AssertNotNull('comp2 registered', comp2);
+    AssertTrue('comp1 visible initially', comp1.IsVisible);
+    AssertTrue('comp2 visible initially', comp2.IsVisible);
+
+    // 1. Minimize cli1
+    cli1.Minimize();
+    AssertTrue('cli1 is minimized', wsMinimized in cli1.State);
+    AssertFalse('comp1 is hidden in compositor', comp1.IsVisible);
+    // Automatic focus handoff to cli2
+    AssertSame('cli2 active after cli1 minimized', cli2, wm.ActiveClient);
+    AssertTrue('comp2 remains visible', comp2.IsVisible);
+
+    // 2. Unminimize cli1
+    cli1.Unminimize();
+    AssertFalse('cli1 no longer minimized', wsMinimized in cli1.State);
+    AssertTrue('comp1 visible again in compositor', comp1.IsVisible);
+    AssertSame('cli1 active after unminimize', cli1, wm.ActiveClient);
+
+    // 3. Minimize cli1 and restore via Activate
+    cli1.Minimize();
+    AssertFalse('comp1 hidden again', comp1.IsVisible);
+    cli1.Activate();
+    AssertFalse('cli1 unminimized via Activate', wsMinimized in cli1.State);
+    AssertTrue('comp1 visible via Activate', comp1.IsVisible);
+    AssertSame('cli1 active', cli1, wm.ActiveClient);
+
+    // 4. Minimize cli1 and restore via Restore
+    cli1.Minimize();
+    AssertFalse('comp1 hidden again', comp1.IsVisible);
+    cli1.Restore();
+    AssertFalse('cli1 unminimized via Restore', wsMinimized in cli1.State);
+    AssertTrue('comp1 visible via Restore', comp1.IsVisible);
   finally
     wm.Free();
   end;
