@@ -177,10 +177,13 @@ type
     procedure PaintClientFrame(const AClient: TXCBWMClient);
 
     // Window Button Layout and Hit Detection
-    procedure CalculateButtons(const AWidth: Integer; out AButtons: TWMSamaButtonArray; out ATitleX, ATitleW: Integer);
+    procedure CalculateButtons(const AWidth: Integer; out AButtons: TWMSamaButtonArray; out ATitleX, ATitleW: Integer); overload;
+    procedure CalculateButtons(const AClient: TXCBWMClient; const AWidth: Integer; out AButtons: TWMSamaButtonArray; out ATitleX, ATitleW: Integer); overload;
     procedure GetWindowButtonMetrics(out ABtnSize, ABtnY, AX0, AX1, AX2: Double; out ATitleX: Integer);
-    function GetButtonAt(const AX, AY: Integer; const AWidth: Integer = 820): Integer;
-    function IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean;
+    function GetButtonAt(const AX, AY: Integer; const AWidth: Integer = 820): Integer; overload;
+    function GetButtonAt(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer = 0): Integer; overload;
+    function IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean; overload;
+    function IsTitlebarDraggable(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer = 0): Boolean; overload;
     function GetResizeModeForPoint(const AClient: TXCBWMClient; const ARootX, ARootY: Integer): TXCBDragMode;
 
     // Additional Window Controls (Shade, Keep on Top, Window Menu)
@@ -195,6 +198,7 @@ type
     procedure UpdateDrag(const ARootX, ARootY: Integer); override;
     procedure EndDrag(); override;
     procedure UpdateHoverCursor(const ACursor: xcb_cursor_t; const AEventWindow: xcb_window_t);
+    procedure DoOnClientPropertiesChanged(const AClient: TXCBWMClient); override;
 
     // Alt+Tab HUD controls
     procedure TriggerAltTabForward();
@@ -1216,11 +1220,19 @@ begin
 end;
 
 procedure TWMSamaCompositingWM.CalculateButtons(const AWidth: Integer; out AButtons: TWMSamaButtonArray; out ATitleX, ATitleW: Integer);
+begin
+  CalculateButtons(nil, AWidth, AButtons, ATitleX, ATitleW);
+end;
+
+procedure TWMSamaCompositingWM.CalculateButtons(const AClient: TXCBWMClient; const AWidth: Integer; out AButtons: TWMSamaButtonArray; out ATitleX, ATitleW: Integer);
 var
   btnSize, gap, mLeft, mRight, btnY, curX: Double;
   leftCount, rightCount, i: Integer;
   totalRightWidth, rightStartX: Double;
   w: Integer;
+  visibleItems: array of TWMSamaButtonLayoutItem;
+  includeBtn: Boolean;
+  visCount: Integer;
 begin
   w := AWidth;
   if w <= 0 then
@@ -1237,13 +1249,35 @@ begin
   mRight := mLeft;
   btnY := (FTitlebarHeight - btnSize) * 0.5;
 
-  SetLength(AButtons, Length(FButtonLayoutItems));
+  // Filter visible layout items based on client capabilities/flags
+  SetLength(visibleItems, Length(FButtonLayoutItems));
+  visCount := 0;
+  for i := 0 to High(FButtonLayoutItems) do
+  begin
+    includeBtn := True;
+    if AClient <> nil then
+    begin
+      case FButtonLayoutItems[i].Kind of
+        sbkClose:    includeBtn := AClient.HasCloseButton;
+        sbkMinimize: includeBtn := AClient.HasMinimizeButton;
+        sbkMaximize: includeBtn := AClient.HasMaximizeButton;
+      end;
+    end;
+    if includeBtn then
+    begin
+      visibleItems[visCount] := FButtonLayoutItems[i];
+      Inc(visCount);
+    end;
+  end;
+  SetLength(visibleItems, visCount);
+
+  SetLength(AButtons, Length(visibleItems));
   leftCount := 0;
   rightCount := 0;
 
-  for i := 0 to High(FButtonLayoutItems) do
+  for i := 0 to High(visibleItems) do
   begin
-    if FButtonLayoutItems[i].Placement = bpLeft then
+    if visibleItems[i].Placement = bpLeft then
       Inc(leftCount)
     else
       Inc(rightCount);
@@ -1251,11 +1285,11 @@ begin
 
   // 1. Position Left Buttons
   curX := mLeft;
-  for i := 0 to High(FButtonLayoutItems) do
+  for i := 0 to High(visibleItems) do
   begin
-    if FButtonLayoutItems[i].Placement = bpLeft then
+    if visibleItems[i].Placement = bpLeft then
     begin
-      AButtons[i].Kind := FButtonLayoutItems[i].Kind;
+      AButtons[i].Kind := visibleItems[i].Kind;
       AButtons[i].Placement := bpLeft;
       AButtons[i].X := curX;
       AButtons[i].Y := btnY;
@@ -1275,11 +1309,11 @@ begin
     totalRightWidth := (rightCount * btnSize) + ((rightCount - 1) * gap);
     rightStartX := w - mRight - totalRightWidth;
     curX := rightStartX;
-    for i := 0 to High(FButtonLayoutItems) do
+    for i := 0 to High(visibleItems) do
     begin
-      if FButtonLayoutItems[i].Placement = bpRight then
+      if visibleItems[i].Placement = bpRight then
       begin
-        AButtons[i].Kind := FButtonLayoutItems[i].Kind;
+        AButtons[i].Kind := visibleItems[i].Kind;
         AButtons[i].Placement := bpRight;
         AButtons[i].X := curX;
         AButtons[i].Y := btnY;
@@ -1316,15 +1350,25 @@ begin
 end;
 
 function TWMSamaCompositingWM.GetButtonAt(const AX, AY: Integer; const AWidth: Integer): Integer;
+begin
+  Result := GetButtonAt(AX, AY, nil, AWidth);
+end;
+
+function TWMSamaCompositingWM.GetButtonAt(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer): Integer;
 var
   btns: TWMSamaButtonArray;
-  tX, tW, i: Integer;
+  tX, tW, i, w: Integer;
   pad: Double;
 begin
   Result := -1;
   if (AY < 0) or (AY >= FTitlebarHeight) then Exit;
 
-  CalculateButtons(AWidth, btns, tX, tW);
+  w := AWidth;
+  if (w <= 0) and (AClient <> nil) then
+    w := AClient.CurrentRect.Width;
+  if w <= 0 then w := 820;
+
+  CalculateButtons(AClient, w, btns, tX, tW);
   pad := 3.0;
 
   for i := 0 to High(btns) do
@@ -1336,19 +1380,29 @@ begin
 end;
 
 function TWMSamaCompositingWM.IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean;
+begin
+  Result := IsTitlebarDraggable(AX, AY, nil, AWidth);
+end;
+
+function TWMSamaCompositingWM.IsTitlebarDraggable(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer): Boolean;
 var
   btns: TWMSamaButtonArray;
-  tX, tW, i: Integer;
+  tX, tW, i, w: Integer;
   leftEnd, rightStart: Double;
 begin
   Result := False;
   if (AY < 0) or (AY >= FTitlebarHeight) then Exit;
 
-  CalculateButtons(AWidth, btns, tX, tW);
-  if GetButtonAt(AX, AY, AWidth) >= 0 then Exit(False);
+  w := AWidth;
+  if (w <= 0) and (AClient <> nil) then
+    w := AClient.CurrentRect.Width;
+  if w <= 0 then w := 820;
+
+  CalculateButtons(AClient, w, btns, tX, tW);
+  if GetButtonAt(AX, AY, AClient, w) >= 0 then Exit(False);
 
   leftEnd := 0.0;
-  rightStart := AWidth;
+  rightStart := w;
 
   for i := 0 to High(btns) do
   begin
@@ -1365,7 +1419,7 @@ begin
   end;
 
   if leftEnd > 0 then leftEnd := leftEnd + 2.0;
-  if rightStart < AWidth then rightStart := rightStart - 2.0;
+  if rightStart < w then rightStart := rightStart - 2.0;
 
   Result := (AX >= leftEnd) and (AX <= rightStart);
 end;
@@ -1380,6 +1434,9 @@ var
 begin
   Result := dmNone;
   if AClient = nil then Exit;
+
+  // Windows that cannot resize never trigger resize modes
+  if not AClient.CanResize then Exit;
 
   // Maximized and fullscreen windows cannot be resized
   if (wsMaximizedHorz in AClient.State) or (wsMaximizedVert in AClient.State) or
@@ -1617,7 +1674,7 @@ begin
   FWindowMenuClient := AClient;
   menuBtnX := 8;
 
-  CalculateButtons(AClient.CurrentRect.Width, btns, tX, tW);
+  CalculateButtons(AClient, AClient.CurrentRect.Width, btns, tX, tW);
   for i := 0 to High(btns) do
     if btns[i].Kind = sbkMenu then
     begin
@@ -1723,7 +1780,7 @@ begin
       end;
 
       // 2. Vector Window Buttons via Floria Toolkit (libft.so)
-      CalculateButtons(w, btns, titleX, titleW);
+      CalculateButtons(AClient, w, btns, titleX, titleW);
 
       for i := 0 to High(btns) do
       begin
@@ -1869,7 +1926,7 @@ begin
   // Detect edge snapping triggers bounded by current monitor Workarea
   // If moving toward an interior boundary, high velocity (>20px/step, deltaDist > 400) passes through seamlessly;
   // slow motion / lingering (deltaDist <= 196, i.e. <= 14px) engages resistance and half-screen snap.
-  if ARootY <= wa.Y + threshold then
+  if (ARootY <= wa.Y + threshold) and DragClient.CanMaximize then
   begin
     if (not hasTopNeighbor) or (deltaDist <= 196) then
     begin
@@ -1887,7 +1944,7 @@ begin
       end;
     end;
   end
-  else if ARootX <= wa.X + threshold then
+  else if (ARootX <= wa.X + threshold) and DragClient.CanResize then
   begin
     if (not hasLeftNeighbor) or (deltaDist <= 196) then
     begin
@@ -1905,7 +1962,7 @@ begin
       end;
     end;
   end
-  else if ARootX >= wa.Right() - threshold then
+  else if (ARootX >= wa.Right() - threshold) and DragClient.CanResize then
   begin
     if (not hasRightNeighbor) or (deltaDist <= 196) then
     begin
@@ -2022,6 +2079,16 @@ begin
       SetWindowCursor(Screen^.root, CursorNormal);
       CurrentRootCursor := CursorNormal;
     end;
+  end;
+end;
+
+procedure TWMSamaCompositingWM.DoOnClientPropertiesChanged(const AClient: TXCBWMClient);
+begin
+  inherited DoOnClientPropertiesChanged(AClient);
+  if AClient <> nil then
+  begin
+    PaintClientFrame(AClient);
+    RequestComposite();
   end;
 end;
 
@@ -2199,6 +2266,8 @@ var
   oldWin, pressedWin: xcb_window_t;
   btnIdx, releasedBtn, rx, ry, itemIdx, i: Integer;
   resizeMode: TXCBDragMode;
+  btns: TWMSamaButtonArray;
+  titleX, titleW: Integer;
 begin
   Result := False;
   if AEvent = nil then Exit;
@@ -2304,7 +2373,7 @@ begin
         begin
           localX := motionEv^.event_x;
           localY := motionEv^.event_y;
-          newBtn := GetButtonAt(localX, localY, cli.CurrentRect.Width);
+          newBtn := GetButtonAt(localX, localY, cli, cli.CurrentRect.Width);
 
           if (newBtn <> FHoveredButton) or (cli.FrameWindow <> FHoveredWindow) then
           begin
@@ -2398,7 +2467,7 @@ begin
         begin
           localX := btnEv^.event_x;
           localY := btnEv^.event_y;
-          releasedBtn := GetButtonAt(localX, localY, cli.CurrentRect.Width);
+          releasedBtn := GetButtonAt(localX, localY, cli, cli.CurrentRect.Width);
 
           FHoveredButton := releasedBtn;
           FHoveredWindow := cli.FrameWindow;
@@ -2406,16 +2475,17 @@ begin
           RequestComposite();
 
           // ONLY trigger button action if released within the SAME button's click bound area!
-          if (releasedBtn = btnIdx) and (btnIdx >= 0) and (btnIdx <= High(FButtonLayoutItems)) then
+          CalculateButtons(cli, cli.CurrentRect.Width, btns, titleX, titleW);
+          if (releasedBtn = btnIdx) and (btnIdx >= 0) and (btnIdx <= High(btns)) then
           begin
-            case FButtonLayoutItems[btnIdx].Kind of
+            case btns[btnIdx].Kind of
               sbkClose: cli.Close();
               sbkMinimize: cli.Minimize();
               sbkMaximize:
               begin
                 if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
                   cli.Restore()
-                else
+                else if cli.CanMaximize then
                   cli.Maximize();
               end;
               sbkShade: ToggleShade(cli);
@@ -2591,7 +2661,7 @@ begin
             xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
 
           // A. Handle click on control dots (actions trigger on mouse button release)
-          btnIdx := GetButtonAt(localX, localY, cli.CurrentRect.Width);
+          btnIdx := GetButtonAt(localX, localY, cli, cli.CurrentRect.Width);
           if (btnIdx >= 0) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             FPressedButton := btnIdx;
@@ -2604,7 +2674,7 @@ begin
           end;
 
           // B. Right-click on titlebar to resize window (legacy shortcut)
-          if (localY >= 0) and (localY < th) and (btnEv^.detail = XCB_BUTTON_INDEX_3) then
+          if (localY >= 0) and (localY < th) and (btnEv^.detail = XCB_BUTTON_INDEX_3) and cli.CanResize then
           begin
             BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
             Exit(True);
@@ -2634,13 +2704,13 @@ begin
           end;
 
           // E. Handle Double-Click or drag on draggable titlebar area
-          if (localY >= 0) and (localY < th) and IsTitlebarDraggable(localX, localY, cli.CurrentRect.Width) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+          if (localY >= 0) and (localY < th) and IsTitlebarDraggable(localX, localY, cli, cli.CurrentRect.Width) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
             begin
               if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
                 cli.Restore()
-              else
+              else if cli.CanMaximize then
                 cli.Maximize();
               FLastClickTime := 0;
               Exit(True);

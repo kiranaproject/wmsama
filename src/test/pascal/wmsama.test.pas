@@ -40,6 +40,7 @@ type
     procedure TestMultiMonitorSnappingAndResistance();
     procedure TestMultiMonitorKeyboardNavigation();
     procedure TestMultiMonitorAltTabAndAutoMigration();
+    procedure TestNonResizableAndButtonFiltering();
   end;
 
 implementation
@@ -1244,6 +1245,68 @@ begin
     AssertSame('Client migrated to Mon1', mon1, cli.CurrentMonitor());
     AssertTrue('Client within Mon1 X', cli.CurrentRect.X >= mon1.Workarea.X);
     AssertTrue('Client right edge within Mon1', cli.CurrentRect.Right() <= mon1.Workarea.Right());
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestNonResizableAndButtonFiltering();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  btns: TWMSamaButtonArray;
+  tX, tW, btnIdx: Integer;
+  mode: TXCBDragMode;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(5555);
+    cli.CurrentRect := TXCBRect.Create(100, 100, 600, 400);
+
+    // 1. By default, all 3 standard buttons (Close, Minimize, Maximize) are generated
+    wm.CalculateButtons(cli, cli.CurrentRect.Width, btns, tX, tW);
+    AssertEquals('Default button count', 3, Length(btns));
+    AssertEquals('Btn 0 is Close', Ord(sbkClose), Ord(btns[0].Kind));
+    AssertEquals('Btn 1 is Minimize', Ord(sbkMinimize), Ord(btns[1].Kind));
+    AssertEquals('Btn 2 is Maximize', Ord(sbkMaximize), Ord(btns[2].Kind));
+
+    // 2. Hide Maximize button (e.g. BorderIcons without biMaximize)
+    cli.HasMaximizeButton := False;
+    wm.CalculateButtons(cli, cli.CurrentRect.Width, btns, tX, tW);
+    AssertEquals('Button count without Maximize', 2, Length(btns));
+    AssertEquals('Btn 0 is still Close', Ord(sbkClose), Ord(btns[0].Kind));
+    AssertEquals('Btn 1 is still Minimize', Ord(sbkMinimize), Ord(btns[1].Kind));
+
+    // Hit-testing should not hit maximize
+    btnIdx := wm.GetButtonAt(Round(btns[1].X), Round(btns[1].Y), cli, cli.CurrentRect.Width);
+    AssertEquals('Hit-test button 1 returns Minimize index', 1, btnIdx);
+
+    // 3. Dialog window: hide both Minimize and Maximize (e.g. BorderStyle = bsDialog)
+    cli.HasMinimizeButton := False;
+    wm.CalculateButtons(cli, cli.CurrentRect.Width, btns, tX, tW);
+    AssertEquals('Button count for dialog', 1, Length(btns));
+    AssertEquals('Only Close remains', Ord(sbkClose), Ord(btns[0].Kind));
+
+    // 4. Non-resizable window (e.g. BorderStyle = bsSingle / bsDialog or min_size = max_size)
+    cli.CanResize := False;
+    // Outer perimeter right edge [700..708) would normally return dmResizeRight
+    mode := wm.GetResizeModeForPoint(cli, 704, 250);
+    AssertEquals('GetResizeModeForPoint returns dmNone when CanResize=False', Ord(dmNone), Ord(mode));
+    // Corner [704, 504) would normally return dmResizeBottomRight
+    mode := wm.GetResizeModeForPoint(cli, 704, 504);
+    AssertEquals('Corner returns dmNone when CanResize=False', Ord(dmNone), Ord(mode));
+
+    // 5. Snapping suppression for non-resizable and non-maximizable windows
+    cli.CanMaximize := False;
+    wm.BeginDrag(cli, dmMove, 200, 100);
+    // Drag to top of screen (wa.Y = 0)
+    wm.UpdateDrag(200, 5);
+    AssertEquals('snapMaximize suppressed when CanMaximize=False', Ord(snapNone), Ord(wm.ActiveSnap));
+
+    // Drag to left of screen (wa.X = 0)
+    wm.UpdateDrag(5, 200);
+    AssertEquals('snapLeftHalf suppressed when CanResize=False', Ord(snapNone), Ord(wm.ActiveSnap));
+    wm.EndDrag();
   finally
     wm.Free();
   end;
