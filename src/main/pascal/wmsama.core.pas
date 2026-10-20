@@ -201,6 +201,8 @@ type
     procedure DoOnClientPropertiesChanged(const AClient: TXCBWMClient); override;
 
     // Alt+Tab HUD controls
+    function IsAltTabEligible(const AClient: TXCBWMClient): Boolean;
+    procedure GetAltTabEligibleClients(const AList: TFPList);
     procedure TriggerAltTabForward();
     procedure TriggerAltTabDismiss();
 
@@ -1007,6 +1009,13 @@ begin
   compWin := FCompositor.RegisterWindow(targetWin, AClient.CurrentRect, frameWin);
   if compWin <> nil then
   begin
+    if AClient.WindowType = wtDesktop then
+    begin
+      // Desktop windows must be pinned to the absolute bottom of compositor stack
+      FCompositor.Windows.Extract(compWin);
+      FCompositor.Windows.Insert(0, compWin);
+    end;
+
     ApplyClientShadow(AClient, compWin);
 
     compWin.HasBackdropBlur := FBlurEnabled;
@@ -1147,9 +1156,18 @@ begin
     begin
       if cli = AClient then
       begin
-        // Move active window to top of stacking order in compositor
-        FCompositor.Windows.Extract(compWin);
-        FCompositor.Windows.Add(compWin);
+        if cli.WindowType = wtDesktop then
+        begin
+          // Desktop background stays at absolute bottom
+          FCompositor.Windows.Extract(compWin);
+          FCompositor.Windows.Insert(0, compWin);
+        end
+        else
+        begin
+          // Move active window to top of stacking order in compositor
+          FCompositor.Windows.Extract(compWin);
+          FCompositor.Windows.Add(compWin);
+        end;
       end;
 
       ApplyClientShadow(cli, compWin);
@@ -1191,6 +1209,25 @@ begin
       begin
         FCompositor.Windows.Extract(compWin);
         FCompositor.Windows.Add(compWin);
+      end;
+    end;
+  end;
+
+  // Ensure all wtDesktop windows remain at the very bottom of stacking order
+  for i := 0 to Clients.Count - 1 do
+  begin
+    cli := TXCBWMClient(Clients[i]);
+    if cli.WindowType = wtDesktop then
+    begin
+      if cli.IsReparented and (cli.FrameWindow <> 0) then
+        targetWin := cli.FrameWindow
+      else
+        targetWin := cli.ClientWindow;
+      compWin := FCompositor.FindWindow(targetWin);
+      if compWin <> nil then
+      begin
+        FCompositor.Windows.Extract(compWin);
+        FCompositor.Windows.Insert(0, compWin);
       end;
     end;
   end;
@@ -2111,30 +2148,70 @@ begin
   end;
 end;
 
-procedure TWMSamaCompositingWM.TriggerAltTabForward();
+function TWMSamaCompositingWM.IsAltTabEligible(const AClient: TXCBWMClient): Boolean;
 begin
-  if Clients.Count <= 0 then Exit;
-  if not FAltTabActive then
-  begin
-    FAltTabActive := True;
-    FAltTabIndex := 0;
-  end;
+  if AClient = nil then Exit(False);
+  // Exclude desktop background, docks/panels, splashes, menus, tooltips, notifications
+  if AClient.WindowType in [wtDesktop, wtDock, wtSplash, wtMenu, wtDropdownMenu, wtPopupMenu, wtTooltip, wtNotification, wtCombo, wtDnd] then
+    Exit(False);
+  Result := True;
+end;
 
-  FAltTabIndex := (FAltTabIndex + 1) mod Clients.Count;
-  RequestComposite();
+procedure TWMSamaCompositingWM.GetAltTabEligibleClients(const AList: TFPList);
+var
+  i: Integer;
+  cli: TXCBWMClient;
+begin
+  if AList = nil then Exit;
+  AList.Clear();
+  for i := 0 to Clients.Count - 1 do
+  begin
+    cli := TXCBWMClient(Clients[i]);
+    if IsAltTabEligible(cli) then
+      AList.Add(cli);
+  end;
+end;
+
+procedure TWMSamaCompositingWM.TriggerAltTabForward();
+var
+  eligibleList: TFPList;
+begin
+  eligibleList := TFPList.Create();
+  try
+    GetAltTabEligibleClients(eligibleList);
+    if eligibleList.Count <= 0 then Exit;
+
+    if not FAltTabActive then
+    begin
+      FAltTabActive := True;
+      FAltTabIndex := 0;
+    end;
+
+    FAltTabIndex := (FAltTabIndex + 1) mod eligibleList.Count;
+    RequestComposite();
+  finally
+    eligibleList.Free();
+  end;
 end;
 
 procedure TWMSamaCompositingWM.TriggerAltTabDismiss();
 var
+  eligibleList: TFPList;
   targetCli: TXCBWMClient;
 begin
   if not FAltTabActive then Exit;
   FAltTabActive := False;
 
-  if (Clients.Count > 0) and (FAltTabIndex >= 0) and (FAltTabIndex < Clients.Count) then
-  begin
-    targetCli := TXCBWMClient(Clients[FAltTabIndex]);
-    targetCli.Activate();
+  eligibleList := TFPList.Create();
+  try
+    GetAltTabEligibleClients(eligibleList);
+    if (eligibleList.Count > 0) and (FAltTabIndex >= 0) and (FAltTabIndex < eligibleList.Count) then
+    begin
+      targetCli := TXCBWMClient(eligibleList[FAltTabIndex]);
+      targetCli.Activate();
+    end;
+  finally
+    eligibleList.Free();
   end;
 
   RequestComposite();
@@ -2148,6 +2225,7 @@ var
   titleStr: AnsiString;
   targetMon: TXCBMonitor;
   hudArea: TXCBRect;
+  eligibleList: TFPList;
 begin
   if (FCompositor = nil) or (ACanvas = nil) then Exit;
   sw := FCompositor.ScreenWidth;
@@ -2166,7 +2244,10 @@ begin
   end;
 
   // 2. Render Alt+Tab Window Switcher Overlay HUD
-  if FAltTabActive and (Clients.Count > 0) then
+  eligibleList := TFPList.Create();
+  try
+    GetAltTabEligibleClients(eligibleList);
+    if FAltTabActive and (eligibleList.Count > 0) then
   begin
     targetMon := nil;
     if ActiveClient <> nil then
@@ -2178,7 +2259,7 @@ begin
     else
       hudArea := Workarea;
 
-    cardW := Min(hudArea.Width - 40, Max(360, Clients.Count * 130 + 40));
+    cardW := Min(hudArea.Width - 40, Max(360, eligibleList.Count * 130 + 40));
     cardH := 120;
     cardX := hudArea.X + (hudArea.Width - cardW) div 2;
     cardY := hudArea.Y + (hudArea.Height - cardH) div 2;
@@ -2191,9 +2272,9 @@ begin
     itemW := 114;
     itemH := 88;
 
-    for i := 0 to Clients.Count - 1 do
+    for i := 0 to eligibleList.Count - 1 do
     begin
-      cli := TXCBWMClient(Clients[i]);
+      cli := TXCBWMClient(eligibleList[i]);
       itemX := cardX + 20 + (i * 130);
       itemY := cardY + 16;
       if itemX + itemW > cardX + cardW - 10 then Break;
@@ -2220,6 +2301,9 @@ begin
         ACanvas.DrawTextLeft(itemX + 8, itemY + 54, itemW - 16, 24, titleStr, nil, 147 / 255, 153 / 255, 178 / 255);
       end;
     end;
+  end;
+  finally
+    eligibleList.Free();
   end;
 
   // 3. Render Window Action Menu Overlay HUD

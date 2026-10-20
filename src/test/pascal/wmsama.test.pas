@@ -42,6 +42,7 @@ type
     procedure TestMultiMonitorAltTabAndAutoMigration();
     procedure TestNonResizableAndButtonFiltering();
     procedure TestTransientDialogStackingAndICCCMPlacement();
+    procedure TestDesktopWindowCompositingAndAltTabExclusion();
   end;
 
 implementation
@@ -1360,6 +1361,69 @@ begin
 
     dialogCli.TransientFor := dockCli.ClientWindow;
     AssertEquals('TransientFor set to dock client window', dockCli.ClientWindow, dialogCli.TransientFor);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestDesktopWindowCompositingAndAltTabExclusion();
+var
+  wm: TWMSamaCompositingWM;
+  parentCli, deskCli, dockCli: TXCBWMClient;
+  compParent, compDesk: TXCBCompositedWindow;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    parentCli := wm.ManageWindow(8001);
+    parentCli.WindowType := wtNormal;
+    parentCli.Title := 'Text Editor';
+    parentCli.CurrentRect := TXCBRect.Create(200, 100, 800, 600);
+
+    deskCli := wm.ManageWindow(8002);
+    deskCli.WindowType := wtDesktop;
+    deskCli.Title := 'Desktop Wallpaper';
+    deskCli.CurrentRect := TXCBRect.Create(0, 0, 1920, 1080);
+
+    dockCli := wm.ManageWindow(8003);
+    dockCli.WindowType := wtDock;
+    dockCli.Title := 'Panel';
+    dockCli.CurrentRect := TXCBRect.Create(0, 1042, 1920, 38);
+
+    compParent := wm.Compositor.RegisterWindow(parentCli.ClientWindow, parentCli.CurrentRect, 0);
+    compDesk := wm.Compositor.RegisterWindow(deskCli.ClientWindow, deskCli.CurrentRect, 0);
+
+    // 1. Initial desktop bottom stacking
+    wm.Compositor.Windows.Extract(compDesk);
+    wm.Compositor.Windows.Insert(0, compDesk);
+    AssertSame('Desktop window is bottom-most in compositor', compDesk, wm.Compositor.Windows.First);
+
+    // 2. Desktop activation stays at bottom
+    deskCli.Activate();
+    AssertSame('Desktop window remains at bottom-most after activation', compDesk, wm.Compositor.Windows.First);
+
+    // 3. Normal client activation elevates parent, keeps desktop at bottom
+    parentCli.Activate();
+    AssertSame('Parent is top-most window in compositor', compParent, wm.Compositor.Windows.Last);
+    AssertSame('Desktop is still bottom-most window in compositor', compDesk, wm.Compositor.Windows.First);
+
+    // 4. Desktop window styling: no drop shadows, 0 corner radius
+    wm.ApplyClientShadow(deskCli, compDesk);
+    wm.ApplyClientCornerRadius(deskCli, compDesk);
+    AssertFalse('Desktop window has no drop shadow', compDesk.ShadowConfig.Enabled);
+    AssertEquals('Desktop window corner radius is 0', 0, compDesk.CornerRadius);
+
+    // 5. Alt-Tab eligibility: regular window is eligible, desktop and dock are excluded
+    AssertTrue('Normal window is Alt-Tab eligible', wm.IsAltTabEligible(parentCli));
+    AssertFalse('Desktop window is excluded from Alt-Tab', wm.IsAltTabEligible(deskCli));
+    AssertFalse('Dock panel is excluded from Alt-Tab', wm.IsAltTabEligible(dockCli));
+
+    // 6. Dragging and minimizing are suppressed for desktop
+    wm.BeginDrag(deskCli, dmMove, 500, 500);
+    AssertNull('Desktop window cannot be dragged', wm.DragClient);
+
+    deskCli.CanMinimize := False;
+    deskCli.Minimize();
+    AssertFalse('Desktop window cannot be minimized', wsMinimized in deskCli.State);
   finally
     wm.Free();
   end;
