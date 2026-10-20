@@ -41,6 +41,7 @@ type
     procedure TestMultiMonitorKeyboardNavigation();
     procedure TestMultiMonitorAltTabAndAutoMigration();
     procedure TestNonResizableAndButtonFiltering();
+    procedure TestTransientDialogStackingAndICCCMPlacement();
   end;
 
 implementation
@@ -1307,6 +1308,58 @@ begin
     wm.UpdateDrag(5, 200);
     AssertEquals('snapLeftHalf suppressed when CanResize=False', Ord(snapNone), Ord(wm.ActiveSnap));
     wm.EndDrag();
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestTransientDialogStackingAndICCCMPlacement();
+var
+  wm: TWMSamaCompositingWM;
+  parentCli, dialogCli, dockCli: TXCBWMClient;
+  compParent, compDialog: TXCBCompositedWindow;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    parentCli := wm.ManageWindow(7001);
+    parentCli.WindowType := wtNormal;
+    parentCli.CurrentRect := TXCBRect.Create(300, 200, 800, 600);
+
+    dialogCli := wm.ManageWindow(7002);
+    dialogCli.WindowType := wtDialog;
+    dialogCli.CurrentRect := TXCBRect.Create(0, 0, 400, 300);
+
+    compParent := wm.Compositor.RegisterWindow(parentCli.ClientWindow, parentCli.CurrentRect, 0);
+    compDialog := wm.Compositor.RegisterWindow(dialogCli.ClientWindow, dialogCli.CurrentRect, 0);
+
+    // 1. Initial transient-for default
+    AssertEquals('Default TransientFor is 0', 0, dialogCli.TransientFor);
+
+    // 2. Link dialog to parent
+    dialogCli.TransientFor := parentCli.ClientWindow;
+    AssertEquals('TransientFor matches parent client window', parentCli.ClientWindow, dialogCli.TransientFor);
+
+    // 3. Stacking elevation when parent activated
+    parentCli.Activate();
+    AssertSame('Transient dialog is elevated above parent in compositor stacking', compDialog, wm.Compositor.Windows.Last);
+
+    // 4. Parent-child minimizing lifecycle
+    parentCli.Minimize();
+    AssertTrue('Parent is minimized', wsMinimized in parentCli.State);
+    AssertTrue('Transient dialog automatically minimized with parent', wsMinimized in dialogCli.State);
+
+    parentCli.Activate();
+    AssertFalse('Parent restored', wsMinimized in parentCli.State);
+    AssertFalse('Transient dialog restored with parent', wsMinimized in dialogCli.State);
+    AssertSame('Transient dialog is elevated above parent on restore', compDialog, wm.Compositor.Windows.Last);
+
+    // 5. Dock parenting exclusion
+    dockCli := wm.ManageWindow(7003);
+    dockCli.WindowType := wtDock;
+    dockCli.CurrentRect := TXCBRect.Create(0, 1042, 1920, 38);
+
+    dialogCli.TransientFor := dockCli.ClientWindow;
+    AssertEquals('TransientFor set to dock client window', dockCli.ClientWindow, dialogCli.TransientFor);
   finally
     wm.Free();
   end;

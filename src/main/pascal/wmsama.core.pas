@@ -1157,6 +1157,25 @@ begin
     end;
   end;
 
+  // Ensure any transient children belonging to active client remain above it in compositor
+  for i := 0 to Clients.Count - 1 do
+  begin
+    cli := TXCBWMClient(Clients[i]);
+    if (cli <> AClient) and (cli.TransientFor = AClient.ClientWindow) and not (wsMinimized in cli.State) then
+    begin
+      if cli.IsReparented and (cli.FrameWindow <> 0) then
+        targetWin := cli.FrameWindow
+      else
+        targetWin := cli.ClientWindow;
+      compWin := FCompositor.FindWindow(targetWin);
+      if compWin <> nil then
+      begin
+        FCompositor.Windows.Extract(compWin);
+        FCompositor.Windows.Add(compWin);
+      end;
+    end;
+  end;
+
   // Ensure all wsAbove windows remain at the very top of stacking order
   for i := 0 to Clients.Count - 1 do
   begin
