@@ -63,11 +63,11 @@ end;
 
 procedure SigHandler(Sig: LongInt); cdecl;
 begin
-  WriteLn('');
-  WriteLn('[wmsama] Received signal (', Sig, '). Terminating gracefully...');
+  // Async-signal-safe only: no WriteLn, no Halt. RequestShutdown sets a flag and
+  // writes one byte to the WM's self-pipe, which wakes the event pump; the normal
+  // teardown path (WM.Free, xcb_disconnect) then runs from the main flow.
   if WM <> nil then
-    WM.Stop();
-  Halt(0);
+    WM.RequestShutdown();
 end;
 
 begin

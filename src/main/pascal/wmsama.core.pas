@@ -166,6 +166,7 @@ type
     procedure DoOnClientRestored(const AClient: TXCBWMClient); override;
     procedure DoOnMonitorsChanged(); override;
     procedure DoOnFramePaint(const AClient: TXCBWMClient; const ARect: TXCBRect); override;
+    procedure DoOnTick(const AElapsedMs: Integer); override;
   public
     function IsWindowMenu(const AWindow: xcb_window_t): Boolean;
     procedure ApplyClientCornerRadius(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
@@ -3268,8 +3269,6 @@ begin
 end;
 
 procedure TWMSamaCompositingWM.Run();
-var
-  event: Pxcb_generic_event_t;
 begin
   if Connection = nil then Exit;
 
@@ -3278,33 +3277,17 @@ begin
   RequestComposite();
   RenderComposite();
 
-  // Main event pump with batched presentation
-  while True do
-  begin
-    event := xcb_wait_for_event(Connection);
-    if event = nil then Break;
+  // The pump itself (select + self-pipe + tick) lives in the base class so that
+  // shutdown is uniform; this class only decides what to present per tick.
+  inherited Run();
+end;
 
-    try
-      ProcessEvent(event);
-    finally
-      xcb_free(event);
-    end;
-
-    // Process all pending events in queue before compositing
-    while True do
-    begin
-      event := xcb_poll_for_event(Connection);
-      if event = nil then Break;
-      try
-        ProcessEvent(event);
-      finally
-        xcb_free(event);
-      end;
-    end;
-
-    // Single present path: RenderComposite owns the enabled/needed guards.
-    RenderComposite();
-  end;
+procedure TWMSamaCompositingWM.DoOnTick(const AElapsedMs: Integer);
+begin
+  inherited DoOnTick(AElapsedMs);
+  // Presentation happens here, once per pump cycle, rather than inline in the
+  // event handlers. RenderComposite owns the enabled/needed guards.
+  RenderComposite();
 end;
 
 end.
