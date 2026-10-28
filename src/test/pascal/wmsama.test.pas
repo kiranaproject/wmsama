@@ -33,6 +33,7 @@ type
     procedure TestAltTabGrabAlwaysReleased();
     procedure TestXErrorDecoding();
     procedure TestErrorEventsAreConsumed();
+    procedure TestLiveFrameBehaviour();
     procedure TestFloriaToolkitButtonStyling();
     procedure TestButtonAlignmentAndPlacement();
     procedure TestAdditionalWindowControls();
@@ -53,6 +54,23 @@ type
   end;
 
 implementation
+
+// Claiming substructure redirect is exclusive per display. When several tests in
+// one process each claim and release, the server may not have processed the
+// previous connection's close yet, so the next claim fails with BadAccess. Retry
+// briefly rather than silently skipping the test body.
+function TryClaimOwnership(const AWM: TWMSamaCompositingWM): Boolean;
+var
+  Attempt: Integer;
+begin
+  Result := False;
+  for Attempt := 1 to 40 do
+  begin
+    if AWM.ClaimOwnership() then
+      Exit(True);
+    Sleep(10);
+  end;
+end;
 
 procedure TWMSamaTest.TestWMCreation();
 var
@@ -567,9 +585,126 @@ begin
   end;
 end;
 
-// WM-03: an error event (response_type = 0) must be consumed by the WM rather
-// than falling through to the inherited handler, and must never be mistaken for
-// a damage notification.
+// WM-07 / WM-08 / WM-16 live checks.
+//
+// These share one connection pair and one ClaimOwnership. Doing them as four
+// separate tests meant four connect/claim/disconnect cycles in one process, and
+// the third and fourth silently failed to establish a usable connection. One
+// setup also matches how the WM is really used: a single long-lived connection.
+procedure TWMSamaTest.TestLiveFrameBehaviour();
+var
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  wm: TWMSamaCompositingWM;
+  cli, cli2, cli3: TXCBWMClient;
+  w1, w2, w3, Root: xcb_window_t;
+  btnEv: xcb_button_press_event_t;
+  firstGC: xcb_gcontext_t;
+  before, painted: Integer;
+
+  function MakeClient(const ARect: TXCBRect): TXCBWMClient;
+  var
+    W: xcb_window_t;
+  begin
+    W := xcb_generate_id(Obs);
+    xcb_create_window(Obs, XCB_COPY_FROM_PARENT, W, Root,
+                      ARect.X, ARect.Y, ARect.Width, ARect.Height, 0,
+                      XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+    xcb_map_window(Obs, W);
+    xcb_flush(Obs);
+    Result := wm.ManageWindow(W);
+  end;
+
+begin
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then Exit;
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then Exit;
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then Exit;
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      // Needs exclusive display ownership; on a developer desktop another WM
+      // would reparent these windows and invalidate every assertion.
+      if not TryClaimOwnership(wm) then Exit;
+      Root := wm.RootWindow;
+      if Root = 0 then Exit;
+
+      // ---- WM-07: cursors never touch a client window -------------------
+      cli := MakeClient(TXCBRect.Create(40, 40, 300, 200));
+      AssertNotNull('Client managed', cli);
+      AssertTrue('Frame window created', cli.FrameWindow <> 0);
+
+      wm.UpdateHoverCursor(wm.CursorResizeRight, cli);
+      AssertEquals('Cursor target is the frame, not the client',
+                   Integer(cli.FrameWindow), Integer(wm.HoverCursorWindow));
+      AssertTrue('Cursor target is never the client window',
+                 wm.HoverCursorWindow <> cli.ClientWindow);
+
+      wm.UpdateHoverCursor(wm.CursorNormal, nil);
+      AssertTrue('Root cursor target is not a client window',
+                 wm.HoverCursorWindow <> cli.ClientWindow);
+
+      // ---- WM-16: one GC, reused ---------------------------------------
+      firstGC := wm.TitlebarGC;
+      AssertTrue('GC created when the frame was first painted', firstGC <> 0);
+      wm.PaintClientFrame(cli);
+      wm.PaintClientFrame(cli);
+      AssertEquals('GC reused across paints', Integer(firstGC), Integer(wm.TitlebarGC));
+
+      // ---- WM-08: dead space in the frame is not a move -----------------
+      FillChar(btnEv, SizeOf(btnEv), 0);
+      btnEv.response_type := XCB_BUTTON_PRESS;
+      btnEv.event := cli.FrameWindow;
+      btnEv.root_x := cli.CurrentRect.X + 100;
+      btnEv.root_y := cli.CurrentRect.Y + wm.TitlebarHeight + 40;
+      btnEv.event_x := 100;
+      btnEv.event_y := wm.TitlebarHeight + 40;
+      btnEv.detail := XCB_BUTTON_INDEX_1;
+
+      AssertTrue('Frame click consumed', wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+      AssertEquals('No drag started from dead space', Integer(dmNone), Integer(wm.DragMode));
+      AssertNull('No drag client bound', wm.DragClient);
+
+      // Sanity: the titlebar itself still starts a move.
+      btnEv.event_y := 5;
+      btnEv.root_y := cli.CurrentRect.Y + 5;
+      AssertTrue('Titlebar click consumed', wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+      AssertEquals('Titlebar drag still works', Integer(dmMove), Integer(wm.DragMode));
+      wm.EndDrag();
+
+      // ---- WM-16: focus change repaints only the affected frames --------
+      cli2 := MakeClient(TXCBRect.Create(380, 40, 300, 200));
+      cli3 := MakeClient(TXCBRect.Create(720, 40, 300, 200));
+      AssertTrue('Three frames exist',
+                 (cli2 <> nil) and (cli3 <> nil) and
+                 (cli2.FrameWindow <> 0) and (cli3.FrameWindow <> 0));
+
+      cli2.Activate();
+      before := wm.FramePaintCount;
+      cli3.Activate();
+      painted := wm.FramePaintCount - before;
+      AssertTrue('Focus change repainted at most two frames, got ' + IntToStr(painted),
+                 painted <= 2);
+      AssertTrue('Focus change repainted both affected frames, got ' + IntToStr(painted),
+                 painted >= 2);
+
+      wm.UnmanageWindow(cli);
+      wm.UnmanageWindow(cli2);
+      wm.UnmanageWindow(cli3);
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
+  end;
+end;
+
 procedure TWMSamaTest.TestErrorEventsAreConsumed();
 var
   wm: TWMSamaCompositingWM;
@@ -926,8 +1061,9 @@ begin
     AssertEquals('dmResizeBottomLeft maps to bottom-left corner cursor', wm.CursorResizeBottomLeft, wm.CursorForDragMode(dmResizeBottomLeft));
     AssertEquals('dmResizeBottomRight maps to bottom-right corner cursor', wm.CursorResizeBottomRight, wm.CursorForDragMode(dmResizeBottomRight));
 
-    // 2. Hover Cursor Updates
-    wm.UpdateHoverCursor(1234, 0);
+    // 2. Hover Cursor Updates: the signature takes a client, not a window id, so
+    //    that the cursor can only ever be applied to a frame or the root.
+    wm.UpdateHoverCursor(1234, nil);
     AssertNotNull('UpdateHoverCursor offline safety verified', wm);
   finally
     wm.Free();

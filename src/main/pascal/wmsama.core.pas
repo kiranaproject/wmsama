@@ -129,8 +129,20 @@ type
     FGrabAttempts       : Integer;
     FReleaseAttempts    : Integer;
 
+    // Cached titlebar GC. One GC is enough for every frame: they all share the
+    // same root and depth. Creating and freeing one per paint cost two round-trip
+    // requests per frame on every focus change.
+    FTitlebarGC         : xcb_gcontext_t;
+
+    // Last client whose frame was painted as active. Lets a focus change repaint
+    // only the two frames whose appearance actually changed.
+    FLastActiveClient   : TXCBWMClient;
+
     // Diagnostics
     FDebugEnabled       : Boolean;
+    // Counts PaintClientFrame calls. Used by tests to prove that a focus change
+    // repaints only the affected frames rather than every window.
+    FFramePaintCount    : Integer;
 
     // Drag velocity tracking
     FLastDragX          : Integer;
@@ -211,7 +223,7 @@ type
     procedure BeginDrag(const AClient: TXCBWMClient; const AMode: TXCBDragMode; const ARootX, ARootY: Integer); override;
     procedure UpdateDrag(const ARootX, ARootY: Integer); override;
     procedure EndDrag(); override;
-    procedure UpdateHoverCursor(const ACursor: xcb_cursor_t; const AEventWindow: xcb_window_t);
+    procedure UpdateHoverCursor(const ACursor: xcb_cursor_t; const AClient: TXCBWMClient);
     procedure DoOnClientPropertiesChanged(const AClient: TXCBWMClient); override;
 
     // Alt+Tab HUD controls
@@ -263,6 +275,12 @@ type
     property DebugEnabled       : Boolean        read FDebugEnabled        write FDebugEnabled;
     property HoveredButton      : Integer        read FHoveredButton;
     property HoveredWindow      : xcb_window_t   read FHoveredWindow;
+    // The window currently carrying the hover cursor. Must only ever be the root
+    // or a frame window, never a client window (see UpdateHoverCursor).
+    property HoverCursorWindow  : xcb_window_t   read FHoverCursorWindow;
+    property FramePaintCount    : Integer        read FFramePaintCount;
+    // Cached titlebar GC. Zero until the first paint on a live connection.
+    property TitlebarGC         : xcb_gcontext_t read FTitlebarGC;
     property PressedButton      : Integer        read FPressedButton;
     property PressedWindow      : xcb_window_t   read FPressedWindow;
   end;
@@ -510,6 +528,9 @@ begin
   FKeyboardGrabHeld := False;
   FGrabAttempts := 0;
   FReleaseAttempts := 0;
+  FTitlebarGC := 0;
+  FLastActiveClient := nil;
+  FFramePaintCount := 0;
   FDebugEnabled := GetEnvironmentVariable('WMSAMA_DEBUG') <> '';
 
   w := 1920;
@@ -533,6 +554,12 @@ destructor TWMSamaCompositingWM.Destroy();
 begin
   // Never leave the keyboard grabbed across a teardown.
   ReleaseKeyboardGrab();
+
+  if (Connection <> nil) and (FTitlebarGC <> 0) then
+  begin
+    xcb_free_gc(Connection, FTitlebarGC);
+    FTitlebarGC := 0;
+  end;
 
   StopCompositor();
 
@@ -1350,6 +1377,10 @@ begin
   if FWindowMenuClient = AClient then
     DismissWindowMenu();
 
+  // FLastActiveClient must never outlive the client it points at.
+  if FLastActiveClient = AClient then
+    FLastActiveClient := nil;
+
   // A window disappearing mid-switch would leave the HUD pointing at a dead
   // client; drop the switcher (and its grab) instead.
   if FAltTabActive then
@@ -1548,7 +1579,18 @@ begin
     end;
   end;
 
-  PaintAllFrames();
+  // Repaint only the frames whose active appearance actually changed: the frame
+  // that just lost focus and the one that gained it. Painting every frame on each
+  // focus change meant a full titlebar rasterisation per window per click.
+  if (FLastActiveClient <> nil) and (FLastActiveClient <> AClient) and
+     (FLastActiveClient.FrameWindow <> 0) then
+    PaintClientFrame(FLastActiveClient);
+  if AClient <> nil then
+    PaintClientFrame(AClient);
+  FLastActiveClient := AClient;
+  if Connection <> nil then
+    xcb_flush(Connection);
+
   RequestComposite();
 end;
 
@@ -2111,7 +2153,6 @@ var
   canvas: TFloriaCanvasAgg;
   winTitle: AnsiString;
   dataLen: Cardinal;
-  gc: xcb_gcontext_t;
   mask: Cardinal;
   values: array[0..0] of Cardinal;
   compWin: TXCBCompositedWindow;
@@ -2128,6 +2169,8 @@ begin
   if (w <= 0) or (h <= 0) or (th <= 0) then Exit;
 
   isActive := (AClient = ActiveClient);
+
+  Inc(FFramePaintCount);
 
   frameImg := TFloriaImage.Create(w, th);
   try
@@ -2205,17 +2248,21 @@ begin
     // 4. Send image to frame window titlebar
     if Connection <> nil then
     begin
-      gc := xcb_generate_id(Connection);
-      mask := 0;
-      xcb_create_gc(Connection, gc, AClient.FrameWindow, mask, @values[0]);
-      try
-        dataLen := Cardinal(w * th * 4);
-        xcb_put_image(Connection, XCB_IMAGE_FORMAT_Z_PIXMAP, AClient.FrameWindow, gc,
-                      w, th, 0, 0, 0, 24, dataLen, PByte(frameImg.Data));
-        xcb_flush(Connection);
-      finally
-        xcb_free_gc(Connection, gc);
+      // Reuse one GC for every frame. It is created against the root window
+      // because all frames share the same root and depth, so a single GC is valid
+      // for all of them; the old code created and destroyed one per paint.
+      if FTitlebarGC = 0 then
+      begin
+        FTitlebarGC := xcb_generate_id(Connection);
+        mask := 0;
+        xcb_create_gc(Connection, FTitlebarGC, RootWindow, mask, @values[0]);
       end;
+
+      dataLen := Cardinal(w * th * 4);
+      xcb_put_image(Connection, XCB_IMAGE_FORMAT_Z_PIXMAP, AClient.FrameWindow, FTitlebarGC,
+                    w, th, 0, 0, 0, 24, dataLen, PByte(frameImg.Data));
+      // Flushing per frame would be a round-trip per window during a focus change;
+      // callers flush once after their batch (see PaintAllFrames / DoOnClientActivated).
     end;
   finally
     frameImg.Free();
@@ -2235,6 +2282,9 @@ var
 begin
   for i := 0 to Clients.Count - 1 do
     PaintClientFrame(TXCBWMClient(Clients[i]));
+  // PaintClientFrame no longer flushes; one flush covers the whole batch.
+  if Connection <> nil then
+    xcb_flush(Connection);
 end;
 
 procedure TWMSamaCompositingWM.BeginDrag(const AClient: TXCBWMClient; const AMode: TXCBDragMode; const ARootX, ARootY: Integer);
@@ -2414,26 +2464,53 @@ begin
     end;
   end;
 
-  if (Screen <> nil) and (CursorNormal <> 0) then
-    UpdateHoverCursor(CursorNormal, Screen^.root);
+  if CursorNormal <> 0 then
+    UpdateHoverCursor(CursorNormal, nil);
 
   RequestComposite();
 end;
 
-procedure TWMSamaCompositingWM.UpdateHoverCursor(const ACursor: xcb_cursor_t; const AEventWindow: xcb_window_t);
+// Apply a hover cursor.
+//
+// Cursor state belongs to windows the WM owns: the root and frame windows. It is
+// never written onto a client window. X resolves the cursor from the innermost
+// window under the pointer, so setting one on a client window permanently
+// overwrites the application's own cursor — the I-beam in a terminal, the hand
+// over a link — and the application has no way to take it back.
+//
+// AClient is the client whose frame should carry the cursor, or nil for the root.
+// Passing nil (or a client without a frame) restores the root cursor.
+procedure TWMSamaCompositingWM.UpdateHoverCursor(const ACursor: xcb_cursor_t; const AClient: TXCBWMClient);
 var
-  targetWin: xcb_window_t;
+  targetWin, prevWin: xcb_window_t;
 begin
-  if (Connection = nil) or (ACursor = 0) then Exit;
+  if Connection = nil then Exit;
 
-  targetWin := AEventWindow;
-  if (targetWin = 0) and (Screen <> nil) then
-    targetWin := Screen^.root;
+  if (AClient <> nil) and (AClient.FrameWindow <> 0) then
+    targetWin := AClient.FrameWindow
+  else if Screen <> nil then
+    targetWin := Screen^.root
+  else
+    Exit;
 
   if (targetWin = FHoverCursorWindow) and (ACursor = FHoverCursor) then Exit;
 
+  prevWin := FHoverCursorWindow;
   FHoverCursorWindow := targetWin;
   FHoverCursor := ACursor;
+
+  // Reset the window we were decorating, so a stale resize cursor does not linger
+  // on a frame after the pointer has moved on.
+  if (prevWin <> 0) and (prevWin <> targetWin) then
+  begin
+    if (Screen <> nil) and (prevWin = Screen^.root) then
+    begin
+      SetWindowCursor(Screen^.root, CursorNormal);
+      CurrentRootCursor := CursorNormal;
+    end
+    else if CursorNormal <> 0 then
+      SetWindowCursor(prevWin, CursorNormal);
+  end;
 
   if (Screen <> nil) and (targetWin = Screen^.root) then
   begin
@@ -2444,14 +2521,7 @@ begin
     end;
   end
   else
-  begin
     SetWindowCursor(targetWin, ACursor);
-    if (Screen <> nil) and (CurrentRootCursor <> CursorNormal) then
-    begin
-      SetWindowCursor(Screen^.root, CursorNormal);
-      CurrentRootCursor := CursorNormal;
-    end;
-  end;
 end;
 
 procedure TWMSamaCompositingWM.DoOnClientPropertiesChanged(const AClient: TXCBWMClient);
@@ -2906,23 +2976,32 @@ begin
         end;
 
         if (targetCli <> nil) and (resizeMode <> dmNone) then
-          UpdateHoverCursor(CursorForDragMode(resizeMode), motionEv^.event)
+          UpdateHoverCursor(CursorForDragMode(resizeMode), targetCli)
         else
-          UpdateHoverCursor(CursorNormal, motionEv^.event);
+          // Not on a resize margin: normal cursor on the frame under the pointer,
+          // or the root. Never on the client window itself, which owns its cursor.
+          UpdateHoverCursor(CursorNormal, FindClient(motionEv^.event));
       end;
     end;
 
     XCB_LEAVE_NOTIFY:
     begin
       leaveEv := Pxcb_leave_notify_event_t(AEvent);
-      if leaveEv^.event = FHoverCursorWindow then
+      // Leaving a frame we had decorated: put its cursor back rather than just
+      // forgetting about it, otherwise the resize cursor stays painted on the
+      // frame for as long as the pointer is elsewhere.
+      if (FHoverCursorWindow <> 0) and (leaveEv^.event = FHoverCursorWindow) then
       begin
+        if (Screen <> nil) and (FHoverCursorWindow = Screen^.root) then
+        begin
+          if CursorNormal <> 0 then
+            SetWindowCursor(Screen^.root, CursorNormal);
+          CurrentRootCursor := CursorNormal;
+        end
+        else if CursorNormal <> 0 then
+          SetWindowCursor(FHoverCursorWindow, CursorNormal);
         FHoverCursorWindow := 0;
         FHoverCursor := 0;
-      end;
-      if (Screen <> nil) and (leaveEv^.event = Screen^.root) then
-      begin
-        CurrentRootCursor := 0;
       end;
       if (FHoveredWindow <> 0) and (leaveEv^.event = FHoveredWindow) then
       begin
@@ -3210,12 +3289,18 @@ begin
             Exit(True);
           end;
 
-          // E. Handle Border Resizing when border width > 0
+          // F. Border resizing when border width > 0
           if (bw > 0) and ((localY >= th) or (localX < bw) or (localX >= cli.CurrentRect.Width - bw) or (localY >= cli.CurrentRect.Height - bw)) then
           begin
             BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
             Exit(True);
           end;
+
+          // The frame click is ours whether or not A-F matched. Falling through to
+          // the inherited handler would run its unconditional BeginDrag(dmMove),
+          // turning a click on dead space in the titlebar into an unintended
+          // window move. Consume it instead.
+          Exit(True);
         end;
       end;
     end;
