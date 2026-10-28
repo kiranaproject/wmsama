@@ -55,6 +55,11 @@ DISPLAY=:2 xcalc &
 DISPLAY=:2 xclock &
 ```
 
+**The test suite must run on a display with no window manager.** A stray `wmsama` reparents the
+test windows and produces spurious failures — this wasted real time during WM-05/WM-06, where
+`TestClientsSurviveManagerShutdown` "failed" purely because a leftover WM on the same display was
+managing the client. Check with `pgrep -x wmsama` before trusting a red test.
+
 Two leak/lifetime tools worth wiring into the loop early:
 
 ```bash
@@ -77,12 +82,12 @@ Severity is about *user-visible damage*, not code smell.
 | WM-02 | **P0** | Grabs | Pointer grab result is never checked before entering drag | `☑` |
 | WM-03 | **P0** | Diagnostics | All X errors are silently discarded | `☑` |
 | WM-04 | **P0** | Loop | `Stop()` is a no-op; signal path is async-unsafe | `☑` |
-| WM-05 | P1 | Input | Root event mask incomplete → dead code and stale focus | `☐` |
-| WM-06 | P1 | Input | Hardcoded keycodes/modifier masks; no `MappingNotify` | `☐` |
+| WM-05 | P1 | Input | Root event mask incomplete → dead code and stale focus | `☑` |
+| WM-06 | P1 | Input | Hardcoded keycodes/modifier masks; no `MappingNotify` | `☑` |
 | WM-07 | P1 | Input | Hover cursor is written onto client windows | `☐` |
 | WM-08 | P1 | Input | Unhandled frame clicks fall through into a move-drag | `☐` |
 | WM-09 | — | Loop | ~~`Expose` is painted twice~~ **withdrawn — claim did not reproduce** | `⊘` |
-| WM-10 | P1 | Input | Alt+Tab is off-by-one and not MRU-ordered | `◐` |
+| WM-10 | P1 | Input | Alt+Tab is off-by-one and not MRU-ordered | `☑` |
 | WM-11 | P1 | Loop | Unbounded event drain can starve presentation | `☐` |
 | WM-12 | P2 | Present | Synchronous full-surface present on the event thread | `☐` |
 | WM-13 | P2 | Lifetime | Damage never subtracted for skipped windows | `☐` |
@@ -91,7 +96,7 @@ Severity is about *user-visible damage*, not code smell.
 | WM-16 | P2 | Present | Per-paint GC create/free churn | `☐` |
 | WM-17 | P1 | Lifetime | WM exit destroys every reparented client | `☑` |
 
-**Totals:** 4 × P0 (all done), 8 × P1 (1 done, 1 partial), 4 × P2 (1 done), 1 withdrawn.
+**Totals:** 4 × P0 (all done), 8 × P1 (4 done), 4 × P2 (1 done), 1 withdrawn.
 
 > **Audit correction (2026-10-28):** WM-09 was a false positive. The expose branch
 > never painted anything — it marked the compositor window damaged and fell through
@@ -228,9 +233,10 @@ block, so `WM.Free()`, `xcb_disconnect`, and the compositor teardown never ran.
 - Pump is `select()` over `{xcb_get_file_descriptor, self-pipe}` with a 16 ms tick.
 - `RequestShutdown` sets a flag and writes one byte to a non-blocking self-pipe — no allocation,
   no stdio, no locks. Safe from a signal handler.
-- `PumpEventsOnce` drains `xcb_poll_for_queued_event` **before** selecting, because xcb can hold
-  events internally while the socket is already drained; selecting first would block on work
-  that is already pending.
+- `PumpEventsOnce` drains with `xcb_poll_for_event` **before** selecting. That primitive reads
+  the socket with a zero timeout, so bytes xcb has buffered but not yet parsed cannot leave
+  `select()` blind. (`xcb_poll_for_queued_event` only inspects the parsed queue and would miss
+  them.) This is a robustness choice, not a fix for an observed stall — see the correction below.
 - `DoOnTick` gives the shell a tick source (used for presentation now, available for animation
   and HUD auto-dismiss later).
 - `wmsama` no longer overrides the loop; it only supplies `DoOnTick`.
@@ -246,6 +252,14 @@ block, so `WM.Free()`, `xcb_disconnect`, and the compositor teardown never ran.
 **Known limitation:** `SIGTERM` during a drag leaves the pointer grab to be released by the
 server on disconnect, which is correct but not explicit. If drag cancellation ever matters for
 animation, ungrab in `RequestShutdown` — it cannot be done from the handler itself.
+
+**Correction (2026-10-28):** while working on WM-06 the pump *appeared* to stall — MappingNotify
+events seemed to sit unprocessed for seconds until unrelated traffic arrived, and a `select()`
+trace showed repeated timeouts. That diagnosis was wrong. FPC buffers `StdErr`, so the debug
+lines were simply not flushed; the events were being handled promptly all along. The evidence is
+that the pre-change and post-change binaries behave identically under an A/B test with explicit
+`Flush`. Debug output now goes through one `DebugLog` helper that flushes. The primitive change
+was kept because it is more robust, but it fixed no demonstrated bug.
 
 ### ☑ WM-17 — WM exit destroys every reparented client *(found while fixing WM-04)*
 
@@ -291,68 +305,83 @@ sabotage:
 These are the items that turn "it works on my machine with xterm" into "it behaves like a
 window manager".
 
-### ☐ WM-05 — Root event mask incomplete → dead code and stale focus
+### ☑ WM-05 — Root event mask incomplete → dead code and stale focus
 
-**Where:** **[florialib]** `src/main/pascal/floria.xcb.wm.pas:1813-1818`;
-dead check at `src/main/pascal/wmsama.core.pas:2542-2545`
+**Where:** **[florialib]** `floria.xcb.wm.pas` — `ClaimOwnership` mask, `ManageWindow` client
+mask, `SyncActiveClientFromFocus`, `ProcessEvent` (`XCB_FOCUS_IN` / `XCB_FOCUS_OUT`)
 
-**What happens:** the root mask selects `SUBSTRUCTURE_REDIRECT | SUBSTRUCTURE_NOTIFY |
-STRUCTURE_NOTIFY | PROPERTY_CHANGE | BUTTON_PRESS | POINTER_MOTION`. It omits `BUTTON_RELEASE`,
-`ENTER_WINDOW`, `LEAVE_WINDOW`, and `FOCUS_CHANGE`.
+**What happened:** the root mask selected `SUBSTRUCTURE_REDIRECT | SUBSTRUCTURE_NOTIFY |
+STRUCTURE_NOTIFY | PROPERTY_CHANGE | BUTTON_PRESS | POINTER_MOTION`. It omitted
+`BUTTON_RELEASE`, `ENTER_WINDOW`, `LEAVE_WINDOW` and `FOCUS_CHANGE`. There was no focus handling
+anywhere in the base class — no `FocusIn`/`FocusOut`, and `SetInputFocus` appeared only inside
+`TXCBWMClient.Activate`.
 
-Consequences:
-- `leaveEv^.event = Screen^.root` at `2542` **can never be true** — root never selects Leave. The
-  branch that resets `CurrentRootCursor` is dead code.
-- There is no `FocusIn`/`FocusOut` handling anywhere in `floria.xcb.wm.pas` (verified: no
-  `FOCUS_CHANGE`, no `SetInputFocus` outside `TXCBWMClient.Activate` at `1043`). If any client
-  calls `XSetInputFocus` directly, or focus reverts, `ActiveClient` goes stale: wrong titlebar
-  highlight, wrong Alt+Tab target, wrong `_NET_ACTIVE_WINDOW`.
+**Observable failure:** if any client called `XSetInputFocus` directly, or focus reverted,
+`ActiveClient` went stale: wrong titlebar highlight, wrong `_NET_ACTIVE_WINDOW`, wrong Alt+Tab
+target. The `leaveEv^.event = Screen^.root` check in `wmsama` was also unreachable, because root
+never selected Leave.
 
-**Fix:**
-- Add the missing masks on the root.
-- Handle `FOCUS_CHANGE` on the root: when focus lands on a known client window, sync
-  `ActiveClient` without re-raising; when focus leaves to `PointerRoot`/`None`, keep the last
-  active client but stop claiming `wsFocused` on it.
-- Implement ICCCM focus semantics properly: `WM_TAKE_FOCUS` vs. direct `SetInputFocus`, with
-  `CurrentTime` replaced by the event timestamp where one exists.
+**Fix (landed):**
+- Root mask now includes `BUTTON_RELEASE`, `ENTER_WINDOW`, `LEAVE_WINDOW`, `FOCUS_CHANGE`.
+- Client windows additionally select `FOCUS_CHANGE`. Event masks are per-connection, so this does
+  not interfere with the application's own selection.
+- `SyncActiveClientFromFocus` adopts externally-set focus: it updates `FActiveClient`, the
+  `wsFocused` flag, EWMH state and fires `DoOnClientActivated`, but deliberately does **not**
+  raise the window or re-assert focus — doing so would fight the client that just took focus.
+- `FSyncingFocus` suppresses the manager's own `FocusIn` echoes.
+- `PointerRoot` / `None` focus details are ignored, so the last active client stays shown rather
+  than blanking.
 
-**Acceptance:**
-1. `xdotool windowfocus <other-window>` → titlebar highlight follows.
-2. Run `xev` and click another window → focus reverts correctly, no stale active window.
-3. A client that sets focus on itself does not desync `_NET_ACTIVE_WINDOW`
-   (`xprop -root _NET_ACTIVE_WINDOW`).
-
-**Test:** unit test `ActiveClient` sync given a synthetic `FocusIn`/`FocusOut` sequence.
+**Acceptance — verified 2026-10-28:**
+1. ☑ Live: `xdotool windowfocus` on window B, then A, both adopted —
+   `_NET_ACTIVE_WINDOW` followed each time without the WM being asked.
+2. ☑ `TestRootEventMaskIncludesFocusAndRelease` reads the root's actual `your_event_mask` and
+   asserts FOCUS_CHANGE / BUTTON_RELEASE / ENTER_WINDOW / LEAVE_WINDOW / SUBSTRUCTURE_REDIRECT.
+   Sabotage-verified: dropping FOCUS_CHANGE from the mask fails it.
+3. ☑ `TestFocusInSyncsActiveClient` — externally focused client becomes active, flags swap.
+   Sabotage-verified: neutering the sync fails it.
+4. ☑ `TestFocusInIgnoresPointerRootAndSelf` — PointerRoot, self-focus and `FSyncingFocus` are
+   all no-ops.
 
 ---
 
-### ☐ WM-06 — Hardcoded keycodes and modifier masks; no `MappingNotify`
+### ☑ WM-06 — Hardcoded keycodes and modifier masks; no `MappingNotify`
 
-**Where:** `src/main/pascal/wmsama.core.pas:334-380` (`TAB_KEYCODE = 23`, `SPACE = 65`,
-arrows `111-116`, `MOD_ALT = 8`, `MOD_SUPER_SHIFT = 65`), consumers at `2391`, `2402`, `2428-2429`,
-`2460`
+**Where:** **[florialib]** `floria.xcb.wm.pas` — `KeysymToKeycode`, `KeycodeToModifierMask`,
+`ResolveKeyBindings`, `RebindGlobalKeys`, `XCB_MAPPING_NOTIFY` branch;
+`wmsama.core.pas` — `GrabGlobalKeys`, `RebindGlobalKeys`, key handling in `ProcessEvent`
 
-**What happens:** raw keycodes and modifier bits are baked in. These are evdev/US-layout
-assumptions. On a non-US layout the grabs silently bind to the wrong keys.
+**What happened:** raw keycodes and modifier bits were baked in — `TAB_KEYCODE = 23`,
+`SPACE_KEYCODE = 65`, arrows `111-116`, `MOD_ALT = 8`, `MOD_SUPER_SHIFT = 65`. These are
+evdev/US assumptions.
 
-**Observable failure:** Alt+Tab does nothing on a Dvorak/AZERTY/Japanese layout; Super+Shift+Arrow
-moves the wrong window or nothing.
+**Observable failure:** Alt+Tab did nothing on a non-US layout; Super+Shift+Arrow moved the wrong
+window or nothing. A layout switch at runtime silently killed every grab, because a passive grab
+on a keycode that is no longer mapped never fires.
 
-**Fix:**
-- Resolve keysyms (`XK_Tab`, `XK_space`, `XK_Left`…) to keycodes via
-  `xcb_get_keyboard_mapping`, covering the whole keycode range (a keysym can map to several
-  keycodes).
-- Read the real Alt/Super masks from `xcb_get_modifier_mapping` instead of assuming
-  `Mod1 = 8`, `Mod4 = 64`.
-- Handle `XCB_MAPPING_NOTIFY` → ungrab all, re-resolve, re-grab. Without this, a layout switch
-  silently kills every grab because passive grabs on unmapped keycodes stop firing.
+**Fix (landed):**
+- `KeysymToKeycode` scans every keysym column via `xcb_get_keyboard_mapping` (a keysym can be
+  reachable only through a shift level), matching Xlib's `XKeysymToKeycode`.
+- `KeycodeToModifierMask` reads `xcb_get_modifier_mapping` instead of assuming Mod1 = Alt and
+  Mod4 = Super. Falls back to those constants only when the map yields nothing.
+- `ResolveKeyBindings` populates Tab, Space, arrows, Escape, Return, Alt_L/Alt_R plus the four
+  modifier masks, and is called from `ClaimOwnership` so an already-active layout is honoured.
+- `XCB_MAPPING_NOTIFY` re-resolves and calls `RebindGlobalKeys`, which ungrabs
+  (`XCB_GRAB_ANY` + `XCB_MOD_MASK_ANY`) and re-grabs.
+- The old evdev constants survive in exactly one place: an explicitly commented offline fallback
+  for headless tests, where there is no server to query.
 
-**Acceptance:**
-1. `setxkbmap fr` then Alt+Tab still switches windows.
-2. `setxkbmap us` at runtime while wmsama runs → grabs still work (proves `MappingNotify`).
-3. Super+Shift+Arrow moves the active window to the adjacent monitor under a remapped Mod4.
-
-**Test:** unit test the keysym→keycode resolution table against a captured mapping fixture.
+**Acceptance — verified 2026-10-28:**
+1. ☑ `TestKeysymResolutionQueriesServer` cross-checks the resolved Tab keycode against a fresh
+   query and asserts an unmapped keysym resolves to 0 — an assertion no constant table can pass.
+2. ☑ `TestKeyBindingsResolveToValidBits` — every mask is a single bit and the four lock
+   combinations are distinct.
+3. ☑ `TestMappingNotifyRebindsKeys` — a synthetic MappingNotify triggers exactly one
+   `RebindGlobalKeys` call.
+4. ☑ Live: `xmodmap -e "keycode 38 = z Z z Z"` produced
+   `[wmsama] key bindings re-resolved after mapping change`, and Alt+Tab still worked afterwards.
+5. ⚠ **Not** verified: an actual layout switch (`setxkbmap fr`) — Xephyr silently ignores XKB
+   layout uploads, so the keymap never changed. Needs a real X server to confirm.
 
 ---
 
@@ -442,45 +471,47 @@ simplified, but not before.
 
 ---
 
-### ◐ WM-10 — Alt+Tab is off-by-one and not MRU-ordered
+### ☑ WM-10 — Alt+Tab is off-by-one and not MRU-ordered
 
-**Where:** `src/main/pascal/wmsama.core.pas` — `TriggerAltTabForward`, `GetAltTabEligibleClients`
+**Where:** **[florialib]** `TouchMru`, `RemoveFromMru`, `DoOnClientActivated`, `UnmanageWindow`;
+`wmsama.core.pas` — `GetAltTabEligibleClients`, `TriggerAltTabForward`
 
-**What happens:** `FAltTabIndex` was initialised to 0 and then immediately advanced with
-`(FAltTabIndex + 1) mod eligibleList.Count`, so the first press highlighted the *second* entry.
-Separately, `GetAltTabEligibleClients` walks `Clients` in creation order — there is no MRU list,
-so the switcher order is unrelated to what the user just used.
+**What happened:** `FAltTabIndex` was initialised to 0 and immediately advanced, so the first
+press highlighted the second entry. The candidate list walked `Clients` in creation order, with
+no relation to what the user had just used.
 
-**Observable failure:** Alt+Tab jumps to a random-ish window rather than "the previous window",
-which is the one behavior users have hard-wired.
+**Fix (landed):**
+- `FMruClients` keeps most-recently-used order: front = active window.
+  `DoOnClientActivated` moves the client to the front; `UnmanageWindow` removes it.
+- `GetAltTabEligibleClients` returns MRU order first, then appends never-activated clients in
+  creation order so they stay reachable.
+- First press selects **index 1** (the previous window); index 0 is the window that already has
+  focus. Selecting 0 re-activated the current window and made the switcher look inert.
 
-**Progress:**
-- ☑ **Off-by-one fixed** (landed with WM-01, since the same code path was restructured). The
-  index now only advances on subsequent presses; the first press selects index 0.
-  `TestAltTabSwitcher` was updated to encode the corrected semantics.
-- ☐ **MRU ordering still outstanding.** `GetAltTabEligibleClients` continues to use creation
-  order. Remaining work: maintain an MRU list updated in `DoOnClientActivated` (move-to-front),
-  pruned in `DoOnClientUnmapped`, and apply `IsAltTabEligible` to the MRU list rather than to
-  `Clients`.
+**A regression caught during this work, worth recording:** the first attempt at fixing the
+off-by-one made the first press select index 0. That was correct for creation-order lists but
+wrong once MRU ordering landed — Alt+Tab stopped toggling entirely. It was caught only by live
+testing (A → B → B), not by the unit test, which had been updated to assert the wrong value.
+Both the toggle behaviour and the cycle order are now pinned by tests.
 
-**Acceptance (remaining):**
-1. With A→B→C focused in that order, one Alt+Tab selects B.
-2. Alt+Tab, release, Alt+Tab → returns to C (toggle behavior).
-3. Minimizing a window removes it from the cycle and does not shift the selection.
-4. Docks, tooltips, menus, and `wtDesktop` never appear in the HUD.
-
-**Test:** unit test the MRU list and index progression with a synthetic activation sequence.
+**Acceptance — verified 2026-10-28:**
+1. ☑ Live: A → Alt+Tab → B → Alt+Tab → A → Alt+Tab → B.
+2. ☑ `TestAltTabTogglesBetweenTwoWindows` — alternates across three switches.
+3. ☑ `TestAltTabCyclesThroughMruOrder` — index 1, 2, then wraps to 0 with three windows.
+4. ☑ `TestAltTabSkipsClosedWindows` — closed client leaves the MRU list and the eligible set.
 
 ---
 
 ### ☐ WM-11 — Unbounded event drain can starve presentation
 
-**Where:** `src/main/pascal/wmsama.core.pas:2978-2987`
+**Where:** **[florialib]** `floria.xcb.wm.pas` — `PumpEventsOnce`, both drain loops.
+(Moved here when the pump was relocated out of `wmsama.Run`; the `Where` previously pointed at
+`wmsama.core.pas:2978-2987`, which no longer exists.)
 
-**What happens:** after the blocking wait, the inner `while True` drains via
-`xcb_poll_for_event` until it returns `nil`. A client emitting a continuous stream —
-`ConfigureNotify` storms during a resize, or a 60 Hz video generating damage — keeps that loop
-non-empty indefinitely, so `CompositeScene`/`PresentToScreen` at `2990-2995` never run.
+**What happens:** each pump cycle drains `xcb_poll_for_event` until it returns `nil`. A client
+emitting a continuous stream — `ConfigureNotify` storms during a resize, or a 60 Hz video
+generating damage — keeps that loop non-empty indefinitely, so `DoOnTick` (and therefore
+`RenderComposite`) never runs.
 
 **Observable failure:** video playback or a rapidly resizing window appears frozen while the WM
 is "busy", then catches up in a burst.
@@ -696,5 +727,9 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-10 | partial | `bcf6a85` | Off-by-one fixed (first press = index 0). MRU ordering still open |
 | 2026-10-28 | WM-02 | done | `f6a1584` | Drag state committed only after `XCB_GRAB_STATUS_SUCCESS`; stale grab dropped; `OnDragGrabFailed` hook. Sabotage-verified: old ordering fails the new test |
 | 2026-10-28 | WM-04 | done | `f6a1584` + `8d7f1cf` | select() over X socket + self-pipe; `RequestShutdown` is async-signal-safe; `DoOnTick` tick source. Live: SIGTERM exits in 10–66 ms, status 0. Double SIGINT clean |
+| 2026-10-28 | WM-05 | done | `5baa9a2` + `a6082c6` | Root mask gains FOCUS_CHANGE/BUTTON_RELEASE/ENTER/LEAVE; `SyncActiveClientFromFocus` adopts external focus without fighting it. Sabotage-verified mask + sync tests. Live: direct `XSetInputFocus` tracked both directions |
+| 2026-10-28 | WM-06 | done | `5baa9a2` + `a6082c6` | Keysyms resolved from `xcb_get_keyboard_mapping`, modifiers from `xcb_get_modifier_mapping`, `MappingNotify` re-grabs. Live remap logged + Alt+Tab survived. **Layout switch itself unverified** (Xephyr ignores XKB uploads) |
+| 2026-10-28 | WM-10 | done | `5baa9a2` + `a6082c6` | MRU list; first press = previous window. Caught a self-inflicted regression (index 0 made Alt+Tab inert) in live testing, not in the unit test |
+| 2026-10-28 | — | correction | — | "Pump stall" was FPC stderr buffering, not a stuck queue. A/B test showed identical behaviour. Debug output now flushes via `DebugLog`; the `xcb_poll_for_event` change was kept as robustness only |
 | 2026-10-28 | WM-17 | done | `f6a1584` | **New finding.** Clients were destroyed with the WM. Now unparented + round-tripped before disconnect; xterm survives 3/3 (was 3/3 dead); WM restart preserves the session. Flush alone proven insufficient |
 | | | | | |
