@@ -122,9 +122,21 @@ type
     FAltTabActive       : Boolean;
     FAltTabIndex        : Integer;
 
+    // Keyboard grab ownership for the Alt+Tab switcher.
+    // A single flag governs acquire/release so the grab and the HUD state can
+    // never diverge: FKeyboardGrabHeld is the only thing any release path checks.
+    FKeyboardGrabHeld   : Boolean;
+    FGrabAttempts       : Integer;
+    FReleaseAttempts    : Integer;
+
+    // Diagnostics
+    FDebugEnabled       : Boolean;
+
     // Drag velocity tracking
     FLastDragX          : Integer;
     FLastDragY          : Integer;
+
+    function AcquireKeyboardGrab(): Boolean;
 
     procedure SetCompositorEnabled(const AValue: Boolean);
     procedure SetBlurEnabled(const AValue: Boolean);
@@ -205,6 +217,12 @@ type
     procedure GetAltTabEligibleClients(const AList: TFPList);
     procedure TriggerAltTabForward();
     procedure TriggerAltTabDismiss();
+    procedure CancelAltTab();
+    procedure ReleaseKeyboardGrab();
+
+    // Diagnostics
+    function DescribeXError(const AError: Pxcb_generic_error_t): AnsiString;
+    procedure LogXError(const AError: Pxcb_generic_error_t; const AContext: AnsiString);
 
     function ProcessEvent(const AEvent: Pxcb_generic_event_t): Boolean; override;
     procedure Run(); override;
@@ -234,6 +252,10 @@ type
     property SnapPreviewRect    : TXCBRect       read FSnapPreviewRect;
     property AltTabActive       : Boolean        read FAltTabActive;
     property AltTabIndex        : Integer        read FAltTabIndex;
+    property KeyboardGrabHeld   : Boolean        read FKeyboardGrabHeld;
+    property KeyboardGrabAttempts    : Integer   read FGrabAttempts;
+    property KeyboardReleaseAttempts : Integer   read FReleaseAttempts;
+    property DebugEnabled       : Boolean        read FDebugEnabled        write FDebugEnabled;
     property HoveredButton      : Integer        read FHoveredButton;
     property HoveredWindow      : xcb_window_t   read FHoveredWindow;
     property PressedButton      : Integer        read FPressedButton;
@@ -241,6 +263,186 @@ type
   end;
 
 implementation
+
+function XErrorName(const ACode: Byte): AnsiString;
+begin
+  case ACode of
+    1:  Result := 'BadRequest';
+    2:  Result := 'BadValue';
+    3:  Result := 'BadWindow';
+    4:  Result := 'BadPixmap';
+    5:  Result := 'BadAtom';
+    6:  Result := 'BadCursor';
+    7:  Result := 'BadFont';
+    8:  Result := 'BadMatch';
+    9:  Result := 'BadDrawable';
+    10: Result := 'BadAccess';
+    11: Result := 'BadAlloc';
+    12: Result := 'BadColormap';
+    13: Result := 'BadGContext';
+    14: Result := 'BadIDChoice';
+    15: Result := 'BadName';
+    16: Result := 'BadLength';
+    17: Result := 'BadImplementation';
+  else
+    Result := 'Unknown';
+  end;
+end;
+
+function XRequestName(const AMajor: Byte): AnsiString;
+begin
+  // Core protocol opcodes (X11 Protocol, Appendix A). Extension requests start at
+  // 128, so anything above that is reported relative to its extension opcode.
+  case AMajor of
+    1:   Result := 'CreateWindow';
+    2:   Result := 'ChangeWindowAttributes';
+    3:   Result := 'GetWindowAttributes';
+    4:   Result := 'DestroyWindow';
+    5:   Result := 'DestroySubwindows';
+    6:   Result := 'ChangeSaveSet';
+    7:   Result := 'ReparentWindow';
+    8:   Result := 'MapWindow';
+    9:   Result := 'UnmapWindow';
+    10:  Result := 'MapSubwindows';
+    11:  Result := 'UnmapSubwindows';
+    12:  Result := 'ConfigureWindow';
+    13:  Result := 'CirculateWindow';
+    14:  Result := 'GetGeometry';
+    15:  Result := 'QueryTree';
+    16:  Result := 'InternAtom';
+    17:  Result := 'GetAtomName';
+    18:  Result := 'ChangeProperty';
+    19:  Result := 'DeleteProperty';
+    20:  Result := 'GetProperty';
+    21:  Result := 'ListProperties';
+    22:  Result := 'SetSelectionOwner';
+    23:  Result := 'GetSelectionOwner';
+    24:  Result := 'ConvertSelection';
+    25:  Result := 'SendEvent';
+    26:  Result := 'GrabPointer';
+    27:  Result := 'UngrabPointer';
+    28:  Result := 'GrabButton';
+    29:  Result := 'UngrabButton';
+    30:  Result := 'ChangeActivePointerGrab';
+    31:  Result := 'GrabKeyboard';
+    32:  Result := 'UngrabKeyboard';
+    33:  Result := 'GrabKey';
+    34:  Result := 'UngrabKey';
+    35:  Result := 'AllowEvents';
+    36:  Result := 'GrabServer';
+    37:  Result := 'UngrabServer';
+    38:  Result := 'QueryPointer';
+    39:  Result := 'GetMotionEvents';
+    40:  Result := 'TranslateCoordinates';
+    41:  Result := 'WarpPointer';
+    42:  Result := 'SetInputFocus';
+    43:  Result := 'GetInputFocus';
+    44:  Result := 'QueryKeymap';
+    45:  Result := 'OpenFont';
+    46:  Result := 'CloseFont';
+    47:  Result := 'QueryFont';
+    48:  Result := 'QueryTextExtents';
+    49:  Result := 'ListFonts';
+    50:  Result := 'ListFontsWithInfo';
+    51:  Result := 'SetFontPath';
+    52:  Result := 'GetFontPath';
+    53:  Result := 'CreatePixmap';
+    54:  Result := 'FreePixmap';
+    55:  Result := 'CreateGC';
+    56:  Result := 'ChangeGC';
+    57:  Result := 'CopyGC';
+    58:  Result := 'SetDashes';
+    59:  Result := 'SetClipRectangles';
+    60:  Result := 'FreeGC';
+    61:  Result := 'ClearArea';
+    62:  Result := 'CopyArea';
+    63:  Result := 'CopyPlane';
+    64:  Result := 'PolyPoint';
+    65:  Result := 'PolyLine';
+    66:  Result := 'PolySegment';
+    67:  Result := 'PolyRectangle';
+    68:  Result := 'PolyArc';
+    69:  Result := 'FillPoly';
+    70:  Result := 'PolyFillRectangle';
+    71:  Result := 'PolyFillArc';
+    72:  Result := 'PutImage';
+    73:  Result := 'GetImage';
+    74:  Result := 'PolyText8';
+    75:  Result := 'PolyText16';
+    76:  Result := 'ImageText8';
+    77:  Result := 'ImageText16';
+    78:  Result := 'CreateColormap';
+    79:  Result := 'FreeColormap';
+    80:  Result := 'CopyColormapAndFree';
+    81:  Result := 'InstallColormap';
+    82:  Result := 'UninstallColormap';
+    83:  Result := 'ListInstalledColormaps';
+    84:  Result := 'AllocColor';
+    85:  Result := 'AllocNamedColor';
+    86:  Result := 'AllocColorCells';
+    87:  Result := 'AllocColorPlanes';
+    88:  Result := 'FreeColors';
+    89:  Result := 'StoreColors';
+    90:  Result := 'StoreNamedColor';
+    91:  Result := 'QueryColors';
+    92:  Result := 'LookupColor';
+    93:  Result := 'CreateCursor';
+    94:  Result := 'CreateGlyphCursor';
+    95:  Result := 'FreeCursor';
+    96:  Result := 'RecolorCursor';
+    97:  Result := 'QueryBestSize';
+    98:  Result := 'QueryExtension';
+    99:  Result := 'ListExtensions';
+    100: Result := 'ChangeKeyboardMapping';
+    101: Result := 'GetKeyboardMapping';
+    102: Result := 'ChangeKeyboardControl';
+    103: Result := 'GetKeyboardControl';
+    104: Result := 'Bell';
+    105: Result := 'ChangePointerControl';
+    106: Result := 'GetPointerControl';
+    107: Result := 'SetScreenSaver';
+    108: Result := 'GetScreenSaver';
+    109: Result := 'ChangeHosts';
+    110: Result := 'ListHosts';
+    111: Result := 'SetAccessControl';
+    112: Result := 'SetCloseDownMode';
+    113: Result := 'KillClient';
+    114: Result := 'RotateProperties';
+    115: Result := 'ForceScreenSaver';
+    116: Result := 'SetPointerMapping';
+    117: Result := 'GetPointerMapping';
+    118: Result := 'SetModifierMapping';
+    119: Result := 'GetModifierMapping';
+    120: Result := 'NoOperation';
+  else
+    if AMajor >= 128 then
+      Result := 'Extension+' + IntToStr(AMajor - 128)
+    else
+      Result := 'Opcode' + IntToStr(AMajor);
+  end;
+end;
+
+// Decode a generic X error into a single human-readable line.
+function TWMSamaCompositingWM.DescribeXError(const AError: Pxcb_generic_error_t): AnsiString;
+begin
+  Result := '';
+  if AError = nil then Exit;
+
+  Result := Format('X error %s (%d) on request %s (%d) minor=%d resource=0x%.8x seq=%d',
+    [XErrorName(AError^.error_code), AError^.error_code,
+     XRequestName(AError^.major_code), AError^.major_code,
+     AError^.minor_code, AError^.resource_id, AError^.full_sequence]);
+end;
+
+// Errors arrive as events with response_type = 0. Without this they are silently
+// dropped by the event case statement, which turns every failed request into an
+// untraceable cosmetic glitch.
+procedure TWMSamaCompositingWM.LogXError(const AError: Pxcb_generic_error_t; const AContext: AnsiString);
+begin
+  if AError = nil then Exit;
+  if FDebugEnabled then
+    WriteLn(StdErr, '[wmsama] ', AContext, ': ', DescribeXError(AError));
+end;
 
 constructor TWMSamaCompositingWM.Create(AConn: Pxcb_connection_t; const AScreenNum: Integer);
 var
@@ -294,6 +496,11 @@ begin
   FAltTabActive := False;
   FAltTabIndex := 0;
 
+  FKeyboardGrabHeld := False;
+  FGrabAttempts := 0;
+  FReleaseAttempts := 0;
+  FDebugEnabled := GetEnvironmentVariable('WMSAMA_DEBUG') <> '';
+
   w := 1920;
   h := 1080;
   rootWin := 0;
@@ -313,6 +520,9 @@ end;
 
 destructor TWMSamaCompositingWM.Destroy();
 begin
+  // Never leave the keyboard grabbed across a teardown.
+  ReleaseKeyboardGrab();
+
   StopCompositor();
 
   if FCompositor <> nil then
@@ -377,6 +587,70 @@ begin
                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
   end;
   xcb_flush(Connection);
+end;
+
+// Acquire the active keyboard grab used by the Alt+Tab switcher.
+// Returns True only when the WM really holds the grab, so callers never mark the
+// switcher active on a refused grab (BadAccess / AlreadyGrabbed).
+function TWMSamaCompositingWM.AcquireKeyboardGrab(): Boolean;
+var
+  cookie: xcb_grab_keyboard_cookie_t;
+  reply: Pxcb_grab_keyboard_reply_t;
+begin
+  Result := False;
+  if FKeyboardGrabHeld then Exit(True);
+
+  Inc(FGrabAttempts);
+
+  if (Connection = nil) or (Screen = nil) then
+  begin
+    // Offline / headless (unit tests, or before xcb_connect): there is no server
+    // to contend with, so the switcher runs on logical ownership alone.
+    FKeyboardGrabHeld := True;
+    Exit(True);
+  end;
+
+  cookie := xcb_grab_keyboard(Connection, 1, Screen^.root, XCB_CURRENT_TIME,
+                              XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+  reply := xcb_grab_keyboard_reply(Connection, cookie, nil);
+  if reply = nil then
+  begin
+    if FDebugEnabled then
+      WriteLn(StdErr, '[wmsama] xcb_grab_keyboard: no reply');
+    Exit;
+  end;
+
+  try
+    if reply^.status <> XCB_GRAB_STATUS_SUCCESS then
+    begin
+      if FDebugEnabled then
+        WriteLn(StdErr, '[wmsama] xcb_grab_keyboard refused, status=', reply^.status);
+      Exit;
+    end;
+  finally
+    xcb_free(reply);
+  end;
+
+  FKeyboardGrabHeld := True;
+  Result := True;
+end;
+
+// Release the keyboard grab. Idempotent and safe to call at any time: this is the
+// single place that clears FKeyboardGrabHeld, so every exit path from the switcher
+// (Escape, Return, Alt release, client unmap, shutdown) funnels through it.
+procedure TWMSamaCompositingWM.ReleaseKeyboardGrab();
+begin
+  if not FKeyboardGrabHeld then Exit;
+
+  Inc(FReleaseAttempts);
+
+  if (Connection <> nil) then
+  begin
+    xcb_ungrab_keyboard(Connection, XCB_CURRENT_TIME);
+    xcb_flush(Connection);
+  end;
+
+  FKeyboardGrabHeld := False;
 end;
 
 procedure TWMSamaCompositingWM.ScanWindows();
@@ -1038,6 +1312,11 @@ begin
 
   if FWindowMenuClient = AClient then
     DismissWindowMenu();
+
+  // A window disappearing mid-switch would leave the HUD pointing at a dead
+  // client; drop the switcher (and its grab) instead.
+  if FAltTabActive then
+    CancelAltTab();
 
   if (AClient.FrameWindow <> 0) and (AClient.FrameWindow = FPressedWindow) then
   begin
@@ -2175,19 +2454,43 @@ end;
 procedure TWMSamaCompositingWM.TriggerAltTabForward();
 var
   eligibleList: TFPList;
+  opened: Boolean;
 begin
+  // Resolve the candidate list *before* touching the keyboard grab. On an empty
+  // desktop there is nothing to switch to, so no grab is attempted at all — that
+  // ordering is what prevents the grab leak (see docs/roadmap.md WM-01).
   eligibleList := TFPList.Create();
   try
     GetAltTabEligibleClients(eligibleList);
-    if eligibleList.Count <= 0 then Exit;
-
-    if not FAltTabActive then
+    if eligibleList.Count <= 0 then
     begin
-      FAltTabActive := True;
-      FAltTabIndex := 0;
+      if FAltTabActive then
+      begin
+        FAltTabActive := False;
+        RequestComposite();
+      end;
+      ReleaseKeyboardGrab();
+      Exit;
     end;
 
-    FAltTabIndex := (FAltTabIndex + 1) mod eligibleList.Count;
+    opened := False;
+    if not FAltTabActive then
+    begin
+      // Only mark the switcher active once the grab is really ours.
+      if not AcquireKeyboardGrab() then
+      begin
+        if FDebugEnabled then
+          WriteLn(StdErr, '[wmsama] Alt+Tab skipped: keyboard grab unavailable');
+        Exit;
+      end;
+      FAltTabActive := True;
+      FAltTabIndex := 0;
+      opened := True;
+    end;
+
+    if not opened then
+      FAltTabIndex := (FAltTabIndex + 1) mod eligibleList.Count;
+
     RequestComposite();
   finally
     eligibleList.Free();
@@ -2199,8 +2502,15 @@ var
   eligibleList: TFPList;
   targetCli: TXCBWMClient;
 begin
-  if not FAltTabActive then Exit;
+  if not FAltTabActive then
+  begin
+    // Defensive: never leave a grab behind even if the HUD flag was cleared early.
+    ReleaseKeyboardGrab();
+    Exit;
+  end;
+
   FAltTabActive := False;
+  ReleaseKeyboardGrab();
 
   eligibleList := TFPList.Create();
   try
@@ -2214,6 +2524,16 @@ begin
     eligibleList.Free();
   end;
 
+  RequestComposite();
+end;
+
+// Escape / cancel: drop the switcher without activating anything.
+procedure TWMSamaCompositingWM.CancelAltTab();
+begin
+  if not FAltTabActive and not FKeyboardGrabHeld then Exit;
+
+  FAltTabActive := False;
+  ReleaseKeyboardGrab();
   RequestComposite();
 end;
 
@@ -2375,6 +2695,16 @@ begin
   Result := False;
   if AEvent = nil then Exit;
 
+  // 0. X errors (response_type = 0) must be handled before anything else.
+  // Damage notifications are extension events, but IsDamageNotify matches on
+  // (type and $7F) = FDamageEventBase + 0, so an error event could otherwise be
+  // reinterpreted as a damage notify and silently swallowed.
+  if (AEvent^.response_type and $7F) = 0 then
+  begin
+    LogXError(Pxcb_generic_error_t(AEvent), 'event loop');
+    Exit(True);
+  end;
+
   // 1. Intercept XDamage notifications
   if (FCompositor <> nil) and FCompositor.IsDamageNotify(AEvent) then
   begin
@@ -2390,12 +2720,8 @@ begin
       keyEv := Pxcb_key_press_event_t(AEvent);
       if keyEv^.detail = 23 then // Tab
       begin
-        if not FAltTabActive then
-        begin
-          if (Connection <> nil) and (Screen <> nil) then
-            xcb_grab_keyboard(Connection, 1, Screen^.root, XCB_CURRENT_TIME,
-                              XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-        end;
+        // Grab ownership is decided inside TriggerAltTabForward, after the
+        // eligible list is known to be non-empty.
         TriggerAltTabForward();
         Exit(True);
       end
@@ -2412,16 +2738,11 @@ begin
       end
       else if FAltTabActive and (keyEv^.detail = 9) then // Escape: cancel switcher
       begin
-        if Connection <> nil then
-          xcb_ungrab_keyboard(Connection, XCB_CURRENT_TIME);
-        FAltTabActive := False;
-        RequestComposite();
+        CancelAltTab();
         Exit(True);
       end
       else if FAltTabActive and (keyEv^.detail = 36) then // Return: activate selected
       begin
-        if Connection <> nil then
-          xcb_ungrab_keyboard(Connection, XCB_CURRENT_TIME);
         TriggerAltTabDismiss();
         Exit(True);
       end
@@ -2459,8 +2780,6 @@ begin
       // Alt_L (64) or Alt_R (108) released
       if FAltTabActive and ((keyEv^.detail = 64) or (keyEv^.detail = 108)) then
       begin
-        if Connection <> nil then
-          xcb_ungrab_keyboard(Connection, XCB_CURRENT_TIME);
         TriggerAltTabDismiss();
         Exit(True);
       end;
@@ -2956,11 +3275,8 @@ begin
 
   // Initial paint of all frames and initial composite scene
   PaintAllFrames();
-  if FCompositorEnabled and (FCompositor <> nil) then
-  begin
-    FCompositor.CompositeScene();
-    FCompositor.PresentToScreen();
-  end;
+  RequestComposite();
+  RenderComposite();
 
   // Main event pump with batched presentation
   while True do
@@ -2986,13 +3302,8 @@ begin
       end;
     end;
 
-    // Render composited frame if damage occurred or state changed
-    if FCompositorEnabled and FNeedsComposite and (FCompositor <> nil) then
-    begin
-      FCompositor.CompositeScene();
-      FCompositor.PresentToScreen();
-      FNeedsComposite := False;
-    end;
+    // Single present path: RenderComposite owns the enabled/needed guards.
+    RenderComposite();
   end;
 end;
 

@@ -26,6 +26,10 @@ type
     procedure TestFrameMetricsAndTitlebar();
     procedure TestWindowSnappingAndPreviews();
     procedure TestAltTabSwitcher();
+    procedure TestAltTabEmptyDesktopDoesNotGrab();
+    procedure TestAltTabGrabAlwaysReleased();
+    procedure TestXErrorDecoding();
+    procedure TestErrorEventsAreConsumed();
     procedure TestFloriaToolkitButtonStyling();
     procedure TestButtonAlignmentAndPlacement();
     procedure TestAdditionalWindowControls();
@@ -314,20 +318,161 @@ begin
     cli2.Title := 'Browser';
 
     AssertFalse('Alt-Tab inactive initially', wm.AltTabActive);
+    AssertFalse('No keyboard grab held initially', wm.KeyboardGrabHeld);
 
-    // Trigger forward
+    // Trigger forward: the first press selects the previously active window,
+    // which is index 0 — not 1 (the historical off-by-one, roadmap WM-10).
     wm.TriggerAltTabForward();
     AssertTrue('Alt-Tab activated', wm.AltTabActive);
-    AssertEquals('Alt-Tab index is 1', 1, wm.AltTabIndex);
+    AssertEquals('Alt-Tab index starts at 0', 0, wm.AltTabIndex);
+    AssertTrue('Keyboard grab held while switching', wm.KeyboardGrabHeld);
 
     // Trigger forward again (cycles)
     wm.TriggerAltTabForward();
-    AssertEquals('Alt-Tab cycled to index 0', 0, wm.AltTabIndex);
+    AssertEquals('Alt-Tab cycled to index 1', 1, wm.AltTabIndex);
 
     // Dismiss activates selected client
     wm.TriggerAltTabDismiss();
     AssertFalse('Alt-Tab dismissed', wm.AltTabActive);
-    AssertSame('Selected client is active', cli1, wm.ActiveClient);
+    AssertFalse('Keyboard grab released on dismiss', wm.KeyboardGrabHeld);
+    AssertSame('Selected client is active', cli2, wm.ActiveClient);
+  finally
+    wm.Free();
+  end;
+end;
+
+// WM-01: pressing Alt+Tab with nothing to switch to must not acquire (and
+// therefore never leak) the keyboard grab. The historical bug grabbed first and
+// only then discovered the candidate list was empty, leaving the WM holding the
+// keyboard with no code path able to release it.
+procedure TWMSamaTest.TestAltTabEmptyDesktopDoesNotGrab();
+var
+  wm: TWMSamaCompositingWM;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    AssertEquals('No clients managed', 0, wm.Clients.Count);
+
+    wm.TriggerAltTabForward();
+    AssertFalse('Switcher not activated on empty desktop', wm.AltTabActive);
+    AssertFalse('No keyboard grab held on empty desktop', wm.KeyboardGrabHeld);
+    AssertEquals('Grab never even attempted', 0, wm.KeyboardGrabAttempts);
+
+    // Repeating must stay inert (the wedge scenario: every keypress swallowed).
+    wm.TriggerAltTabForward();
+    wm.TriggerAltTabForward();
+    AssertFalse('Still no grab after repeated presses', wm.KeyboardGrabHeld);
+    AssertEquals('Still no grab attempts', 0, wm.KeyboardGrabAttempts);
+
+    // Dismissing an inactive switcher is a safe no-op.
+    wm.TriggerAltTabDismiss();
+    AssertFalse('Dismiss is inert', wm.KeyboardGrabHeld);
+    AssertEquals('No spurious release attempts', 0, wm.KeyboardReleaseAttempts);
+  finally
+    wm.Free();
+  end;
+end;
+
+// WM-01: every exit path (Escape/cancel, Return/dismiss, Alt release, unmap)
+// must leave grab attempts and releases balanced.
+procedure TWMSamaTest.TestAltTabGrabAlwaysReleased();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(6001);
+    cli.Title := 'Terminal';
+
+    // Path 1: Escape / cancel.
+    wm.TriggerAltTabForward();
+    AssertTrue('Holding grab before cancel', wm.KeyboardGrabHeld);
+    wm.CancelAltTab();
+    AssertFalse('Cancel releases the grab', wm.KeyboardGrabHeld);
+    AssertFalse('Cancel drops the HUD', wm.AltTabActive);
+
+    // Path 2: Return / dismiss.
+    wm.TriggerAltTabForward();
+    AssertTrue('Holding grab before dismiss', wm.KeyboardGrabHeld);
+    wm.TriggerAltTabDismiss();
+    AssertFalse('Dismiss releases the grab', wm.KeyboardGrabHeld);
+
+    // Path 3: the switched-to window disappears mid-switch.
+    wm.TriggerAltTabForward();
+    AssertTrue('Holding grab before unmap', wm.KeyboardGrabHeld);
+    wm.UnmanageWindow(cli);
+    AssertFalse('Unmap releases the grab', wm.KeyboardGrabHeld);
+    AssertFalse('Unmap drops the HUD', wm.AltTabActive);
+
+    // Path 4: repeated release is idempotent.
+    wm.ReleaseKeyboardGrab();
+    wm.ReleaseKeyboardGrab();
+    AssertFalse('Idempotent release', wm.KeyboardGrabHeld);
+
+    AssertTrue('Every acquire was matched by a release',
+               wm.KeyboardReleaseAttempts <= wm.KeyboardGrabAttempts);
+  finally
+    wm.Free();
+  end;
+end;
+
+// WM-03: X errors used to be dropped on the floor by the event case statement.
+procedure TWMSamaTest.TestXErrorDecoding();
+var
+  wm: TWMSamaCompositingWM;
+  err: xcb_generic_error_t;
+  msg: AnsiString;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    FillChar(err, SizeOf(err), 0);
+    err.response_type := 0;
+    err.error_code := 3;   // BadWindow
+    err.major_code := 14;  // GetGeometry
+    err.resource_id := $1234;
+
+    msg := wm.DescribeXError(@err);
+    AssertTrue('Names the error code', Pos('BadWindow', msg) > 0);
+    AssertTrue('Names the request', Pos('GetGeometry', msg) > 0);
+    AssertTrue('Includes the resource id', Pos('0x00001234', msg) > 0);
+
+    // Unknown codes must degrade to numbers rather than crash or lie.
+    err.error_code := 200;
+    err.major_code := 250;  // >= 128: an extension opcode
+    msg := wm.DescribeXError(@err);
+    AssertTrue('Unknown error degrades', Pos('Unknown', msg) > 0);
+    AssertTrue('Extension opcode is reported relative to 128',
+               Pos('Extension+122', msg) > 0);
+
+    // 10 is MapSubwindows, not ConfigureWindow: guards against an off-by-N table.
+    err.major_code := 10;
+    AssertTrue('MapSubwindows decoded', Pos('MapSubwindows', wm.DescribeXError(@err)) > 0);
+    err.major_code := 12;
+    AssertTrue('ConfigureWindow decoded', Pos('ConfigureWindow', wm.DescribeXError(@err)) > 0);
+    err.major_code := 42;
+    AssertTrue('SetInputFocus decoded', Pos('SetInputFocus', wm.DescribeXError(@err)) > 0);
+
+    AssertEquals('Nil error yields empty string', '', wm.DescribeXError(nil));
+  finally
+    wm.Free();
+  end;
+end;
+
+// WM-03: an error event (response_type = 0) must be consumed by the WM rather
+// than falling through to the inherited handler, and must never be mistaken for
+// a damage notification.
+procedure TWMSamaTest.TestErrorEventsAreConsumed();
+var
+  wm: TWMSamaCompositingWM;
+  ev: xcb_generic_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    FillChar(ev, SizeOf(ev), 0);
+    ev.response_type := 0; // X error
+    AssertTrue('Error event consumed by the WM', wm.ProcessEvent(@ev));
+    AssertFalse('Error did not request a composite', wm.NeedsComposite);
   finally
     wm.Free();
   end;
