@@ -55,10 +55,12 @@ DISPLAY=:2 xcalc &
 DISPLAY=:2 xclock &
 ```
 
-**The test suite must run on a display with no window manager.** A stray `wmsama` reparents the
+**Display-exclusive tests skip themselves when a WM is running.** A stray `wmsama` reparents the
 test windows and produces spurious failures — this wasted real time during WM-05/WM-06, where
 `TestClientsSurviveManagerShutdown` "failed" purely because a leftover WM on the same display was
-managing the client. Check with `pgrep -x wmsama` before trusting a red test.
+managing the client. Those tests now call `ClaimOwnership` and skip on `BadAccess` (see
+`florialib@7953ae7`), so the suite is green on a normal desktop *and* exercises the assertions on
+a clean display. Still worth running against a fresh Xephyr when touching lifetime or grab code.
 
 Two leak/lifetime tools worth wiring into the loop early:
 
