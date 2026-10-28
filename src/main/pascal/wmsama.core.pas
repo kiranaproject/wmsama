@@ -2671,14 +2671,41 @@ var
   targetMon: TXCBMonitor;
   hudArea: TXCBRect;
   eligibleList: TFPList;
+  overlay: TXCBRect;
+
+  // Union a HUD's painted area (including its shadow margin) into the overlay
+  // bounds reported to the compositor.
+  procedure IncludeOverlay(const AX, AY, AWidth, AHeight, AMargin: Integer);
+  var
+    l, t, r, b: Integer;
+  begin
+    if (AWidth <= 0) or (AHeight <= 0) then Exit;
+    l := AX - AMargin;
+    t := AY - AMargin;
+    r := AX + AWidth + AMargin;
+    b := AY + AHeight + AMargin;
+    if overlay.Width = 0 then
+      overlay := TXCBRect.Create(l, t, r - l, b - t)
+    else
+    begin
+      if l < overlay.X then overlay.X := l;
+      if t < overlay.Y then overlay.Y := t;
+      if r > overlay.Right() then overlay.Width := r - overlay.X;
+      if b > overlay.Bottom() then overlay.Height := b - overlay.Y;
+    end;
+  end;
+
 begin
   if (FCompositor = nil) or (ACanvas = nil) then Exit;
   sw := FCompositor.ScreenWidth;
   sh := FCompositor.ScreenHeight;
+  overlay := TXCBRect.Create(0, 0, 0, 0);
 
   // 1. Render Window Edge Snapping Preview Overlay
   if FSnapPreviewRect.Width > 0 then
   begin
+    IncludeOverlay(FSnapPreviewRect.X, FSnapPreviewRect.Y,
+                   FSnapPreviewRect.Width, FSnapPreviewRect.Height, 10);
     // Soft glowing translucent snapping preview with rounded corners
     ACanvas.DrawRoundedRect(FSnapPreviewRect.X + 8, FSnapPreviewRect.Y + 8,
                             FSnapPreviewRect.Width - 16, FSnapPreviewRect.Height - 16,
@@ -2708,6 +2735,8 @@ begin
     cardH := 120;
     cardX := hudArea.X + (hudArea.Width - cardW) div 2;
     cardY := hudArea.Y + (hudArea.Height - cardH) div 2;
+
+    IncludeOverlay(cardX, cardY, cardW, cardH, 30);
 
     // Card shadow and dark frosted glass background
     ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 16, 0, 8, 24, 0.0, 0.0, 0.0, 0.55);
@@ -2759,6 +2788,8 @@ begin
     cardW := FWindowMenuRect.Width;
     cardH := FWindowMenuRect.Height;
 
+    IncludeOverlay(cardX, cardY, cardW, cardH, 24);
+
     ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 12, 0, 4, 18, 0.0, 0.0, 0.0, 0.50);
     ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 10, 24 / 255, 25 / 255, 38 / 255, 0.96);
     ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 10, 1.2, 69 / 255, 71 / 255, 90 / 255, 0.7);
@@ -2790,6 +2821,12 @@ begin
     // [4] Close
     ACanvas.DrawTextLeft(cardX + 14, cardY + 132, cardW - 28, 22, '×  Close Window', nil, 243 / 255, 139 / 255, 168 / 255);
   end;
+
+  // Tell the compositor what area this overlay covered. Under partial present the
+  // compositor can only repaint what it knows changed, and HUDs are drawn here,
+  // after the scene, so they are invisible to the scene snapshot. Without this a
+  // dismissed or repositioned HUD leaves its pixels on screen.
+  FCompositor.SetOverlayRect(overlay);
 end;
 
 function TWMSamaCompositingWM.ProcessEvent(const AEvent: Pxcb_generic_event_t): Boolean;

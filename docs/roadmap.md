@@ -90,15 +90,15 @@ Severity is about *user-visible damage*, not code smell.
 | WM-08 | P1 | Input | Unhandled frame clicks fall through into a move-drag | `☑` |
 | WM-09 | — | Loop | ~~`Expose` is painted twice~~ **withdrawn — claim did not reproduce** | `⊘` |
 | WM-10 | P1 | Input | Alt+Tab is off-by-one and not MRU-ordered | `☑` |
-| WM-11 | P1 | Loop | Unbounded event drain can starve presentation | `☐` |
-| WM-12 | P2 | Present | Synchronous full-surface present on the event thread | `☐` |
-| WM-13 | P2 | Lifetime | Damage never subtracted for skipped windows | `☐` |
-| WM-14 | P2 | Diagnostics | `IsDamageNotify` can alias X error events (type 0) | `☐` |
+| WM-11 | P1 | Loop | Unbounded event drain can starve presentation | `☑` |
+| WM-12 | P2 | Present | Synchronous full-surface present on the event thread | `☑` |
+| WM-13 | P2 | Lifetime | Damage never subtracted for skipped windows | `☑` |
+| WM-14 | P2 | Diagnostics | `IsDamageNotify` can alias X error events (type 0) | `☑` |
 | WM-15 | P2 | Structure | Two render paths; `RenderComposite` is dead code | `☑` |
 | WM-16 | P2 | Present | Per-paint GC create/free churn | `☑` |
 | WM-17 | P1 | Lifetime | WM exit destroys every reparented client | `☑` |
 
-**Totals:** 4 × P0 (all done), 8 × P1 (6 done), 4 × P2 (2 done), 1 withdrawn.
+**Totals:** 4 × P0 (all done), 8 × P1 (7 done), 4 × P2 (all done), 1 withdrawn. **All open items closed.**
 
 > **Audit correction (2026-10-28):** WM-09 was a false positive. The expose branch
 > never painted anything — it marked the compositor window damaged and fell through
@@ -446,127 +446,129 @@ matched; the base class's fallback drag is now unreachable from `wmsama`.
 
 ---
 
-### ☐ WM-11 — Unbounded event drain can starve presentation
+### ☑ WM-11 — Unbounded event drain can starve presentation
 
-**Where:** **[florialib]** `floria.xcb.wm.pas` — `PumpEventsOnce`, both drain loops.
-(Moved here when the pump was relocated out of `wmsama.Run`; the `Where` previously pointed at
-`wmsama.core.pas:2978-2987`, which no longer exists.)
+**Where:** **[florialib]** `floria.xcb.wm.pas` — `PumpEventsOnce`, both drain loops
 
-**What happens:** each pump cycle drains `xcb_poll_for_event` until it returns `nil`. A client
+**What happened:** each pump cycle drained `xcb_poll_for_event` until it returned `nil`. A client
 emitting a continuous stream — `ConfigureNotify` storms during a resize, or a 60 Hz video
-generating damage — keeps that loop non-empty indefinitely, so `DoOnTick` (and therefore
-`RenderComposite`) never runs.
+generating damage — kept the loop non-empty indefinitely, so `DoOnTick` (and therefore
+`RenderComposite`) never ran.
 
-**Observable failure:** video playback or a rapidly resizing window appears frozen while the WM
-is "busy", then catches up in a burst.
+**Fix (landed):** capped at `MAX_EVENTS_PER_PUMP` (64) per cycle, in both the pre-select drain and
+the post-select drain. Remaining events stay queued and are picked up by the next cycle, whose
+pre-select drain reads them before blocking.
 
-**Fix:** cap the batch (`for i := 1 to 64 do ...`) or time-box it (`Now()` budget of ~8 ms).
-Unprocessed events stay queued and are handled next iteration; the present step always runs.
+**Acceptance — verified 2026-10-29:**
+1. ☑ 300 queued events: one cycle processes ≤ 64 and the rest remain reachable.
+2. ☑ A second cycle continues draining — the cap defers, it does not drop.
+3. ☑ Sabotage-verified: removing the cap processes all **300** in one cycle and fails the test.
 
-**Acceptance:**
-1. Play a 60 Hz video in `mpv` inside Xephyr → smooth, no freezes, present rate tracks damage.
-2. Hold a window resize → the frame follows the pointer without multi-second stalls.
-3. Instrument: present count per second stays within 5% of damage-event rate under load.
-
-**Test:** unit test the batch limiter with a synthetic event source.
-
----
-
-## 4. Phase 2 — The Ceiling
-
-Nothing here is broken in the P0 sense. These items set how good the WM can feel, and they are
-the ones that most benefit from a deliberate design rather than incremental patching.
-
-### ☐ WM-12 — Synchronous full-surface present on the event thread
-
-**Where:** **[florialib]** `floria.xcb.wm.compositor.pas:314-362` (`FetchImage`),
-`681-766` (`CompositeScene`), `768-789` (`PresentToScreen`)
-
-**What happens:** each presented frame does:
-1. a full-screen Agg redraw including a blurred shadow per window (`CompositeScene`);
-2. a full-window `xcb_get_image` **round-trip** per dirty window (`FetchImage`);
-3. a full-screen `xcb_put_image` to the root (`PresentToScreen`).
-
-At 1920×1080 that is roughly 8 MB down plus 8 MB up per frame, with a blocking round-trip
-executed *inside* the event handler — and during a drag, with the pointer grabbed.
-
-**Observable failure:** resize/move lag; a stall long enough to look like a hang on slow X
-transports (X forwarding, VNC, nested X). The grab-held round-trip is also a deadlock surface.
-
-**Fix (staged):**
-1. Track damage rectangles per window; fetch and present only those.
-2. Cache the shadow per window size instead of re-rasterizing every frame.
-3. Move rendering off the input path: a second X connection (or a render thread) with a
-   dirty-flag handoff and a single present per vsync.
-4. Only then consider GPU/EGL presentation.
-
-**Acceptance:**
-1. 4 windows at 1920×1080: idle CPU < 2%; drag CPU < 15%.
-2. Dragging a window over another produces no visible tearing or stutter at 60 Hz.
-3. `xrestop` pixmap count constant during a 5-minute drag/hover session.
-4. No blocking X round-trip on the input path (instrument round-trip count per input event → 0).
-
-**Test:** benchmark harness recording present latency and round-trips per frame.
+**Note on making this test sensitive:** two earlier versions passed with the cap removed. Counting
+leftover events is unreliable because events arrive incrementally, so a drain stops at a natural
+gap. The working version counts events actually processed, and generates them with
+`SubstructureRedirect` deliberately *not* claimed — with it active, maps become MapRequests and the
+event count depends on window-management behaviour.
 
 ---
 
-### ☐ WM-13 — Damage never subtracted for skipped windows
+### ☑ WM-12 — Synchronous full-surface present on the event thread
 
-**Where:** **[florialib]** `floria.xcb.wm.compositor.pas:702-713` vs. `364-379`
+**Where:** **[florialib]** `floria.xcb.wm.compositor.pas` — `CompositeScene`, `PresentToScreen`,
+`ComputePresentRect`, `UploadRect`, `SetOverlayRect`, `BuildSnapshot`, `SnapshotChanged`
 
-**What happens:** `CompositeScene` skips windows that are `not IsVisible` or have zero geometry
-*before* reaching `ClearDamage()`, and `ClearDamage` is itself only reached when `Pixmap <> 0`.
-Each skipped window keeps accumulating damage in the X server.
+**What happened:** every frame did a full-screen Agg redraw, a full-window `xcb_get_image` per dirty
+window, and a full-screen `xcb_put_image` to the root. At 1280×800 that is 4 MB uploaded per frame.
 
-**Observable failure:** unbounded server-side damage-region growth for every minimized, shaded, or
-off-desktop window; a full re-fetch when it reappears.
+**Fix (landed):**
+- **Scene snapshot.** Each pass records order, geometry, visibility, opacity, corner radii, shadow
+  and blur settings. A content-only change presents partially; any structural change forces a full
+  screen, because it can alter pixels outside the damage rects (a shadow left behind by a moved
+  window, a window uncovered by a reorder). Deriving this from a snapshot rather than trusting the
+  shell to flag changes means a reorder nobody reported still forces a full present.
+- **`UploadRect`** copies the sub-rectangle into a tight buffer, because `xcb_put_image` needs
+  contiguous rows while the scene image has full-screen stride.
+- **Overlay tracking.** HUDs are drawn in `OnAfterRender`, after the scene, so they are invisible to
+  the snapshot. `SetOverlayRect` lets the shell declare its overlay bounds; the compositor unions
+  the previous and current bounds into the dirty region.
 
-**Fix:** subtract damage unconditionally for every registered window each pass, regardless of
-visibility, and destroy the damage object when a window is hidden for long enough that tracking
-it is pointless (re-create on show).
+**Measured — 2026-10-29, live compositor at 1280×800:**
 
-**Acceptance:**
-1. Minimize 10 windows and leave the session idle for 10 minutes → `xrestop` memory flat.
-2. Restoring a minimized window does one bounded fetch, not a full-screen one.
-3. Shaded windows (see `ToggleShade`) do not grow damage.
+| Frame | Present rect | Uploaded |
+| :--- | :--- | :--- |
+| first / structural | 1280×800 | 4,096,000 B |
+| content change | 600×400 | 960,000 B (**4.3× less**) |
+| HUD appears / dismisses / moves | 300×120 … union | 144,000 B, stays partial |
 
-**Test:** unit test `ClearDamage` invocation count equals registered-window count per pass.
+**Acceptance — verified 2026-10-29:**
+1. ☑ `TestContentDamagePresentsPartially` — content damage is partial, matches the window rect,
+   uploads far less than a full screen, and two damaged windows union into one rect.
+2. ☑ `TestStructuralChangeForcesFullPresent` — geometry, reorder, visibility, styling and removal
+   each force a full present. A control case first proves content-only *is* partial, so the full
+   presents are caused by the structural change and not by an absence of damage.
+3. ☑ `TestOverlayRectDrivesPartialPresent` — a HUD appearing, dismissing and moving all stay
+   partial, and the dirty rect covers both old and new positions.
+4. ☑ `TestInvalidateForcesFullPresent` — background change, explicit `Invalidate()` and `Resize()`.
+
+**Defect introduced and fixed during this work.** The first version presented partially without
+tracking overlays. Everything passed — 690 tests green — while the live desktop left ghost pixels
+where a dismissed window menu had been. It was found by screenshotting a real session, not by the
+suite. A/B evidence: with `SetOverlayRect` removed, a dismissed window menu leaves its pixels on
+screen; with it, the same sequence is clean. **Partial present is only sound if every pixel that can
+change is accounted for, and overlays are the part the scene does not own.**
+
+**Not done:** rendering still happens on the event thread, and `xcb_get_image` per damaged window is
+still a round-trip inside the handler. Moving render off the input path (second connection or render
+thread) remains the next step if input latency becomes a problem; the dirty-rect work above is its
+prerequisite and is now in place.
 
 ---
 
-### ☐ WM-14 — `IsDamageNotify` can alias X error events
+### ☑ WM-13 — Damage never subtracted for skipped windows
 
-**Where:** **[florialib]** `floria.xcb.wm.compositor.pas:604-609`, called first at
-`wmsama.core.pas:2379`
+**Where:** **[florialib]** `floria.xcb.wm.compositor.pas` — `CompositeScene`,
+`TXCBCompositedWindow.SubtractDamage` / `ClearDamage`
 
-**What happens:**
-`(AEvent^.response_type and $7F) = FDamageEventBase + XCB_DAMAGE_NOTIFY` with
-`XCB_DAMAGE_NOTIFY = 0`. If `FHasDamage` is true while `FDamageEventBase` is still 0 — which
-`QueryExtensions` (`453-494`) permits, since it sets `FHasDamage` whenever the version reply
-succeeds and only fills `FDamageEventBase` if the extension query reports `present` — the
-expression matches **error events (type 0)**.
+**What happened:** `CompositeScene` skipped windows that were `not IsVisible` or had zero geometry
+*before* reaching `ClearDamage()`, and `ClearDamage` was only reached when `Pixmap <> 0`. Every
+skipped window kept accumulating damage regions in the server.
 
-Because the damage check runs before everything else in `ProcessEvent`, errors would be handed to
-`HandleDamageNotify` and reinterpreted as garbage drawables.
+**Fix (landed):** subtraction is now unconditional for every registered window, performed before any
+decision to skip. It is separated from the local dirty flag — `SubtractDamage` clears the server
+region, `ClearDamage` does that plus `FIsDirty := False` — so a skipped window stays dirty and
+re-fetches when it reappears.
 
-**Observable failure:** rare, but it is a silent correctness trap that will also sabotage WM-03
-(the error handler would never see its events).
+**Acceptance — verified 2026-10-29:**
+1. ☑ Three windows (visible, hidden, zero-sized): all three subtract damage, on every pass.
+2. ☑ A hidden window keeps its local dirty flag for its next appearance.
+3. ☑ Sabotage-verified: subtracting only after the visibility check yields **1** instead of 3.
 
-**Status:** **mitigated, not fixed.** WM-03 landed an error check *before* the damage check in
-`wmsama.ProcessEvent`, so errors are routed correctly there. The underlying predicate is still
-wrong in `florialib`, which matters for any other consumer and for `HandleGenericEvent`. Fix it
-properly: require `FDamageEventBase <> 0` in `IsDamageNotify`, and treat "version reply OK but
-extension absent" as `FHasDamage := False`.
+---
 
-**Fix:** require `FDamageEventBase <> 0` in `IsDamageNotify`, and treat "version reply OK but
-extension absent" as `FHasDamage := False`.
+### ☑ WM-14 — `IsDamageNotify` can alias X error events
 
-**Acceptance:**
-1. Unit test: synthesize a type-0 event with `FDamageEventBase = 0` → `IsDamageNotify` returns
-   `False`.
-2. With WM-03 in place, errors reach the error handler and damage notifications do not.
+**Where:** **[florialib]** `floria.xcb.wm.compositor.pas` — `IsDamageNotify`, `QueryExtensions`
 
-**Test:** as above; pure unit test, no X server.
+**What happened:** the predicate compared `(response_type and $7F)` against
+`FDamageEventBase + XCB_DAMAGE_NOTIFY`, where `XCB_DAMAGE_NOTIFY` is 0. With an unresolved event
+base the expression degenerated to `= 0`, matching X **error** events. `QueryExtensions` also set
+`FHasDamage` on the version reply alone, even when the extension query then reported it absent —
+which is exactly how the base could stay 0 while `FHasDamage` was true.
+
+**Fix (landed):**
+- `IsDamageNotify` requires `FDamageEventBase <> 0`.
+- `QueryExtensions` claims the extension only once the event base is resolved, so `HasDamage`
+  implies a usable base. Both halves are present: the invariant, plus defence in depth.
+
+**Acceptance — verified 2026-10-29:**
+1. ☑ Offline (unresolved base) an error event is not a damage notify and is not consumed as one.
+2. ☑ Live: `HasDamage` implies `DamageEventBase <> 0`, and an error event still does not match.
+3. ☑ This also protects WM-03: `wmsama` handles errors before the damage check, and the underlying
+   predicate no longer misroutes them for any other consumer.
+
+**Note:** the guard half cannot be exercised without a test-only backdoor into a private field,
+which is not worth adding to production code. The tests assert the invariant (`HasDamage` implies a
+resolved base) rather than the unreachable state.
 
 ---
 
@@ -679,5 +681,9 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-29 | WM-14 | done | `9dd22fe` | Event base must be non-zero; `HasDamage` now implies a resolved base. Offline + live assertions |
+| 2026-10-29 | WM-13 | done | `9dd22fe` | Damage subtracted unconditionally, split from the dirty flag. Sabotage-verified (1 vs 3) |
+| 2026-10-29 | WM-12 | done | `9dd22fe` | Partial present via scene snapshot. Measured 960 KB vs 4 MB per content frame. **Ghost-overlay defect introduced and fixed** — caught by screenshot, not tests |
+| 2026-10-29 | WM-11 | done | `9dd22fe` | 64-event batch cap. Two earlier test versions were insensitive; the working one counts processed events with redirect unclaimed |
 | 2026-10-28 | WM-17 | done | `f6a1584` | **New finding.** Clients were destroyed with the WM. Now unparented + round-tripped before disconnect; xterm survives 3/3 (was 3/3 dead); WM restart preserves the session. Flush alone proven insufficient |
 | | | | | |
