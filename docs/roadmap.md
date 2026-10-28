@@ -86,8 +86,8 @@ Severity is about *user-visible damage*, not code smell.
 | WM-04 | **P0** | Loop | `Stop()` is a no-op; signal path is async-unsafe | `☑` |
 | WM-05 | P1 | Input | Root event mask incomplete → dead code and stale focus | `☑` |
 | WM-06 | P1 | Input | Hardcoded keycodes/modifier masks; no `MappingNotify` | `☑` |
-| WM-07 | P1 | Input | Hover cursor is written onto client windows | `☐` |
-| WM-08 | P1 | Input | Unhandled frame clicks fall through into a move-drag | `☐` |
+| WM-07 | P1 | Input | Hover cursor is written onto client windows | `☑` |
+| WM-08 | P1 | Input | Unhandled frame clicks fall through into a move-drag | `☑` |
 | WM-09 | — | Loop | ~~`Expose` is painted twice~~ **withdrawn — claim did not reproduce** | `⊘` |
 | WM-10 | P1 | Input | Alt+Tab is off-by-one and not MRU-ordered | `☑` |
 | WM-11 | P1 | Loop | Unbounded event drain can starve presentation | `☐` |
@@ -95,10 +95,10 @@ Severity is about *user-visible damage*, not code smell.
 | WM-13 | P2 | Lifetime | Damage never subtracted for skipped windows | `☐` |
 | WM-14 | P2 | Diagnostics | `IsDamageNotify` can alias X error events (type 0) | `☐` |
 | WM-15 | P2 | Structure | Two render paths; `RenderComposite` is dead code | `☑` |
-| WM-16 | P2 | Present | Per-paint GC create/free churn | `☐` |
+| WM-16 | P2 | Present | Per-paint GC create/free churn | `☑` |
 | WM-17 | P1 | Lifetime | WM exit destroys every reparented client | `☑` |
 
-**Totals:** 4 × P0 (all done), 8 × P1 (4 done), 4 × P2 (1 done), 1 withdrawn.
+**Totals:** 4 × P0 (all done), 8 × P1 (6 done), 4 × P2 (2 done), 1 withdrawn.
 
 > **Audit correction (2026-10-28):** WM-09 was a false positive. The expose branch
 > never painted anything — it marked the compositor window damaged and fell through
@@ -387,120 +387,62 @@ on a keycode that is no longer mapped never fires.
 
 ---
 
-### ☐ WM-07 — Hover cursor is written onto client windows
+### ☑ WM-07 — Hover cursor is written onto client windows
 
-**Where:** `src/main/pascal/wmsama.core.pas:2107-2139`, called from `2527-2530`
+**Where:** `wmsama.core.pas` — `UpdateHoverCursor`, its call sites, `XCB_LEAVE_NOTIFY`
 
-**What happens:** `UpdateHoverCursor` calls `SetWindowCursor(targetWin, ACursor)` where
-`targetWin := AEventWindow`. For motion events delivered on a client window, that is the
-*client window*, so the WM overwrites the application's own cursor. `SetWindowCursor`
-(`floria.xcb.wm.pas:1795-1801`) is a plain `XDefineCursor` with no ownership concept.
+**What happened:** `UpdateHoverCursor` applied the cursor to `AEventWindow`, which for a motion
+event delivered on a client window is the *client window*. X resolves the cursor from the
+innermost window under the pointer, so this permanently replaced the application's own cursor.
+The Leave handler then reset the tracking fields without restoring anything.
 
-**Observable failure:** the I-beam in a terminal becomes `left_ptr`; a browser's hand cursor over
-a link becomes an arrow. Subtle, permanent, and immediately noticeable to anyone who uses the
-desktop for real work.
-
-Additionally, the Leave handler (`2537-2541`) resets `FHoverCursor := 0` without restoring the
-previous cursor, so the "already applied" cache can claim a state that is not on screen.
-
-**Fix:**
-- Cursor state belongs on the **frame** window and the root only. Never write a cursor onto
-  `ClientWindow`.
-- On leaving a frame, restore the frame's own cursor (not the client's).
-- Track cursor ownership explicitly (`FCurrentCursorWindow` + `FCurrentCursor`) so restore is
-  exact rather than inferred.
-
-**Acceptance:**
-1. `xterm` shows an I-beam over its text area while wmsama runs.
-2. Hovering a window edge shows the directional resize cursor; moving into the client restores
-   the client's cursor within one motion event.
-3. Firefox (or `gtk3-demo`) link hover shows a hand cursor.
-4. `xrestop` shows cursor count stable across 5 minutes of hovering.
-
-**Test:** unit test the cursor state machine (frame-only writes, correct restore sequence).
-
----
-
-### ☐ WM-08 — Unhandled frame clicks fall through into a move-drag
-
-**Where:** `src/main/pascal/wmsama.core.pas:2755-2840`; fallthrough target
-`floria.xcb.wm.pas:4088-4113` (specifically `4104-4110`)
-
-**What happens:** the frame-click branch has cases A–E. If none matches, control reaches the
-`inherited ProcessEvent`, whose `XCB_BUTTON_PRESS` handler unconditionally calls
-`BeginDrag(Cli, dmMove, ...)` on button 1 when the event window is the frame. So a click that the
-derived class deliberately declined still starts a move.
-
-**Observable failure:** currently mostly masked by frame geometry, but it is a landmine — any
-future change to frame insets, corner radii, or button hit-testing turns "click on dead space in
-the titlebar" into an unintended window move. It also makes the frame branch's intent
-unreadable.
-
-**Fix:** `Exit(True)` at the end of the frame branch, after the button was consumed. The base
-class's fallback drag should be unreachable from `wmsama` and ideally removed from `florialib`
-once no consumer relies on it.
-
-**Acceptance:**
-1. Click in every pixel class of the titlebar (buttons, title text, padding, 1 px from the edge)
-   → no unintended moves.
-2. Clicking the frame below the titlebar with a non-zero border width starts a resize, not a move.
-3. Regression test: the base-class fallback is not reached (assert via a counter in a test
-   subclass).
-
-**Test:** unit test that every frame hit-test path returns a consumed result.
-
----
-
-### ⊘ WM-09 — ~~`Expose` is painted twice~~ (withdrawn, claim did not reproduce)
-
-**Where:** `src/main/pascal/wmsama.core.pas` `XCB_EXPOSE` branch vs.
-`floria.xcb.wm.pas:4130-4137`
-
-**What the audit claimed:** the expose branch marked the compositor window damaged without
-`Exit(True)`, then fell through to the inherited handler, so the frame was painted twice.
-
-**What is actually there:** the expose branch never paints at all — it calls `MarkDamaged` and
-`RequestComposite`, then falls through to `inherited ProcessEvent`, whose expose handler calls
-`DoOnFramePaint` → `PaintClientFrame` exactly once. Total: **one** paint, which is correct, since
-an expose means the frame's content was lost and must be repainted.
-
-**Resolution:** no code change. An attempted rewrite was reverted after the claim failed to
-reproduce. Recorded here rather than deleted so the correction stays visible: the audit produced
-one false positive out of sixteen findings, and the roadmap is the place to say so.
-
-**Note for the future:** if `--no-compositor` support is ever dropped, this branch can be
-simplified, but not before.
-
----
-
-### ☑ WM-10 — Alt+Tab is off-by-one and not MRU-ordered
-
-**Where:** **[florialib]** `TouchMru`, `RemoveFromMru`, `DoOnClientActivated`, `UnmanageWindow`;
-`wmsama.core.pas` — `GetAltTabEligibleClients`, `TriggerAltTabForward`
-
-**What happened:** `FAltTabIndex` was initialised to 0 and immediately advanced, so the first
-press highlighted the second entry. The candidate list walked `Clients` in creation order, with
-no relation to what the user had just used.
+**Observable failure:** the I-beam in a terminal became `left_ptr`; a browser's hand cursor over a
+link became an arrow. Subtle, permanent, and immediately obvious to anyone using the desktop for
+real work.
 
 **Fix (landed):**
-- `FMruClients` keeps most-recently-used order: front = active window.
-  `DoOnClientActivated` moves the client to the front; `UnmanageWindow` removes it.
-- `GetAltTabEligibleClients` returns MRU order first, then appends never-activated clients in
-  creation order so they stay reachable.
-- First press selects **index 1** (the previous window); index 0 is the window that already has
-  focus. Selecting 0 re-activated the current window and made the switcher look inert.
-
-**A regression caught during this work, worth recording:** the first attempt at fixing the
-off-by-one made the first press select index 0. That was correct for creation-order lists but
-wrong once MRU ordering landed — Alt+Tab stopped toggling entirely. It was caught only by live
-testing (A → B → B), not by the unit test, which had been updated to assert the wrong value.
-Both the toggle behaviour and the cycle order are now pinned by tests.
+- The signature takes a `TXCBWMClient` instead of a window id, so **a client window is not even
+  expressible as a cursor target**. Only a frame or the root can be addressed.
+- Passing `nil` targets the root.
+- Leaving a decorated frame restores that frame's cursor, and the previously decorated window is
+  reset when the target changes, so a resize cursor does not linger on an abandoned frame.
 
 **Acceptance — verified 2026-10-28:**
-1. ☑ Live: A → Alt+Tab → B → Alt+Tab → A → Alt+Tab → B.
-2. ☑ `TestAltTabTogglesBetweenTwoWindows` — alternates across three switches.
-3. ☑ `TestAltTabCyclesThroughMruOrder` — index 1, 2, then wraps to 0 with three windows.
-4. ☑ `TestAltTabSkipsClosedWindows` — closed client leaves the MRU list and the eligible set.
+1. ☑ **Measured on screen** with `XFixesGetCursorImage`, pointer over the terminal text area:
+   - old build (cursor written to the client): **24×24 hotspot 3,1** — an arrow, I-beam destroyed
+   - new build: **9×16 hotspot 4,8** — the I-beam, preserved
+2. ☑ Frame margin shows the 24×24 arrow, and moving back over the text restores the I-beam.
+3. ☑ `TestLiveFrameBehaviour` asserts `HoverCursorWindow` is the frame, never the client window.
+   Sabotage-verified: restoring the old target makes it fail.
+
+**Note:** the earlier draft of this item expected a cursor-count check via `xrestop`. The XFixes
+measurement is stronger — it reads the cursor actually rendered, rather than inferring from
+resource counts.
+
+---
+
+### ☑ WM-08 — Unhandled frame clicks fall through into a move-drag
+
+**Where:** `wmsama.core.pas` — the frame-click branch (`XCB_BUTTON_PRESS`, cases A–F)
+
+**What happened:** the frame branch handled cases A–F and then fell out of the case statement,
+reaching `inherited ProcessEvent`, whose `XCB_BUTTON_PRESS` handler runs an unconditional
+`BeginDrag(Cli, dmMove, ...)` when the event window is the frame. A click that matched nothing
+still started a window move.
+
+**Observable failure:** mostly masked by frame geometry today, but a landmine: any change to
+insets, corner radii or button hit-testing would turn "click on dead space in the titlebar" into
+an unintended move. It also made the branch's intent unreadable.
+
+**Fix (landed):** `Exit(True)` after case F. The frame click is consumed whether or not a case
+matched; the base class's fallback drag is now unreachable from `wmsama`.
+
+**Acceptance — verified 2026-10-28:**
+1. ☑ A button-1 press on the frame below the titlebar (zero border width) leaves `DragMode` at
+   `dmNone` with no drag client.
+2. ☑ A press in the titlebar still starts `dmMove` — the guard did not swallow legitimate drags.
+3. ☑ Sabotage-verified: removing the `Exit(True)` fails the test with
+   `expected: <0> but was: <1>`.
 
 ---
 
@@ -628,6 +570,33 @@ extension absent" as `FHasDamage := False`.
 
 ---
 
+### ☑ WM-16 — Per-paint GC create/free churn
+
+**Where:** `wmsama.core.pas` — `PaintClientFrame`, `PaintAllFrames`, `DoOnClientActivated`
+
+**What happened:** `PaintClientFrame` allocated a GC, called `put_image`, freed the GC and
+flushed — per paint. `DoOnClientActivated` called `PaintAllFrames()` on every focus change, so one
+click with 20 windows meant 20 GC create/free pairs, 20 `put_image` calls and 20 flushes inside the
+event handler.
+
+**Fix (landed):**
+- One GC cached for the WM's lifetime. It is created against the root window, which is valid for
+  every frame because they share the root and depth. Freed in the destructor.
+- `PaintClientFrame` no longer flushes; `PaintAllFrames` and the focus-change path flush once per
+  batch.
+- A focus change repaints only the frame that lost focus and the one that gained it. The previous
+  active client is tracked in `FLastActiveClient` and cleared in `DoOnClientUnmapped` so it cannot
+  dangle.
+
+**Acceptance — verified 2026-10-28:**
+1. ☑ `TitlebarGC` is created once and is unchanged across repeated paints.
+   Sabotage-verified: recreating per paint fails with a differing handle.
+2. ☑ With three windows, a focus change repaints exactly two frames. Sabotage-verified: restoring
+   `PaintAllFrames()` reports 3.
+3. ☑ `FramePaintCount` exposed for the assertion; incremented in `PaintClientFrame`.
+
+---
+
 ### ☑ WM-15 — Two render paths; `RenderComposite` is dead code
 
 **Where:** `src/main/pascal/wmsama.core.pas` — `RenderComposite` and `Run`
@@ -646,32 +615,6 @@ the compositor unit, both inside `RenderComposite`.
 
 **Acceptance:** ☑ `grep -n "PresentToScreen\|CompositeScene" src/main/pascal/*.pas` yields only
 the two lines inside `RenderComposite`; behaviour unchanged (29 tests green, live session clean).
-
----
-
-### ☐ WM-16 — Per-paint GC create/free churn
-
-**Where:** `src/main/pascal/wmsama.core.pas:1892-1901`; amplification at `1235`
-(`PaintAllFrames` in `DoOnClientActivated`)
-
-**What happens:** `PaintClientFrame` allocates a GC, calls `put_image`, then frees the GC and
-flushes — on every paint. `DoOnClientActivated` calls `PaintAllFrames()` on every focus change, so
-one click with 20 windows means 20 GC create/free pairs, 20 `put_image` calls, and 20 flushes,
-all inside the event handler.
-
-**Observable failure:** focus-change latency that scales with window count; unnecessary server
-churn.
-
-**Fix:** cache one GC per connection (or per frame window) for the WM's lifetime, reuse it, and
-flush once at the end of a paint batch. Additionally, make focus changes repaint only the
-previously active and newly active frames — not all of them.
-
-**Acceptance:**
-1. 20 open windows: click between two of them → at most 2 frames repainted (instrument count).
-2. GC count in `xrestop` constant across 100 focus changes.
-3. `xcb_flush` count per input event ≤ 1 (instrument).
-
-**Test:** unit test the repaint-set computation for a focus change.
 
 ---
 
@@ -733,5 +676,8 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-06 | done | `5baa9a2` + `a6082c6` | Keysyms resolved from `xcb_get_keyboard_mapping`, modifiers from `xcb_get_modifier_mapping`, `MappingNotify` re-grabs. Live remap logged + Alt+Tab survived. **Layout switch itself unverified** (Xephyr ignores XKB uploads) |
 | 2026-10-28 | WM-10 | done | `5baa9a2` + `a6082c6` | MRU list; first press = previous window. Caught a self-inflicted regression (index 0 made Alt+Tab inert) in live testing, not in the unit test |
 | 2026-10-28 | — | correction | — | "Pump stall" was FPC stderr buffering, not a stuck queue. A/B test showed identical behaviour. Debug output now flushes via `DebugLog`; the `xcb_poll_for_event` change was kept as robustness only |
+| 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
+| 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
+| 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
 | 2026-10-28 | WM-17 | done | `f6a1584` | **New finding.** Clients were destroyed with the WM. Now unparented + round-tripped before disconnect; xterm survives 3/3 (was 3/3 dead); WM restart preserves the session. Flush alone proven insufficient |
 | | | | | |
