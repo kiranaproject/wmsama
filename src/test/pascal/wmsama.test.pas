@@ -26,6 +26,9 @@ type
     procedure TestFrameMetricsAndTitlebar();
     procedure TestWindowSnappingAndPreviews();
     procedure TestAltTabSwitcher();
+    procedure TestAltTabTogglesBetweenTwoWindows();
+    procedure TestAltTabCyclesThroughMruOrder();
+    procedure TestAltTabSkipsClosedWindows();
     procedure TestAltTabEmptyDesktopDoesNotGrab();
     procedure TestAltTabGrabAlwaysReleased();
     procedure TestXErrorDecoding();
@@ -317,25 +320,130 @@ begin
     cli2 := wm.ManageWindow(5002);
     cli2.Title := 'Browser';
 
+    // Establish MRU order the way real use does: activate Editor, then Browser.
+    cli1.Activate();
+    cli2.Activate();
+    AssertSame('Browser is active', cli2, wm.ActiveClient);
+    AssertSame('MRU front is the active window', cli2, wm.MruClients[0]);
+    AssertSame('MRU second is the previous window', cli1, wm.MruClients[1]);
+
     AssertFalse('Alt-Tab inactive initially', wm.AltTabActive);
     AssertFalse('No keyboard grab held initially', wm.KeyboardGrabHeld);
 
-    // Trigger forward: the first press selects the previously active window,
-    // which is index 0 — not 1 (the historical off-by-one, roadmap WM-10).
+    // The list is MRU-ordered, so index 0 is the window that already has focus.
+    // The first press must land on index 1 — the previous window. Landing on 0
+    // would re-activate the current window and make Alt+Tab appear inert.
     wm.TriggerAltTabForward();
     AssertTrue('Alt-Tab activated', wm.AltTabActive);
-    AssertEquals('Alt-Tab index starts at 0', 0, wm.AltTabIndex);
+    AssertEquals('First press selects the previous window', 1, wm.AltTabIndex);
     AssertTrue('Keyboard grab held while switching', wm.KeyboardGrabHeld);
 
-    // Trigger forward again (cycles)
-    wm.TriggerAltTabForward();
-    AssertEquals('Alt-Tab cycled to index 1', 1, wm.AltTabIndex);
-
-    // Dismiss activates selected client
+    // Dismiss activates the highlighted client.
     wm.TriggerAltTabDismiss();
     AssertFalse('Alt-Tab dismissed', wm.AltTabActive);
     AssertFalse('Keyboard grab released on dismiss', wm.KeyboardGrabHeld);
-    AssertSame('Selected client is active', cli2, wm.ActiveClient);
+    AssertSame('Editor is active after switching', cli1, wm.ActiveClient);
+    AssertSame('MRU front followed the switch', cli1, wm.MruClients[0]);
+  finally
+    wm.Free();
+  end;
+end;
+
+// WM-10: Alt+Tab must behave as a toggle. With MRU ordering, switching to the
+// previous window makes it the new front, so the next Alt+Tab returns to where we
+// started. This is the behaviour users have hard-wired, and it regressed once
+// already while fixing the index semantics.
+procedure TWMSamaTest.TestAltTabTogglesBetweenTwoWindows();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli1 := wm.ManageWindow(5101);
+    cli2 := wm.ManageWindow(5102);
+    cli1.Activate();
+    cli2.Activate();
+
+    // First switch: Browser -> Editor.
+    wm.TriggerAltTabForward();
+    wm.TriggerAltTabDismiss();
+    AssertSame('Switched to Editor', cli1, wm.ActiveClient);
+
+    // Second switch: Editor -> Browser. Must not stay on Editor.
+    wm.TriggerAltTabForward();
+    wm.TriggerAltTabDismiss();
+    AssertSame('Switched back to Browser', cli2, wm.ActiveClient);
+
+    // And again, to prove it keeps alternating.
+    wm.TriggerAltTabForward();
+    wm.TriggerAltTabDismiss();
+    AssertSame('Alternates back to Editor', cli1, wm.ActiveClient);
+  finally
+    wm.Free();
+  end;
+end;
+
+// WM-10: cycling with Alt held must walk the MRU list in order, and wrap.
+procedure TWMSamaTest.TestAltTabCyclesThroughMruOrder();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2, cli3: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli1 := wm.ManageWindow(5201);
+    cli2 := wm.ManageWindow(5202);
+    cli3 := wm.ManageWindow(5203);
+    // MRU becomes: 3, 2, 1
+    cli1.Activate();
+    cli2.Activate();
+    cli3.Activate();
+    AssertSame('MRU front is 3', cli3, wm.MruClients[0]);
+    AssertSame('MRU second is 2', cli2, wm.MruClients[1]);
+    AssertSame('MRU third is 1', cli1, wm.MruClients[2]);
+
+    wm.TriggerAltTabForward();
+    AssertEquals('First press lands on previous window (index 1)', 1, wm.AltTabIndex);
+    wm.TriggerAltTabForward();
+    AssertEquals('Second press advances to index 2', 2, wm.AltTabIndex);
+    wm.TriggerAltTabForward();
+    AssertEquals('Third press wraps to index 0', 0, wm.AltTabIndex);
+
+    wm.TriggerAltTabDismiss();
+    AssertSame('Wrapped selection is the MRU front', cli3, wm.ActiveClient);
+  finally
+    wm.Free();
+  end;
+end;
+
+// WM-10: a window that goes away must leave the MRU list, so Alt+Tab cannot
+// select a dead client.
+procedure TWMSamaTest.TestAltTabSkipsClosedWindows();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2: TXCBWMClient;
+  eligible: TFPList;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli1 := wm.ManageWindow(5301);
+    cli2 := wm.ManageWindow(5302);
+    cli1.Activate();
+    cli2.Activate();
+
+    wm.UnmanageWindow(cli2);
+    AssertEquals('Closed window removed from MRU', -1, wm.MruClients.IndexOf(cli2));
+    AssertEquals('Survivor still in MRU', 0, wm.MruClients.IndexOf(cli1));
+
+    eligible := TFPList.Create();
+    try
+      wm.GetAltTabEligibleClients(eligible);
+      AssertEquals('Only the surviving client is eligible', 1, eligible.Count);
+      AssertSame('Survivor is the eligible one', cli1, TXCBWMClient(eligible[0]));
+    finally
+      eligible.Free();
+    end;
   finally
     wm.Free();
   end;

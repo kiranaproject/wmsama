@@ -178,6 +178,7 @@ type
 
     function ClaimOwnership(): Boolean; override;
     procedure GrabGlobalKeys();
+    procedure RebindGlobalKeys(); override;
     procedure ScanWindows();
 
     function StartCompositor(): Boolean;
@@ -222,6 +223,9 @@ type
     procedure ReleaseKeyboardGrab();
 
     // Diagnostics
+    // Single funnel for debug output. Flushes explicitly: FPC buffers StdErr, and
+    // buffered diagnostics once led to a wrong conclusion about the event pump.
+    procedure DebugLog(const AMsg: AnsiString);
     function DescribeXError(const AError: Pxcb_generic_error_t): AnsiString;
     procedure LogXError(const AError: Pxcb_generic_error_t; const AContext: AnsiString);
 
@@ -423,6 +427,13 @@ begin
   end;
 end;
 
+procedure TWMSamaCompositingWM.DebugLog(const AMsg: AnsiString);
+begin
+  if not FDebugEnabled then Exit;
+  WriteLn(StdErr, '[wmsama] ', AMsg);
+  Flush(StdErr);
+end;
+
 // Decode a generic X error into a single human-readable line.
 function TWMSamaCompositingWM.DescribeXError(const AError: Pxcb_generic_error_t): AnsiString;
 begin
@@ -441,8 +452,7 @@ end;
 procedure TWMSamaCompositingWM.LogXError(const AError: Pxcb_generic_error_t; const AContext: AnsiString);
 begin
   if AError = nil then Exit;
-  if FDebugEnabled then
-    WriteLn(StdErr, '[wmsama] ', AContext, ': ', DescribeXError(AError));
+  DebugLog(AContext + ': ' + DescribeXError(AError));
 end;
 
 constructor TWMSamaCompositingWM.Create(AConn: Pxcb_connection_t; const AScreenNum: Integer);
@@ -543,51 +553,79 @@ begin
 end;
 
 procedure TWMSamaCompositingWM.GrabGlobalKeys();
-const
-  TAB_KEYCODE = 23;
-  SPACE_KEYCODE = 65;
-  LEFT_KEYCODE = 113;
-  RIGHT_KEYCODE = 114;
-  UP_KEYCODE = 111;
-  DOWN_KEYCODE = 116;
-  MOD_ALT = 8;
-  MOD_SUPER_SHIFT = 65; // Mod4 (64) + Shift (1)
-  MOD_NUMLOCK = 16;
-  MOD_CAPSLOCK = 2;
 var
-  alt_mods: array[0..3] of Word;
-  super_mods: array[0..3] of Word;
+  altMods: array[0..3] of Word;
+  superMods: array[0..3] of Word;
   i: Integer;
 begin
   if (Connection = nil) or (Screen = nil) then Exit;
-  alt_mods[0] := MOD_ALT;
-  alt_mods[1] := MOD_ALT or MOD_NUMLOCK;
-  alt_mods[2] := MOD_ALT or MOD_CAPSLOCK;
-  alt_mods[3] := MOD_ALT or MOD_NUMLOCK or MOD_CAPSLOCK;
 
-  super_mods[0] := MOD_SUPER_SHIFT;
-  super_mods[1] := MOD_SUPER_SHIFT or MOD_NUMLOCK;
-  super_mods[2] := MOD_SUPER_SHIFT or MOD_CAPSLOCK;
-  super_mods[3] := MOD_SUPER_SHIFT or MOD_NUMLOCK or MOD_CAPSLOCK;
+  // Keycodes and modifier masks come from the server (ResolveKeyBindings), not
+  // from hardcoded evdev assumptions, so a non-US layout still binds correctly.
+  if not KeyBindingsValid then
+    ResolveKeyBindings();
+
+  if (KeycodeTab = 0) or (ModAlt = 0) then
+  begin
+    DebugLog('key bindings unavailable; Alt+Tab not grabbed');
+    Exit;
+  end;
+
+  altMods[0] := ModAlt;
+  altMods[1] := ModAlt or ModNumLock;
+  altMods[2] := ModAlt or ModCapsLock;
+  altMods[3] := ModAlt or ModNumLock or ModCapsLock;
+
+  superMods[0] := ModSuper;
+  superMods[1] := ModSuper or ModNumLock;
+  superMods[2] := ModSuper or ModCapsLock;
+  superMods[3] := ModSuper or ModNumLock or ModCapsLock;
 
   for i := 0 to 3 do
   begin
-    xcb_grab_key(Connection, 1, Screen^.root, alt_mods[i], TAB_KEYCODE,
+    xcb_grab_key(Connection, 1, Screen^.root, altMods[i], KeycodeTab,
                  XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-    xcb_grab_key(Connection, 1, Screen^.root, alt_mods[i], SPACE_KEYCODE,
-                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+    if KeycodeSpace <> 0 then
+      xcb_grab_key(Connection, 1, Screen^.root, altMods[i], KeycodeSpace,
+                   XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
 
     // Multi-monitor keyboard navigation: Super + Shift + Arrow keys
-    xcb_grab_key(Connection, 1, Screen^.root, super_mods[i], LEFT_KEYCODE,
-                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-    xcb_grab_key(Connection, 1, Screen^.root, super_mods[i], RIGHT_KEYCODE,
-                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-    xcb_grab_key(Connection, 1, Screen^.root, super_mods[i], UP_KEYCODE,
-                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-    xcb_grab_key(Connection, 1, Screen^.root, super_mods[i], DOWN_KEYCODE,
-                 XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+    if ModSuper <> 0 then
+    begin
+      if KeycodeLeft <> 0 then
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT,
+                     KeycodeLeft, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+      if KeycodeRight <> 0 then
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT,
+                     KeycodeRight, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+      if KeycodeUp <> 0 then
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT,
+                     KeycodeUp, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+      if KeycodeDown <> 0 then
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT,
+                     KeycodeDown, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+    end;
   end;
+
   xcb_flush(Connection);
+end;
+
+// Called by the base class after a MappingNotify: drop the old grabs and re-issue
+// them against the new mapping. Without this a layout switch silently kills every
+// binding, because a passive grab on a keycode that is no longer mapped never fires.
+procedure TWMSamaCompositingWM.RebindGlobalKeys();
+begin
+  if (Connection = nil) or (Screen = nil) then Exit;
+
+  // Ungrab everything this client holds on the root before re-resolving, so stale
+  // grabs do not accumulate across layout switches. XCB_GRAB_ANY with
+  // XCB_MOD_MASK_ANY matches every key/modifier combination.
+  xcb_ungrab_key(Connection, XCB_GRAB_ANY, Screen^.root, XCB_MOD_MASK_ANY);
+
+  ResolveKeyBindings();
+  GrabGlobalKeys();
+
+  DebugLog('key bindings re-resolved after mapping change');
 end;
 
 // Acquire the active keyboard grab used by the Alt+Tab switcher.
@@ -616,16 +654,14 @@ begin
   reply := xcb_grab_keyboard_reply(Connection, cookie, nil);
   if reply = nil then
   begin
-    if FDebugEnabled then
-      WriteLn(StdErr, '[wmsama] xcb_grab_keyboard: no reply');
+    DebugLog('xcb_grab_keyboard: no reply');
     Exit;
   end;
 
   try
     if reply^.status <> XCB_GRAB_STATUS_SUCCESS then
     begin
-      if FDebugEnabled then
-        WriteLn(StdErr, '[wmsama] xcb_grab_keyboard refused, status=', reply^.status);
+      DebugLog('xcb_grab_keyboard refused, status=' + IntToStr(reply^.status));
       Exit;
     end;
   finally
@@ -2444,10 +2480,22 @@ var
 begin
   if AList = nil then Exit;
   AList.Clear();
+
+  // MRU order first: index 0 is the current window, index 1 the previous one.
+  // That is what makes a single Alt+Tab mean "go back to what I was using".
+  for i := 0 to MruClients.Count - 1 do
+  begin
+    cli := TXCBWMClient(MruClients[i]);
+    if IsAltTabEligible(cli) then
+      AList.Add(cli);
+  end;
+
+  // Clients that have never been activated have no MRU entry yet; append them in
+  // creation order so they are still reachable.
   for i := 0 to Clients.Count - 1 do
   begin
     cli := TXCBWMClient(Clients[i]);
-    if IsAltTabEligible(cli) then
+    if IsAltTabEligible(cli) and (AList.IndexOf(cli) < 0) then
       AList.Add(cli);
   end;
 end;
@@ -2480,12 +2528,18 @@ begin
       // Only mark the switcher active once the grab is really ours.
       if not AcquireKeyboardGrab() then
       begin
-        if FDebugEnabled then
-          WriteLn(StdErr, '[wmsama] Alt+Tab skipped: keyboard grab unavailable');
+        DebugLog('Alt+Tab skipped: keyboard grab unavailable');
         Exit;
       end;
       FAltTabActive := True;
-      FAltTabIndex := 0;
+      // The list is in MRU order, so index 0 is the window that already has
+      // focus. The first press must move to the *previous* window, which is
+      // index 1. Selecting index 0 would re-activate the current window and make
+      // Alt+Tab appear to do nothing.
+      if eligibleList.Count > 1 then
+        FAltTabIndex := 1
+      else
+        FAltTabIndex := 0;
       opened := True;
     end;
 
@@ -2719,14 +2773,16 @@ begin
     XCB_KEY_PRESS:
     begin
       keyEv := Pxcb_key_press_event_t(AEvent);
-      if keyEv^.detail = 23 then // Tab
+      // All keycodes below come from ResolveKeyBindings, not from hardcoded
+      // evdev values, so a non-US layout binds the same physical keys.
+      if (KeycodeTab <> 0) and (keyEv^.detail = KeycodeTab) then
       begin
         // Grab ownership is decided inside TriggerAltTabForward, after the
         // eligible list is known to be non-empty.
         TriggerAltTabForward();
         Exit(True);
       end
-      else if (keyEv^.detail = 65) then // Space (Alt+Space)
+      else if (KeycodeSpace <> 0) and (keyEv^.detail = KeycodeSpace) then // Alt+Space
       begin
         menuCli := ActiveClient;
         if (menuCli = nil) and (Clients.Count > 0) then
@@ -2737,18 +2793,20 @@ begin
           Exit(True);
         end;
       end
-      else if FAltTabActive and (keyEv^.detail = 9) then // Escape: cancel switcher
+      else if FAltTabActive and (keyEv^.detail = KeycodeEscape) then
       begin
         CancelAltTab();
         Exit(True);
       end
-      else if FAltTabActive and (keyEv^.detail = 36) then // Return: activate selected
+      else if FAltTabActive and (keyEv^.detail = KeycodeReturn) then
       begin
         TriggerAltTabDismiss();
         Exit(True);
       end
-      else if ((keyEv^.state and (64 or 1)) = (64 or 1)) and // Mod4 (Super) + Shift
-              ((keyEv^.detail = 113) or (keyEv^.detail = 114) or (keyEv^.detail = 111) or (keyEv^.detail = 116)) then
+      else if ((keyEv^.state and (ModSuper or XCB_MOD_MASK_SHIFT)) =
+               (ModSuper or XCB_MOD_MASK_SHIFT)) and
+              ((keyEv^.detail = KeycodeLeft) or (keyEv^.detail = KeycodeRight) or
+               (keyEv^.detail = KeycodeUp) or (keyEv^.detail = KeycodeDown)) then
       begin
         targetCli := ActiveClient;
         if targetCli <> nil then
@@ -2756,14 +2814,14 @@ begin
           curMon := MonitorForClient(targetCli);
           if curMon <> nil then
           begin
-            case keyEv^.detail of
-              113: adjMon := AdjacentMonitor(curMon, dirLeft);
-              114: adjMon := AdjacentMonitor(curMon, dirRight);
-              111: adjMon := AdjacentMonitor(curMon, dirUp);
-              116: adjMon := AdjacentMonitor(curMon, dirDown);
+            if keyEv^.detail = KeycodeLeft then
+              adjMon := AdjacentMonitor(curMon, dirLeft)
+            else if keyEv^.detail = KeycodeRight then
+              adjMon := AdjacentMonitor(curMon, dirRight)
+            else if keyEv^.detail = KeycodeUp then
+              adjMon := AdjacentMonitor(curMon, dirUp)
             else
-              adjMon := curMon;
-            end;
+              adjMon := AdjacentMonitor(curMon, dirDown);
             if (adjMon <> nil) and (adjMon <> curMon) then
             begin
               MoveClientToMonitor(targetCli, adjMon);
@@ -2778,8 +2836,11 @@ begin
     XCB_KEY_RELEASE:
     begin
       keyEv := Pxcb_key_press_event_t(AEvent);
-      // Alt_L (64) or Alt_R (108) released
-      if FAltTabActive and ((keyEv^.detail = 64) or (keyEv^.detail = 108)) then
+      // Alt released: dismiss the switcher. Checked by keycode only: the state
+      // field of a KeyRelease still has the modifier set for the key being
+      // released, so testing it here would never fire.
+      if FAltTabActive and
+         ((keyEv^.detail = KeycodeAltL) or (keyEv^.detail = KeycodeAltR)) then
       begin
         TriggerAltTabDismiss();
         Exit(True);
@@ -3043,7 +3104,7 @@ begin
           end;
 
           // Alt + Left Click to move, Alt + Right Click to resize ANY window (including CSD windows)
-          if (btnEv^.state and 8) <> 0 then
+          if (btnEv^.state and ModAlt) <> 0 then
           begin
             cli.Activate();
             if Connection <> nil then
