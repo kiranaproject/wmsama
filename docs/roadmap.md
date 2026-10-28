@@ -98,7 +98,8 @@ Severity is about *user-visible damage*, not code smell.
 | WM-16 | P2 | Present | Per-paint GC create/free churn | `☑` |
 | WM-17 | P1 | Lifetime | WM exit destroys every reparented client | `☑` |
 
-**Totals:** 4 × P0 (all done), 8 × P1 (7 done), 4 × P2 (all done), 1 withdrawn. **All open items closed.**
+**Totals:** 4 × P0 (all done), 8 × P1 (7 done), 4 × P2 (all done), 1 withdrawn.
+Plus **WM-18** and **WM-19** (found by profiling after the audit items closed).
 
 > **Audit correction (2026-10-28):** WM-09 was a false positive. The expose branch
 > never painted anything — it marked the compositor window damaged and fell through
@@ -620,6 +621,118 @@ the two lines inside `RenderComposite`; behaviour unchanged (29 tests green, liv
 
 ---
 
+### ☑ WM-18 — Drop shadow re-rasterized every frame
+
+**Where:** **[florialib]** `floria.xcb.wm.compositor.pas` — `EnsureShadowCache`,
+`InvalidateShadowCache`, `PaintedRect`
+
+**What happened:** `CompositeScene` called `DrawShadow` for every window on every frame.
+`DrawShadow` expands a rounded rect across up to 8 blur passes. The rendered shadow depends only
+on width, height, radius, offset, blur and opacity — **never on position** — so essentially all of
+that work was recomputing an identical image.
+
+**Measured before the fix** (1920×1080, one window, per frame):
+
+| Size | compose | share from shadow |
+| :--- | :--- | :--- |
+| 800×600 | 65.5 ms | 86% |
+| 1920×1080 | 259 ms | 91% |
+
+**Fix (landed):** rasterize once into an image sized to the window plus shadow margin, then blit
+per frame. Validity is decided by comparing a key (w, h, radius, offset, blur, opacity) against the
+current settings rather than by invalidation calls at each mutation site — a missed invalidation
+would silently render a stale shadow, and a key comparison cannot be missed.
+
+**Equivalence — verified, not assumed:** compared against the previous per-frame rendering over a
+1920×1080 scene:
+- window interior: **identical**
+- differences confined to the shadow gradient
+- max channel delta **5 of 255** (2%)
+
+The delta scales with pass count — blur 2 → delta 1, blur 4 → 3, blur 8 → 5 — and plateaus at the
+8-pass cap. That is 8-bit rounding accumulated across the blends, not a systematic error. Prototype
+measurement of the blit vs re-rasterize: **7.0–7.5× faster** at every size.
+
+**Acceptance — verified 2026-10-29:**
+1. ☑ `TestShadowCacheInvalidatesOnResize` — built once, reused when nothing changed, rebuilt on
+   resize, radius change and offset change. Sabotage-verified: disabling the key comparison leaves
+   the build count at 1 and fails.
+2. ☑ `TestShadowCacheDisabledWhenNoShadow` — disabled or zero-opacity shadows allocate nothing.
+3. ☑ Live session: shadow present and correct on screen.
+
+**Note:** the cache counts builds (`ShadowBuildCount`). Comparing image pointers is unreliable —
+the freed image's address is immediately reused by its replacement, which made the first version of
+the test pass regardless.
+
+---
+
+### ☑ WM-19 — Compose covered the whole screen every frame
+
+**Where:** **[florialib]** `floria.xcb.wm.compositor.pas` — `CompositeScene`;
+**[florialib]** `floria.image.core.pas` — `ClearRect`
+
+**What happened:** `CompositeScene` cleared the entire scene image and drew every window on every
+frame, regardless of what had changed — O(screen) work per frame.
+
+**Fix (landed):**
+- The scene snapshot is evaluated **before** rendering (it depends only on window state, not on
+  rendering), so a content-only change composes just the dirty region. Structural changes still
+  compose the full screen.
+- `FPrevOverlayRect` is unioned into the compose region, so a dismissed or moved HUD is actually
+  erased rather than left as stale pixels.
+- Windows are still all walked (their server damage must be subtracted) but drawing is clipped to
+  the region.
+- **`ClearRect` added to `TFloriaImage`.** `Clear()` always fills the whole image and ignores the
+  canvas clip, so it cannot be used for a partial recompose — everything outside the region must
+  keep its previous pixels.
+
+**Measured at 1920×1080, one full-screen window:**
+
+| Stage | before | after |
+| :--- | :--- | :--- |
+| compose | 235–259 ms | **35 ms** |
+| total frame | 255–276 ms | **43 ms** |
+
+≈6× at 1080p, ≈7× at 800×600 (65 ms → 9 ms).
+
+**Acceptance — verified 2026-10-29:**
+1. ☑ `TestComposeRegionTracksDirtyRect` — content-only composes a sub-region; a structural change
+   returns to the full screen. Sabotage-verified (disabling the region yields `x=0`, width 800).
+2. ☑ `TestClearRectLeavesOutsideUntouched` — every pixel inside filled, none outside touched, and
+   out-of-bounds rectangles clamp. Sabotage-verified: making it fill the whole image reports 7500
+   wrongly-touched pixels.
+3. ☑ Live: typing, dragging, overlapping windows and HUD dismissal all render correctly.
+
+---
+
+### ☐ WM-20 — Reparented window loses its pixmap snapshot after an overlap drag
+
+**Severity:** P1 (cosmetic but highly visible)
+**Status:** confirmed **pre-existing**, not caused by WM-18/WM-19
+
+**Symptom:** drag window B across window A, then drag B away. A's lower region renders as solid
+black; A's rounded corners and shadow are also gone. Typing into A does not repaint the black area
+from the WM's side.
+
+**Reproduction:** two `xterm` windows, drag one over the other and back, screenshot.
+
+**Bisected:** reproduced identically on `florialib@8d52670` (before any of this roadmap's work),
+on `7953ae7` (before WM-12), and on current `HEAD`. It is **not** a regression from the present-path
+work — an important thing to have checked, because it *looks* exactly like the kind of artifact a
+partial-present change would cause.
+
+**Suspected cause:** `TXCBComposite.name_window_pixmap` takes a snapshot of the window's contents at
+the moment of the call. `UpdatePixmap` is called from `UpdateGeometry` only when the *size* changes
+(`dimsChanged`), so a window that is merely moved keeps a pixmap from an earlier point. Once the
+pixmap is emptied or invalidated by the server, nothing re-creates it, and `FetchImage` reads
+black. Not yet confirmed; the fix is likely to re-`name_window_pixmap` when a window is uncovered
+or its contents are known lost, and to treat an all-black fetch as suspect.
+
+**Why it was not fixed here:** it is outside WM-18/WM-19's scope, and it needs its own reproduction
+harness. Recorded rather than dropped.
+
+---
+
 ## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -681,6 +794,8 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-29 | WM-18 | done | `7b16006` | Shadow cached instead of re-rasterized per frame: 86-91% of compose time. Pixel-equivalence verified (max delta 5/255, scales with pass count = rounding). ~7x on the shadow |
+| 2026-10-29 | WM-19 | done | `7b16006` | Compose clipped to the damage region; `ClearRect` added. 1080p compose 235-259 ms -> 35 ms |
 | 2026-10-29 | WM-14 | done | `9dd22fe` | Event base must be non-zero; `HasDamage` now implies a resolved base. Offline + live assertions |
 | 2026-10-29 | WM-13 | done | `9dd22fe` | Damage subtracted unconditionally, split from the dirty flag. Sabotage-verified (1 vs 3) |
 | 2026-10-29 | WM-12 | done | `9dd22fe` | Partial present via scene snapshot. Measured 960 KB vs 4 MB per content frame. **Ghost-overlay defect introduced and fixed** — caught by screenshot, not tests |
