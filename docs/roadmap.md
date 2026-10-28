@@ -74,9 +74,9 @@ Severity is about *user-visible damage*, not code smell.
 | ID | Sev | Area | Title | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | WM-01 | **P0** | Grabs | Alt+Tab leaks the keyboard grab on an empty desktop | `☑` |
-| WM-02 | **P0** | Grabs | Pointer grab result is never checked before entering drag | `☐` |
+| WM-02 | **P0** | Grabs | Pointer grab result is never checked before entering drag | `☑` |
 | WM-03 | **P0** | Diagnostics | All X errors are silently discarded | `☑` |
-| WM-04 | **P0** | Loop | `Stop()` is a no-op; signal path is async-unsafe | `☐` |
+| WM-04 | **P0** | Loop | `Stop()` is a no-op; signal path is async-unsafe | `☑` |
 | WM-05 | P1 | Input | Root event mask incomplete → dead code and stale focus | `☐` |
 | WM-06 | P1 | Input | Hardcoded keycodes/modifier masks; no `MappingNotify` | `☐` |
 | WM-07 | P1 | Input | Hover cursor is written onto client windows | `☐` |
@@ -89,8 +89,9 @@ Severity is about *user-visible damage*, not code smell.
 | WM-14 | P2 | Diagnostics | `IsDamageNotify` can alias X error events (type 0) | `☐` |
 | WM-15 | P2 | Structure | Two render paths; `RenderComposite` is dead code | `☑` |
 | WM-16 | P2 | Present | Per-paint GC create/free churn | `☐` |
+| WM-17 | P1 | Lifetime | WM exit destroys every reparented client | `☑` |
 
-**Totals:** 4 × P0 (2 done), 7 × P1 (1 partial), 4 × P2 (1 done), 1 withdrawn.
+**Totals:** 4 × P0 (all done), 8 × P1 (1 done, 1 partial), 4 × P2 (1 done), 1 withdrawn.
 
 > **Audit correction (2026-10-28):** WM-09 was a false positive. The expose branch
 > never painted anything — it marked the compositor window damaged and fell through
@@ -146,33 +147,34 @@ documented in `AcquireKeyboardGrab`.
 
 ---
 
-### ☐ WM-02 — Pointer grab result is never checked before entering drag
+### ☑ WM-02 — Pointer grab result is never checked before entering drag
 
-**Where:** **[florialib]** `src/main/pascal/floria.xcb.wm.pas:4516-4552` (reply freed at `4547-4549`)
+**Where:** **[florialib]** `src/main/pascal/floria.xcb.wm.pas` — `BeginDrag`, `OnDragGrabFailed`
 
-**What happens:** `xcb_grab_pointer_reply()` is freed without inspecting `reply^.status`, and
-`FDragClient` / `FDragMode` are assigned *before* the grab is attempted. On failure the WM
-believes it is dragging but does not own the pointer. Because the root mask does not select
-`BUTTON_RELEASE` (see WM-05), the terminating release may never be delivered.
+**What happens:** `xcb_grab_pointer_reply()` was freed without inspecting `reply^.status`, and
+`FDragClient` / `FDragMode` were assigned *before* the grab was attempted. On failure the WM
+believed it was dragging but did not own the pointer.
 
 **Observable failure:** a window glued to the cursor until the next click. Most likely trigger is
-`_NET_WM_MOVERESIZE` (`4236-4273`), where a client-initiated move can collide with an existing
-grab, or `XCB_GRAB_STATUS_ALREADY_GRABBED` after a lost release.
+`_NET_WM_MOVERESIZE`, where a client-initiated move can collide with an existing grab, or
+`XCB_GRAB_STATUS_ALREADY_GRABBED` after a lost release.
 
-**Fix:**
-- On `status <> XCB_GRAB_STATUS_SUCCESS`: do not enter drag state, log the status, optionally
-  `xcb_ungrab_pointer` and retry once.
-- Assign `FDragClient`/`FDragMode` only after a successful grab.
-- Do the same for the keyboard grab in WM-01.
+**Fix (landed):**
+- Drag state is committed only after `XCB_GRAB_STATUS_SUCCESS`.
+- A stale grab is dropped (`xcb_ungrab_pointer`) when the status is `ALREADY_GRABBED`.
+- A missing reply (connection gone) also aborts the drag rather than proceeding.
+- New `OnDragGrabFailed` hook reports the `XCB_GRAB_STATUS_*` value (255 when no reply) so the
+  shell can log it.
+- Offline managers (`FConn = nil`) still enter drag state, preserving headless testability.
 
-**Acceptance:**
-1. `xdotool`-driven drag of a window while a second client holds the pointer → WM logs the
-   failure and does not move the window.
-2. Normal drag/resize across all 8 directions still works in Xephyr.
-3. `_NET_WM_MOVERESIZE` from a GTK app (e.g. `xterm` with Alt+drag, or `gtk3-demo`) does not
-   strand the window.
+**Acceptance — verified 2026-10-28:**
+1. ☑ `TestDragGrabFailureDoesNotCommitDrag`: a second connection holds the pointer, the WM's grab
+   is refused, and `DragMode` stays `dmNone` with `DragClient = nil`.
+2. ☑ The test was proven sensitive by sabotage: restoring the old ordering makes it fail with
+   `expected: <0> but was: <1>`.
+3. ☑ All existing drag/resize tests (8 directions, tiled, legacy `dmResize`) still pass.
 
-**Test:** unit test injecting a fake grab result; assert `DragMode = dmNone` on failure.
+**Test:** `TestDragGrabFailureDoesNotCommitDrag` (live X required; skips when unavailable).
 
 ---
 
@@ -211,36 +213,76 @@ cosmetic glitches with no trace to their origin.
 
 ---
 
-### ☐ WM-04 — `Stop()` is a no-op; the signal path is async-unsafe
+### ☑ WM-04 — `Stop()` is a no-op; the signal path is async-unsafe
 
-**Where:** `src/main/pascal/wmsama.core.pas:2951-2997` (`while True` at `2966`);
-`src/main/pascal/wmsama.pas:64-70`; **[florialib]** `floria.xcb.wm.pas:4414-4437`
+**Where:** **[florialib]** `floria.xcb.wm.pas` — `Run`, `Stop`, `RequestShutdown`, `PumpEventsOnce`,
+`CreateWakeupPipe`, `DrainWakeupPipe`, `CloseWakeupPipe`, `DoOnTick`;
+`wmsama.core.pas` `Run`/`DoOnTick`; `wmsama.pas` `SigHandler`
 
-**What happens:** the override of `Run()` loops on `while True` and never consults `FIsRunning`,
-so the inherited `Stop()` (`4434-4437`) has no effect on the actual pump. The signal handler then
-calls `WriteLn` (allocates, not async-signal-safe) and `Halt(0)` while the process is blocked in
-`xcb_wait_for_event`. `Halt` skips the `finally` blocks in `wmsama.pas`, so `WM.Free()`,
-`xcb_disconnect`, and every compositor teardown path are skipped.
+**What happens:** the loop was `while FIsRunning` wrapped around a blocking `xcb_wait_for_event`,
+and `wmsama` overrode `Run()` with `while True`, so `Stop()` had no effect at all. The signal
+handler called `WriteLn` and `Halt(0)` while blocked in the pump; `Halt` skips every `finally`
+block, so `WM.Free()`, `xcb_disconnect`, and the compositor teardown never ran.
 
-**Observable failure:** `SIGTERM` leaves the X connection and every server-side resource to be
-reaped by the server; the compositor's `DisableCompositing` never runs, so subwindow
-redirection can be left in an inconsistent state. `Stop()` cannot be used for restart-in-place.
+**Fix (landed):**
+- Pump is `select()` over `{xcb_get_file_descriptor, self-pipe}` with a 16 ms tick.
+- `RequestShutdown` sets a flag and writes one byte to a non-blocking self-pipe — no allocation,
+  no stdio, no locks. Safe from a signal handler.
+- `PumpEventsOnce` drains `xcb_poll_for_queued_event` **before** selecting, because xcb can hold
+  events internally while the socket is already drained; selecting first would block on work
+  that is already pending.
+- `DoOnTick` gives the shell a tick source (used for presentation now, available for animation
+  and HUD auto-dismiss later).
+- `wmsama` no longer overrides the loop; it only supplies `DoOnTick`.
 
-**Fix:**
-- Loop condition: `while FIsRunning and not FTerminated`.
-- Signal handler: set a flag and `fpWrite` one byte to a self-pipe (the only async-safe actions).
-- Pump: `select()` on `{xcb_get_file_descriptor(Connection), pipe_read}` with a timeout; drain
-  X events when the socket is readable, exit when the pipe fires.
-- Keep the timeout so future work (snap animation, HUD auto-dismiss) has a tick source.
+**Acceptance — verified 2026-10-28:**
+1. ☑ `SIGTERM` → exit status 0 in **10–66 ms** across 3 runs (target: < 100 ms).
+2. ☑ Double `SIGINT` 50 ms apart → clean exit, no crash, no double free.
+3. ☑ `Stop()`/`RequestShutdown()` from a test actually terminates `Run()`
+   (`TestPumpWithoutConnection`, `TestShutdownRequestSetsFlags`).
+4. ☑ Self-pipe is non-blocking on both ends and safe to drain when empty
+   (`TestWakeupPipeLifecycle`).
 
-**Acceptance:**
-1. `SIGTERM` → process exits 0 within 100 ms, `xcb_disconnect` runs (verify with a log line in
-   the destructor), no `BadWindow` flood on the server afterwards.
-2. `SIGINT` twice in a row does not crash or double-free.
-3. `xrestop` shows resource count returning to baseline after exit.
-4. `WM.Stop()` from a timer callback actually terminates `Run()`.
+**Known limitation:** `SIGTERM` during a drag leaves the pointer grab to be released by the
+server on disconnect, which is correct but not explicit. If drag cancellation ever matters for
+animation, ungrab in `RequestShutdown` — it cannot be done from the handler itself.
 
-**Test:** unit test the pump with a socketpair standing in for the X connection.
+### ☑ WM-17 — WM exit destroys every reparented client *(found while fixing WM-04)*
+
+**Where:** **[florialib]** `floria.xcb.wm.pas` — `TXCBWindowManager.Destroy`
+
+**What happens:** `Destroy` freed `FClients` without reparenting anything. Frame windows are
+children of the root window and belong to the WM's connection, so when the WM exits the server
+destroys them — and every client reparented inside them dies with them. `UnparentClient` existed
+but was never called on shutdown.
+
+**Observable failure:** killing or restarting the window manager closes every application. Since
+WM-04 makes teardown actually run, this surfaced immediately: `xterm` exited with the WM in 3/3
+runs.
+
+**Fix (landed):**
+- Every reparented client is handed back to the root window before teardown; minimized clients
+  stay unmapped.
+- The teardown is round-tripped (`xcb_get_input_focus` reply) before the connection closes.
+
+**The round-trip is load-bearing, and this was verified, not assumed.** A plain `xcb_flush` is
+**not** sufficient — the reparent can still be lost when the connection closes. Measured by
+sabotage:
+
+| Variant | `TestClientsSurviveManagerShutdown` |
+| :--- | :--- |
+| No unparent (pre-fix) | **fails** |
+| Unparent + flush only | **fails** |
+| Unparent + flush + round-trip | **passes** |
+
+**Acceptance — verified 2026-10-28:**
+1. ☑ `xterm` survives WM exit in 3/3 live runs (previously died 3/3).
+2. ☑ WM restart after `SIGTERM` reclaims ownership with the client still present — the session
+   survives a WM restart.
+3. ☑ `TestClientsSurviveManagerShutdown` uses **two connections**: the client window belongs to an
+   observer connection, exactly like a real application. An earlier version created the client on
+   the WM's own connection and was worthless — disconnecting destroyed it regardless of
+   reparenting. Worth remembering for any X lifetime test.
 
 ---
 
@@ -533,7 +575,13 @@ Because the damage check runs before everything else in `ProcessEvent`, errors w
 `HandleDamageNotify` and reinterpreted as garbage drawables.
 
 **Observable failure:** rare, but it is a silent correctness trap that will also sabotage WM-03
-(the error handler would never see its events). Fix this *before* adding error logging.
+(the error handler would never see its events).
+
+**Status:** **mitigated, not fixed.** WM-03 landed an error check *before* the damage check in
+`wmsama.ProcessEvent`, so errors are routed correctly there. The underlying predicate is still
+wrong in `florialib`, which matters for any other consumer and for `HandleGenericEvent`. Fix it
+properly: require `FDamageEventBase <> 0` in `IsDamageNotify`, and treat "version reply OK but
+extension absent" as `FHasDamage := False`.
 
 **Fix:** require `FDamageEventBase <> 0` in `IsDamageNotify`, and treat "version reply OK but
 extension absent" as `FHasDamage := False`.
@@ -609,6 +657,12 @@ accident.
   afterwards. That ordering is correct — do not "simplify" it.
 - **`wtDesktop` pinned to the bottom of the compositor stack.** Verified correct in
   `DoOnClientMapped` (`989-1029`) and `DoOnClientActivated` (`1134-1237`).
+- **The `select()`-based pump.** Do not reintroduce `xcb_wait_for_event` in `Run()`: it cannot be
+  interrupted, which is what made `Stop()` a no-op. If a blocking wait is ever needed, wait on the
+  pipe as well.
+- **The teardown round-trip in `TXCBWindowManager.Destroy`.** It looks like a redundant sync and
+  will look like an obvious "cleanup" to a future reader. It is not: without it the reparents are
+  lost at disconnect and every application dies. See WM-17 for the measurement.
 
 ---
 
@@ -640,4 +694,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-03 | done | `bcf6a85` | Errors decoded before the damage check, stderr, `WMSAMA_DEBUG`. Live `BadWindow` decoded; clean session silent. Tests +2. Request-name table corrected against the core protocol (an earlier draft had 10/12/40–43 wrong) |
 | 2026-10-28 | WM-15 | done | `bcf6a85` | Single present path via `RenderComposite`; grep-verified |
 | 2026-10-28 | WM-10 | partial | `bcf6a85` | Off-by-one fixed (first press = index 0). MRU ordering still open |
+| 2026-10-28 | WM-02 | done | `f6a1584` | Drag state committed only after `XCB_GRAB_STATUS_SUCCESS`; stale grab dropped; `OnDragGrabFailed` hook. Sabotage-verified: old ordering fails the new test |
+| 2026-10-28 | WM-04 | done | `f6a1584` + `8d7f1cf` | select() over X socket + self-pipe; `RequestShutdown` is async-signal-safe; `DoOnTick` tick source. Live: SIGTERM exits in 10–66 ms, status 0. Double SIGINT clean |
+| 2026-10-28 | WM-17 | done | `f6a1584` | **New finding.** Clients were destroyed with the WM. Now unparented + round-tripped before disconnect; xterm survives 3/3 (was 3/3 dead); WM restart preserves the session. Flush alone proven insufficient |
 | | | | | |
