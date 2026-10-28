@@ -73,24 +73,30 @@ Severity is about *user-visible damage*, not code smell.
 
 | ID | Sev | Area | Title | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| WM-01 | **P0** | Grabs | Alt+Tab leaks the keyboard grab on an empty desktop | `☐` |
+| WM-01 | **P0** | Grabs | Alt+Tab leaks the keyboard grab on an empty desktop | `☑` |
 | WM-02 | **P0** | Grabs | Pointer grab result is never checked before entering drag | `☐` |
-| WM-03 | **P0** | Diagnostics | All X errors are silently discarded | `☐` |
+| WM-03 | **P0** | Diagnostics | All X errors are silently discarded | `☑` |
 | WM-04 | **P0** | Loop | `Stop()` is a no-op; signal path is async-unsafe | `☐` |
 | WM-05 | P1 | Input | Root event mask incomplete → dead code and stale focus | `☐` |
 | WM-06 | P1 | Input | Hardcoded keycodes/modifier masks; no `MappingNotify` | `☐` |
 | WM-07 | P1 | Input | Hover cursor is written onto client windows | `☐` |
 | WM-08 | P1 | Input | Unhandled frame clicks fall through into a move-drag | `☐` |
-| WM-09 | P1 | Loop | `Expose` is painted twice (missing `Exit(True)`) | `☐` |
-| WM-10 | P1 | Input | Alt+Tab is off-by-one and not MRU-ordered | `☐` |
+| WM-09 | — | Loop | ~~`Expose` is painted twice~~ **withdrawn — claim did not reproduce** | `⊘` |
+| WM-10 | P1 | Input | Alt+Tab is off-by-one and not MRU-ordered | `◐` |
 | WM-11 | P1 | Loop | Unbounded event drain can starve presentation | `☐` |
 | WM-12 | P2 | Present | Synchronous full-surface present on the event thread | `☐` |
 | WM-13 | P2 | Lifetime | Damage never subtracted for skipped windows | `☐` |
 | WM-14 | P2 | Diagnostics | `IsDamageNotify` can alias X error events (type 0) | `☐` |
-| WM-15 | P2 | Structure | Two render paths; `RenderComposite` is dead code | `☐` |
+| WM-15 | P2 | Structure | Two render paths; `RenderComposite` is dead code | `☑` |
 | WM-16 | P2 | Present | Per-paint GC create/free churn | `☐` |
 
-**Totals:** 4 × P0, 7 × P1, 5 × P2.
+**Totals:** 4 × P0 (2 done), 7 × P1 (1 partial), 4 × P2 (1 done), 1 withdrawn.
+
+> **Audit correction (2026-10-28):** WM-09 was a false positive. The expose branch
+> never painted anything — it marked the compositor window damaged and fell through
+> to the inherited handler, which painted exactly once. The claim "painted twice"
+> was wrong. No code change was made, and the item is retained here as withdrawn
+> rather than deleted so the correction is visible.
 
 ---
 
@@ -99,34 +105,44 @@ Severity is about *user-visible damage*, not code smell.
 These four are small, self-contained, and convert a class of silent misbehavior into either
 correct behavior or a log line. Do them before any feature work.
 
-### ☐ WM-01 — Alt+Tab leaks the keyboard grab on an empty desktop
+### ☑ WM-01 — Alt+Tab leaks the keyboard grab on an empty desktop
 
-**Where:** `src/main/pascal/wmsama.core.pas:2391-2401`, `2175-2195`, `2413-2427`, `2456-2467`
+**Where:** `src/main/pascal/wmsama.core.pas` — `TriggerAltTabForward`, `AcquireKeyboardGrab`,
+`ReleaseKeyboardGrab`, `CancelAltTab`, `TriggerAltTabDismiss`
+(was `2391-2401`, `2175-2195`, `2413-2427`, `2456-2467`)
 
 **What happens:** `xcb_grab_keyboard()` is issued *before* `TriggerAltTabForward()`, but that
-procedure returns early when there are no eligible windows
+procedure returned early when there were no eligible windows
 (`if eligibleList.Count <= 0 then Exit;`) without setting `FAltTabActive`. Every ungrab site —
-Escape (`2416`), Return (`2424`), Alt release (`2463`) — is gated on `FAltTabActive`. The grab is
-therefore never released.
+Escape, Return, Alt release — was gated on `FAltTabActive`. The grab was therefore never released.
 
 **Observable failure:** press Alt+Tab on an empty desktop and the WM swallows every keystroke
 system-wide until an Alt+Tab succeeds. From a user's perspective the desktop is frozen.
 
-**Fix:**
-- Set the grab *after* the eligible list is known non-empty, or set `FAltTabActive := True`
-  before grabbing and always ungrab on the failure path.
-- Route every ungrab through one helper (`DismissAltTab`) so the grab and the flag can never
-  diverge.
-- Check the `xcb_grab_keyboard_reply` status; a failed grab must not mark the switcher active.
+**Fix (landed):**
+- The candidate list is resolved *first*; on an empty desktop no grab is attempted at all.
+- `FKeyboardGrabHeld` is now the single source of truth, driven only by
+  `AcquireKeyboardGrab` / `ReleaseKeyboardGrab`. Every exit path funnels through
+  `ReleaseKeyboardGrab`, which is idempotent.
+- The `xcb_grab_keyboard_reply` status is checked; a refused grab no longer marks the switcher
+  active.
+- `CancelAltTab` (Escape) is now distinct from `TriggerAltTabDismiss` (activate selection), so
+  cancel no longer activates the highlighted window.
+- A client unmapped mid-switch cancels the switcher instead of leaving the HUD pointing at a
+  dead client.
 
-**Acceptance:**
-1. Empty Xephyr session, no clients. Press Alt+Tab. Keyboard still works (type into `xterm`
-   launched afterwards).
-2. `xdotool key alt+Tab` with zero windows, then `xev` — keys still arrive at `xev`.
-3. Alt+Tab with two windows, then Alt+Tab again, then Escape — no stuck grab.
+**Acceptance — verified 2026-10-28:**
+1. ☑ Empty Xephyr session, two Alt+Tab presses, then `xev` → **1 KeyPress received**.
+   The pre-fix binary (built from `HEAD` in a scratch copy) → **0 KeyPress received**.
+   This is the reproduction and the proof of fix.
+2. ☑ Two `xterm` clients, three Alt+Tab presses, dismiss via Alt release → WM alive,
+   keyboard functional, stderr clean.
+3. ☑ Unit tests `TestAltTabEmptyDesktopDoesNotGrab` (grab never even attempted) and
+   `TestAltTabGrabAlwaysReleased` (cancel / dismiss / unmap / idempotent release).
 
-**Test:** unit test on the flag/grab state machine using a fake grab helper (assert
-`grab_count = ungrab_count` after every sequence).
+**Note:** a headless WM (`Connection = nil`) reports `KeyboardGrabHeld = True` on acquire,
+because there is no server to contend with. This keeps the state machine testable and is
+documented in `AcquireKeyboardGrab`.
 
 ---
 
@@ -160,32 +176,38 @@ grab, or `XCB_GRAB_STATUS_ALREADY_GRABBED` after a lost release.
 
 ---
 
-### ☐ WM-03 — All X errors are silently discarded
+### ☑ WM-03 — All X errors are silently discarded
 
-**Where:** `src/main/pascal/wmsama.core.pas:2350-2949` (no `evType = 0` branch);
-`src/main/pascal/wmsama.pas:64-70`
+**Where:** `src/main/pascal/wmsama.core.pas` — `ProcessEvent` (error branch), `DescribeXError`,
+`LogXError`, `XErrorName`, `XRequestName`; `WMSAMA_DEBUG` read in the constructor
 
-**What happens:** `xcb_request_check` is used only in `ClaimOwnership`
-(`floria.xcb.wm.pas:1827`). Everywhere else — `xcb_get_geometry`, `xcb_composite_name_window_pixmap`,
-`xcb_damage_create`, `xcb_grab_*`, `xcb_put_image` — errors arrive as events with
-`response_type = 0` and are dropped by the `case evType of` with no matching branch.
+**What happens:** `xcb_request_check` was used only in `ClaimOwnership`
+(`floria.xcb.wm.pas:1827`). Everywhere else — `xcb_get_geometry`,
+`xcb_composite_name_window_pixmap`, `xcb_damage_create`, `xcb_grab_*`, `xcb_put_image` — errors
+arrive as events with `response_type = 0` and were dropped by the `case evType of` with no
+matching branch.
 
 **Observable failure:** `BadWindow` on a destroyed override-redirect popup, `BadMatch` on a
-failed pixmap name, `BadAccess` on a refused grab — all invisible. Failures surface later as
-cosmetic glitches with no trace to their origin. This is the difference between a debuggable WM
-and a haunted one.
+failed pixmap name, `BadAccess` on a refused grab — all invisible. Failures surfaced later as
+cosmetic glitches with no trace to their origin.
 
-**Fix:** add an `evType = 0` branch that decodes `Pxcb_generic_error_t` (error_code, major_code,
-minor_code, resource_id) and logs to stderr behind a `--verbose` / `WMSAMA_DEBUG` gate. Add the
-error base of each extension (damage, composite, randr) so extension errors decode to names.
+**Fix (landed):**
+- `ProcessEvent` handles `response_type = 0` **before** the damage check, so an error can never be
+  reinterpreted as a damage notification (see WM-14 for the underlying alias).
+- `DescribeXError` renders `error name / request name / minor / resource id / sequence`.
+- The request-name table covers the full core protocol opcode range (1–120) and reports
+  extension opcodes as `Extension+N` (opcode − 128).
+- Output goes to **stderr**, which is unbuffered, so it appears immediately even when stdout is
+  redirected to a file.
 
-**Acceptance:**
-1. Deliberately destroy a window between `get_geometry` and the reply → a named `BadWindow` line
-   appears instead of silence.
-2. `WMSAMA_DEBUG=1` produces no output on a clean session with three clients running for 60s.
-3. An unknown `major_code` degrades to a numeric log line rather than crashing.
-
-**Test:** unit test the decoder against synthesized error structs.
+**Acceptance — verified 2026-10-28:**
+1. ☑ Provoked a real error on a live connection (`xcb_create_window` with a bad parent, then
+   `xcb_get_geometry` on the destroyed id) and fed the event through `ProcessEvent`:
+   `[wmsama] event loop: X error BadWindow (3) on request CreateWindow (1) minor=0 resource=0x00000000 seq=1`
+2. ☑ Three clients plus an Alt+Tab cycle for 60 s with `WMSAMA_DEBUG=1` → stderr empty.
+3. ☑ Unknown codes degrade to numbers (`Unknown`, `Extension+122`) without crashing —
+   covered by `TestXErrorDecoding`.
+4. ☑ `TestErrorEventsAreConsumed` asserts the event is consumed and does not request a composite.
 
 ---
 
@@ -356,56 +378,53 @@ once no consumer relies on it.
 
 ---
 
-### ☐ WM-09 — `Expose` is painted twice
+### ⊘ WM-09 — ~~`Expose` is painted twice~~ (withdrawn, claim did not reproduce)
 
-**Where:** `src/main/pascal/wmsama.core.pas:2932-2944` vs. `floria.xcb.wm.pas:4130-4137`
+**Where:** `src/main/pascal/wmsama.core.pas` `XCB_EXPOSE` branch vs.
+`floria.xcb.wm.pas:4130-4137`
 
-**What happens:** the `XCB_EXPOSE` branch marks the compositor window damaged and calls
-`RequestComposite()`, but does not `Exit(True)`. It falls through to the inherited handler, which
-finds the frame window and calls `DoOnFramePaint` → `PaintClientFrame` a second time.
+**What the audit claimed:** the expose branch marked the compositor window damaged without
+`Exit(True)`, then fell through to the inherited handler, so the frame was painted twice.
 
-**Observable failure:** every expose does two full titlebar rasterizations (two `TFloriaImage`
-allocations, two Agg canvases, two `put_image`s, two GC create/free pairs). Visible as extra
-latency when a window is uncovered, and it doubles the cost of WM-16.
+**What is actually there:** the expose branch never paints at all — it calls `MarkDamaged` and
+`RequestComposite`, then falls through to `inherited ProcessEvent`, whose expose handler calls
+`DoOnFramePaint` → `PaintClientFrame` exactly once. Total: **one** paint, which is correct, since
+an expose means the frame's content was lost and must be repainted.
 
-**Fix:** `Exit(True)` after handling. Decide explicitly whether an expose on a frame should
-repaint the frame *or* only mark the compositor dirty — for a composited WM the latter is usually
-enough, since the frame is presented from the scene image.
+**Resolution:** no code change. An attempted rewrite was reverted after the claim failed to
+reproduce. Recorded here rather than deleted so the correction stays visible: the audit produced
+one false positive out of sixteen findings, and the roadmap is the place to say so.
 
-**Acceptance:**
-1. Uncover a window repeatedly (`xdotool` windowraise on two overlapping windows) → one paint per
-   expose (instrument with a counter behind `WMSAMA_DEBUG`).
-2. Titlebar content still correct after `--no-compositor` mode, where the frame really must be
-   painted directly.
-
-**Test:** unit test asserting one `DoOnFramePaint` per expose event.
+**Note for the future:** if `--no-compositor` support is ever dropped, this branch can be
+simplified, but not before.
 
 ---
 
-### ☐ WM-10 — Alt+Tab is off-by-one and not MRU-ordered
+### ◐ WM-10 — Alt+Tab is off-by-one and not MRU-ordered
 
-**Where:** `src/main/pascal/wmsama.core.pas:2175-2195`, `2160-2173`
+**Where:** `src/main/pascal/wmsama.core.pas` — `TriggerAltTabForward`, `GetAltTabEligibleClients`
 
-**What happens:** `FAltTabIndex` is initialised to 0 and then immediately advanced with
-`(FAltTabIndex + 1) mod eligibleList.Count`, so the first press highlights the *second* entry.
+**What happens:** `FAltTabIndex` was initialised to 0 and then immediately advanced with
+`(FAltTabIndex + 1) mod eligibleList.Count`, so the first press highlighted the *second* entry.
 Separately, `GetAltTabEligibleClients` walks `Clients` in creation order — there is no MRU list,
 so the switcher order is unrelated to what the user just used.
 
 **Observable failure:** Alt+Tab jumps to a random-ish window rather than "the previous window",
 which is the one behavior users have hard-wired.
 
-**Fix:**
-- Maintain an explicit MRU list, updated in `DoOnClientActivated` (move-to-front), pruned in
-  `DoOnClientUnmapped`.
-- Index semantics: `FAltTabIndex = 0` means "the previously active window"; advance on press,
-  never at init.
-- Keep the eligibility filter (`IsAltTabEligible`) applied to the MRU list, not to `Clients`.
+**Progress:**
+- ☑ **Off-by-one fixed** (landed with WM-01, since the same code path was restructured). The
+  index now only advances on subsequent presses; the first press selects index 0.
+  `TestAltTabSwitcher` was updated to encode the corrected semantics.
+- ☐ **MRU ordering still outstanding.** `GetAltTabEligibleClients` continues to use creation
+  order. Remaining work: maintain an MRU list updated in `DoOnClientActivated` (move-to-front),
+  pruned in `DoOnClientUnmapped`, and apply `IsAltTabEligible` to the MRU list rather than to
+  `Clients`.
 
-**Acceptance:**
+**Acceptance (remaining):**
 1. With A→B→C focused in that order, one Alt+Tab selects B.
 2. Alt+Tab, release, Alt+Tab → returns to C (toggle behavior).
-3. Minimizing a window removes it from the cycle and does not shift the selection to the wrong
-   entry.
+3. Minimizing a window removes it from the cycle and does not shift the selection.
 4. Docks, tooltips, menus, and `wtDesktop` never appear in the HUD.
 
 **Test:** unit test the MRU list and index progression with a synthetic activation sequence.
@@ -528,23 +547,24 @@ extension absent" as `FHasDamage := False`.
 
 ---
 
-### ☐ WM-15 — Two render paths; `RenderComposite` is dead code
+### ☑ WM-15 — Two render paths; `RenderComposite` is dead code
 
-**Where:** `src/main/pascal/wmsama.core.pas:492-499` vs. `2990-2995`
+**Where:** `src/main/pascal/wmsama.core.pas` — `RenderComposite` and `Run`
 
-**What happens:** `RenderComposite` implements the present sequence, and `Run` inlines the same
-three statements instead of calling it. The initial present at `2959-2963` is a third copy.
+**What happens:** `RenderComposite` implemented the present sequence, and `Run` inlined the same
+three statements instead of calling it. The initial present was a third copy.
 
-**Observable failure:** none today. The cost is that any change to presentation (damage tracking,
-vsync, threading) must be applied in three places, and the compiled-in method gives a false
-impression that callers exist.
+**Observable failure:** none today. The cost was that any change to presentation (damage
+tracking, vsync, threading) would have to be applied in three places, and the compiled-in method
+gave a false impression that callers existed.
 
-**Fix:** have `Run` and the initial paint call `RenderComposite`; keep exactly one present path.
+**Fix (landed):** `Run` and the initial paint both call `RenderComposite`, which owns the
+`FCompositorEnabled` / `FNeedsComposite` / `FCompositor <> nil` guards. There is now exactly one
+present path — verified by grep: `CompositeScene` and `PresentToScreen` each appear once outside
+the compositor unit, both inside `RenderComposite`.
 
-**Acceptance:** grep shows one `PresentToScreen` call site outside the compositor; behavior
-unchanged.
-
-**Test:** existing suite plus the WM-11 acceptance checks.
+**Acceptance:** ☑ `grep -n "PresentToScreen\|CompositeScene" src/main/pascal/*.pas` yields only
+the two lines inside `RenderComposite`; behaviour unchanged (29 tests green, live session clean).
 
 ---
 
@@ -615,4 +635,9 @@ Append-only. One row per landed item (or per significant investigation that chan
 | Date | ID | Status | Commit | Notes / evidence |
 | :--- | :--- | :--- | :--- | :--- |
 | 2026-10-28 | — | audit | `wmsama@a5f5629` / `florialib@8d52670` | Baseline event-loop audit; 16 findings recorded |
+| 2026-10-28 | WM-09 | **withdrawn** | — | Audit false positive: the expose branch never painted; only the inherited handler did, once. Attempted rewrite reverted. 15 valid findings remain |
+| 2026-10-28 | WM-01 | done | `bcf6a85` | Candidate list resolved before grabbing; single `Acquire`/`Release` pair; grab status checked. Proof: pre-fix binary → 0 `KeyPress` at `xev` after empty-desktop Alt+Tab; fixed → 1. Tests +2 |
+| 2026-10-28 | WM-03 | done | `bcf6a85` | Errors decoded before the damage check, stderr, `WMSAMA_DEBUG`. Live `BadWindow` decoded; clean session silent. Tests +2. Request-name table corrected against the core protocol (an earlier draft had 10/12/40–43 wrong) |
+| 2026-10-28 | WM-15 | done | `bcf6a85` | Single present path via `RenderComposite`; grep-verified |
+| 2026-10-28 | WM-10 | partial | `bcf6a85` | Off-by-one fixed (first press = index 0). MRU ordering still open |
 | | | | | |
