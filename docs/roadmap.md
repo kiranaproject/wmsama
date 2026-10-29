@@ -708,64 +708,76 @@ frame, regardless of what had changed — O(screen) work per frame.
 ### ☐ WM-20 — Window renders black after another window is dragged across it
 
 **Severity:** P1 (cosmetic but highly visible)
-**Status:** **reproduced, partially diagnosed, NOT fixed.** Confirmed pre-existing.
+**Status:** **reproduced, two hypotheses tested and disproven, NOT fixed.** Pre-existing.
 
-**Symptom:** drag window B across window A, then drag B away. A's client area renders solid
-black below roughly the first two text lines. A's bottom rounded corners and bottom shadow are also
-missing, so the window looks truncated.
+**Symptom:** drag window B across window A, then drag B away. A's client area renders solid black
+below roughly the first two text lines, and A's bottom rounded corners and shadow are missing.
 
 **Reproduction:** two `xterm` windows under `wmsama`, drag one over the other and back. Reliable.
 
-**Bisected — it is pre-existing.** Reproduced identically on `florialib@8d52670` (before any of this
-roadmap's work), on `7953ae7` (before WM-12), and on current `HEAD`. This mattered: the artifact
-looks exactly like something a partial-present change would cause, and shipping a fix without
-bisecting would have meant "fixing" my own code around a bug that predates it.
+### Established facts
 
-### What was established
+1. **Pre-existing.** Reproduced on `florialib@8d52670` (before any of this roadmap's work), on
+   `7953ae7` (before WM-12), and on current `HEAD`. Not a regression from the present-path work —
+   worth checking, because it looks exactly like one.
+2. **Geometry is correct throughout:** frame 304×246 at (200,166); client 304×212 at frame-relative
+   (0,34), fully filling the frame's client area.
+3. **In the artifact state, the frame's named pixmap contains only the top 48 rows.** Row profile:
+   rows 0–47 have content, 48+ are all zero. 48 = the 34 px titlebar plus ~14 px of client (two
+   text lines).
+4. **The client's own pixmap is complete** in the same state: `name_window_pixmap(client)` after an
+   explicit `redirect_window(client)` reports 72.5% non-zero, i.e. fully painted. (72.5% ≈ 3 of 4
+   bytes; the fourth is depth-24 padding.)
+5. **Forcing `name_window_pixmap` immediately before the fetch does NOT fix it** — a freshly named
+   frame pixmap still has the hole.
 
-1. **A plain two-window compositor harness does NOT reproduce it.** Two redirected root children,
-   one moved over the other and away: the covered window's pixels come back intact.
-2. **A frame + reparented-client harness does NOT reproduce it either** — frame at root, client
-   reparented inside at the titlebar offset, compositor registering the frame with the client as
-   its frame-damage companion, exactly as `wmsama.DoOnClientMapped` does.
-3. **In the broken state, the frame's named pixmap contains only the titlebar.** Row profile of a
-   304×246 frame pixmap in the artifact state: rows 0–47 have content (the titlebar), rows 48+
-   are all zero. The client's 212 px of content is absent.
-4. **Forcing `name_window_pixmap` immediately before the fetch does NOT fix it.** So it is not a
-   stale pixmap from a resize — a freshly named pixmap has the same hole.
-5. Geometry is correct throughout: frame 304×246 at (200,166), client 304×212 at frame-relative
-   (0,34), fully filling the frame.
-6. `name_window_pixmap` on the *client* returns no reply, because `redirect_subwindows(root)` only
-   redirects root's direct children — the client is a grandchild and is not redirected.
+### Hypotheses tested and disproven
 
-### Leading hypothesis (unconfirmed)
+**H1: "the client is a grandchild, so it has no offscreen storage, so it is absent from the frame
+pixmap."**
+Disproven by a controlled harness (`redirecttest`): frame at root, client reparented inside,
+painted, then covered by an unrelated window. The frame pixmap stayed **complete** (75% non-zero,
+identical row profile) in all four states — client not redirected, after a resize, after being
+covered, and after the client was explicitly redirected. So `name_window_pixmap` on a frame *does*
+capture its child's content, covered or not.
 
-The client's own content in that region is absent, not mis-drawn. Point 4 rules out pixmap
-staleness. The most likely cause is that the client window is resized and never repaints the newly
-exposed area: under Composite redirection, another window passing over it generates no `Expose`
-for the client, so an unpainted region stays unpainted indefinitely. A one-off resize of the client
-did appear to restore content, which is consistent with this, but that observation was made with
-an unreliable crop and needs repeating properly.
+**H2: "the pixmap is stale from a resize; re-naming fixes it."**
+Disproven by fact 5, and by the harness above where an explicit resize changed nothing.
 
-### What a fix would need
+**Also disproven:** that the compositor is at fault at all in the simple case — a two-window
+compositor harness and a frame+client compositor harness both render the covered-then-uncovered
+window correctly.
 
-- A harness that reproduces deterministically **inside** the WM path (the two compositor-only
-  harnesses do not), so the fix can be verified rather than guessed.
-- A decision on ownership: either the client must be made to repaint on uncover (send a synthetic
-  `Expose`, or force a `ConfigureNotify` round-trip), or the compositor must hold a last-known-good
-  client image and re-blit it when the client is uncovered, rather than re-reading a pixmap that may
-  never be repainted.
-- Whichever way it goes, it touches `FetchImage`/`UpdatePixmap` and needs the same pixel-level
-  verification used for WM-18.
+### What this narrows it to
 
-**Why it was not fixed here:** I could not produce a deterministic reproduction inside the WM path,
-and shipping a speculative change to the pixmap lifecycle would risk the rendering path that is
-currently working. Recorded with the evidence so the next attempt starts from facts rather than
-from the symptom.
+Facts 3–5 together are strange and point somewhere specific: the *server* reports a frame pixmap
+that is complete at the top and zero below, and re-naming reproduces the same hole, while the
+client's own pixmap is complete. That means the server genuinely believes the client's content is
+absent below row ~48 when compositing the frame — which is a different claim from "the compositor
+read it too early".
+
+The leading remaining candidate is that the client window is **partially painted at the moment the
+frame pixmap is materialised** and the frame pixmap is never re-materialised afterwards, because
+`UpdatePixmap` only runs when the frame's *dimensions* change. The harness did not reproduce this
+because it painted the client synchronously and completely before anything else happened; `xterm`
+paints progressively.
+
+### Why it was not fixed
+
+Two plausible fixes were implemented and tested against a live session, and **neither worked**:
+redirecting the client explicitly on registration, and forcing a re-name before each fetch. Both
+were reverted rather than left in the tree as unverified changes to the rendering path.
+
+A real fix needs a reproduction that fails deterministically inside the WM path, so the change can
+be verified. The two compositor-only harnesses are not enough, and building an in-WM harness
+(planned: a `--debug-dump-scene` flag writing the scene image to disk) is the next step.
+
+**Cost of leaving it:** visible cosmetic defect after dragging windows over each other; no data
+loss, no input impact.
 
 ---
 
-## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals
+## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
 accident.
