@@ -201,7 +201,7 @@ begin
     // Simulate client image buffer
     clientImg := TFloriaImage.Create(600, 400);
     clientImg.Clear(24, 25, 38, 240);
-    compWin.Image := clientImg;
+    compWin.FrameImage := clientImg;
     compWin.IsDirty := False;
 
     // Test activation & shadow elevation
@@ -890,7 +890,7 @@ begin
     // Register in Compositor with frameWin = 0
     compWin := wm.Compositor.RegisterWindow(popupWin, popupRect, 0);
     AssertNotNull('Compositor registered override-redirect window', compWin);
-    AssertEquals('Frame window is 0 for unmanaged popup', 0, compWin.FrameWindow);
+    AssertEquals('No client for an unmanaged popup', 0, compWin.ClientWindow);
     AssertNull('Client is unmanaged (nil in WM client list)', wm.FindClient(popupWin));
 
     // Configure popup styling (rounded corners and shadow)
@@ -917,7 +917,7 @@ begin
     // Damage & Composite pass
     img := TFloriaImage.Create(220, 180);
     img.Clear(255, 255, 255, 255);
-    compWin.Image := img;
+    compWin.FrameImage := img;
     compWin.MarkDamaged();
     AssertTrue('Window marked dirty/damaged', compWin.IsDirty);
 

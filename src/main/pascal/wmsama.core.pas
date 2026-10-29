@@ -1483,7 +1483,7 @@ begin
   if compWin <> nil then
   begin
     compWin.IsVisible := True;
-    compWin.UpdatePixmap();
+    compWin.UpdateSurfaces();
     compWin.MarkDamaged();
   end
   else
@@ -2343,14 +2343,19 @@ begin
     for i := 0 to FCompositor.Windows.Count - 1 do
     begin
       compWin := TXCBCompositedWindow(FCompositor.Windows[i]);
-      info.Add(Format('win[%d] window=0x%.x frame=0x%.x geom=%d,%d %dx%d visible=%s dirty=%s image=%s pixmap=%d',
-        [i, compWin.Window, compWin.FrameWindow,
+      info.Add(Format('win[%d] window=0x%.x client=0x%.x geom=%d,%d %dx%d visible=%s ' +
+                      'frame_dirty=%s client_dirty=%s frame_image=%s client_image=%s ' +
+                      'client_offset=%d,%d pixmap=%d client_pixmap=%d',
+        [i, compWin.Window, compWin.ClientWindow,
          compWin.Geometry.X, compWin.Geometry.Y,
          compWin.Geometry.Width, compWin.Geometry.Height,
          BoolToStr(compWin.IsVisible, 'true', 'false'),
          BoolToStr(compWin.IsDirty, 'true', 'false'),
-         BoolToStr(compWin.Image <> nil, 'yes', 'no'),
-         compWin.Pixmap]));
+         BoolToStr(compWin.ClientIsDirty, 'true', 'false'),
+         BoolToStr(compWin.FrameImage <> nil, 'yes', 'no'),
+         BoolToStr(compWin.ClientImage <> nil, 'yes', 'no'),
+         compWin.ClientOffset.X, compWin.ClientOffset.Y,
+         compWin.Pixmap, compWin.ClientPixmap]));
     end;
 
     info.SaveToFile(dir + 'scene.txt');
@@ -2371,19 +2376,35 @@ begin
     end;
   end;
 
-  // Each window's own client image, so a black region in the scene can be traced
-  // back to whether the source image was already black.
+  // Each window's surfaces, so a black region in the scene can be traced back to
+  // whether the source surface was already black.
   if not ADumpClients then Exit;
   for i := 0 to FCompositor.Windows.Count - 1 do
   begin
     compWin := TXCBCompositedWindow(FCompositor.Windows[i]);
-    if compWin.Image = nil then Continue;
-    path := dir + 'win-' + IntToHex(PtrUInt(compWin.Window), 8) + '.raw';
-    f := TFileStream.Create(path, fmCreate);
-    try
-      f.WriteBuffer(compWin.Image.Data^, compWin.Image.Width * compWin.Image.Height * 4);
-    finally
-      f.Free();
+
+    if compWin.FrameImage <> nil then
+    begin
+      path := dir + 'frame-' + IntToHex(PtrUInt(compWin.Window), 8) + '.raw';
+      f := TFileStream.Create(path, fmCreate);
+      try
+        f.WriteBuffer(compWin.FrameImage.Data^,
+                      compWin.FrameImage.Width * compWin.FrameImage.Height * 4);
+      finally
+        f.Free();
+      end;
+    end;
+
+    if compWin.ClientImage <> nil then
+    begin
+      path := dir + 'client-' + IntToHex(PtrUInt(compWin.Window), 8) + '.raw';
+      f := TFileStream.Create(path, fmCreate);
+      try
+        f.WriteBuffer(compWin.ClientImage.Data^,
+                      compWin.ClientImage.Width * compWin.ClientImage.Height * 4);
+      finally
+        f.Free();
+      end;
     end;
   end;
 end;
@@ -3518,7 +3539,7 @@ begin
       if FCompositor <> nil then
       begin
         compWin := FCompositor.FindWindow(unmapEv^.window);
-        if (compWin <> nil) and (compWin.FrameWindow = 0) and (FindClient(unmapEv^.window) = nil) then
+        if (compWin <> nil) and (compWin.ClientWindow = 0) and (FindClient(unmapEv^.window) = nil) then
         begin
           FCompositor.UnregisterWindow(unmapEv^.window);
           RequestComposite();
@@ -3532,7 +3553,7 @@ begin
       if FCompositor <> nil then
       begin
         compWin := FCompositor.FindWindow(destroyEv^.window);
-        if (compWin <> nil) and (compWin.FrameWindow = 0) and (FindClient(destroyEv^.window) = nil) then
+        if (compWin <> nil) and (compWin.ClientWindow = 0) and (FindClient(destroyEv^.window) = nil) then
         begin
           FCompositor.UnregisterWindow(destroyEv^.window);
           RequestComposite();
@@ -3546,7 +3567,7 @@ begin
       if FCompositor <> nil then
       begin
         compWin := FCompositor.FindWindow(cfgNotifyEv^.window);
-        if (compWin <> nil) and (compWin.FrameWindow = 0) and (FindClient(cfgNotifyEv^.window) = nil) then
+        if (compWin <> nil) and (compWin.ClientWindow = 0) and (FindClient(cfgNotifyEv^.window) = nil) then
         begin
           compWin.UpdateGeometry(cfgNotifyEv^.x, cfgNotifyEv^.y, cfgNotifyEv^.width, cfgNotifyEv^.height);
           compWin.MarkDamaged();
