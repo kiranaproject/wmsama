@@ -875,6 +875,58 @@ maximize and tile are computed against, which behaves correctly.
 
 ---
 
+### ☑ WM-22 — Some applications lose their size after tiling
+
+**Severity:** P1 (window does not return to its size)
+**Found by:** user report, with the observation that **xterm was fine and MATE Terminal was not**.
+That asymmetry was the whole lead.
+
+**Symptom:** tile a MATE Terminal window, then restore it. It comes back at its tiled size instead
+of its floating size. Measured on the user's session: floating `814x693`, tiled `512x730`,
+restored `504x756` — neither the original nor the tiled size, which is the tell.
+
+**Cause:** GTK applications snap their size to the resize increments advertised in
+`WM_NORMAL_HINTS` (`mate-terminal`: increments 10×21, base 14×29). Resizing one while tiled makes it
+send a `ConfigureRequest` for its own increment-snapped tiled size. Both `ConfigureRequest` branches
+in `ProcessEvent` saved that request as `RestoredRect`, destroying the restore target.
+
+Instrumented on a live session, the smoking gun:
+
+```
+CFG-REQ(tiled) client=4194311 req=0,0 504x756 saved-before=814x693
+```
+
+`xterm` advertises increments too (6×13) but does **not** re-assert its geometry after a resize, so
+it sends no request and was unaffected. That is exactly the asymmetry the user noticed.
+
+**Fix:** a maximized or tiled window is not floating, so the application has no say in its geometry.
+The request is answered with a synthetic `ConfigureNotify` describing the real geometry and
+otherwise ignored — the behaviour of Mutter and KWin.
+
+**Tradeoff, deliberate:** an application that programmatically sets its size while maximized, hoping
+to un-maximize to that size, is now ignored. The old behaviour supported that, and an existing test
+asserted it (citing a "Lazarus debug stop"), but it is not standard and it breaks the far more common
+case above. That test now asserts the corrected behaviour and records why the expectation changed.
+
+**Verified live** on the user's `:1` session with `shellsama`'s panel (workarea 1024×730):
+
+| Sequence | Result |
+| :--- | :--- |
+| floating `200,66 814x693` → tile left → restore | `200,66 814x693` |
+| → tile right → restore | `200,66 814x693` |
+| → maximize → restore | `200,66 814x693` |
+| xterm, same sequences | unchanged (was already correct) |
+
+**Tests:** 695 → 696. The new test and the updated one both fail with the fix removed
+(`expected 200, got -1`).
+
+**Method note:** the offline state machine had already been traced for WM-21 and looked correct,
+which is why this needed the live instrumented run. Logging the actual `ConfigureRequest` while
+tiled — rather than reasoning about which apps "should" send one — turned a guess about GTK into a
+measurement in one step.
+
+---
+
 ## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -936,6 +988,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-29 | WM-22 | done | `77d620d` | **Found by user report, with the xterm-vs-mate-terminal asymmetry as the lead.** GTK snaps to resize increments and re-asserts geometry while tiled, which overwrote RestoredRect. Instrumented to confirm (req 504x756 vs saved 814x693) rather than assumed. Geometry requests from non-floating windows are now ignored. Tests +1, and an existing test's expectation corrected |
 | 2026-10-29 | WM-21 | done | `a5a6134` | **Found by user report.** Maximize + drag-to-tile + restore restored the drag position instead of the original (measured -117,-83 vs 200,166). Pre-drag rect is now captured at BeginDrag and reinstated only when a snap occurred. Verified with and without shellsama's panel; tests +2, both failing without the fix |
 | 2026-10-29 | WM-20 | limitation | `d476226` | Two-surface refactor done; then swept every remediation empirically. Synthetic Expose, same-size ConfigureNotify, XClearArea (which does deliver real Expose, verified with xev), 1px resize and remap all fail; only a substantial shrink-and-grow works, and it is too disruptive to ship. xterm with no WM is unaffected, xeyes is unaffected under wmsama — so it is xterm-specific under a reparenting compositor. Documented rather than patched |
 | 2026-10-29 | WM-18 | done | `7b16006` | Shadow cached instead of re-rasterized per frame: 86-91% of compose time. Pixel-equivalence verified (max delta 5/255, scales with pass count = rounding). ~7x on the shadow |
