@@ -122,6 +122,27 @@ Executes all unit tests in `src/test/pascal/TWMSamaTest.pas` covering window cre
 
 ---
 
+## Diagnostics
+
+Press **`Super+Shift+D`** while running to dump the current composited scene and every window's
+client image to disk. Useful for investigating rendering artifacts without guessing from
+screenshots.
+
+| Variable | Effect |
+|---|---|
+| `WMSAMA_DEBUG=1` | Log X errors and state transitions to stderr |
+| `WMSAMA_DUMP_DIR=<path>` | Where `Super+Shift+D` writes (default `/tmp/wmsama-dump`) |
+
+The dump contains `scene.raw` (BGRA32, `w*h*4`), `scene.txt` (window list, geometry, compose and
+present rects) and one `win-<id>.raw` per window. No image writer is registered in `florialib`, so
+convert outside:
+
+```bash
+magick -size 1280x800 -depth 8 BGRA:scene.raw scene.png
+```
+
+---
+
 ## Running in a Nested X Server (Xephyr)
 
 To test or develop `wmsama` without disrupting your primary desktop session, run it inside a nested Xephyr server:

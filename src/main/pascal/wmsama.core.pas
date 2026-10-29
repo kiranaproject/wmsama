@@ -140,6 +140,7 @@ type
 
     // Diagnostics
     FDebugEnabled       : Boolean;
+    FDumpDirectory      : AnsiString;
     // Counts PaintClientFrame calls. Used by tests to prove that a focus change
     // repaints only the affected frames rather than every window.
     FFramePaintCount    : Integer;
@@ -273,6 +274,8 @@ type
     property KeyboardGrabAttempts    : Integer   read FGrabAttempts;
     property KeyboardReleaseAttempts : Integer   read FReleaseAttempts;
     property DebugEnabled       : Boolean        read FDebugEnabled        write FDebugEnabled;
+    // Where DumpScene writes. Empty means /tmp/wmsama-dump.
+    property DumpDirectory      : AnsiString     read FDumpDirectory       write FDumpDirectory;
     property HoveredButton      : Integer        read FHoveredButton;
     property HoveredWindow      : xcb_window_t   read FHoveredWindow;
     // The window currently carrying the hover cursor. Must only ever be the root
@@ -281,6 +284,12 @@ type
     property FramePaintCount    : Integer        read FFramePaintCount;
     // Cached titlebar GC. Zero until the first paint on a live connection.
     property TitlebarGC         : xcb_gcontext_t read FTitlebarGC;
+
+    // --- Scene dump harness (WM-20) -------------------------------------------
+    // Writes the current scene image, and optionally the raw client pixmap of each
+    // window, to disk. Purely diagnostic: it reads state and writes files, and
+    // never alters the render path.
+    procedure DumpScene(const ADirectory: AnsiString; const ADumpClients: Boolean = True);
     property PressedButton      : Integer        read FPressedButton;
     property PressedWindow      : xcb_window_t   read FPressedWindow;
   end;
@@ -532,6 +541,7 @@ begin
   FLastActiveClient := nil;
   FFramePaintCount := 0;
   FDebugEnabled := GetEnvironmentVariable('WMSAMA_DEBUG') <> '';
+  FDumpDirectory := GetEnvironmentVariable('WMSAMA_DUMP_DIR');
 
   w := 1920;
   h := 1080;
@@ -615,6 +625,11 @@ begin
     if KeycodeSpace <> 0 then
       xcb_grab_key(Connection, 1, Screen^.root, altMods[i], KeycodeSpace,
                    XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+
+    // Diagnostic dump: Super+Shift+D (see DumpScene / WM-20).
+    if (ModSuper <> 0) and (KeycodeD <> 0) then
+      xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT,
+                   KeycodeD, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
 
     // Multi-monitor keyboard navigation: Super + Shift + Arrow keys
     if ModSuper <> 0 then
@@ -2276,6 +2291,103 @@ begin
   end;
 end;
 
+// Diagnostic dump for WM-20. Writes:
+//   scene.raw       the composited scene, BGRA32, w*h*4 bytes
+//   scene.txt       header: dimensions, window list with geometry and state
+//   win-<id>.raw    each composited window's own client image, if available
+//
+// Raw rather than PNG because no image writer is registered in florialib; the
+// files are converted outside with e.g.
+//   magick -size <w>x<h> -depth 8 BGRA:scene.raw scene.png
+//
+// This only reads state. It must stay that way: it exists to observe the render
+// path, so any change it made to that path would defeat its purpose.
+procedure TWMSamaCompositingWM.DumpScene(const ADirectory: AnsiString; const ADumpClients: Boolean);
+var
+  i: Integer;
+  compWin: TXCBCompositedWindow;
+  f: TFileStream;
+  info: TStringList;
+  path: AnsiString;
+  w, h: Integer;
+  dir: AnsiString;
+begin
+  if FCompositor = nil then Exit;
+
+  dir := ADirectory;
+  if dir = '' then
+    dir := '/tmp/wmsama-dump';
+  if (dir[Length(dir)] <> '/') then
+    dir := dir + '/';
+  if not DirectoryExists(dir) then
+    ForceDirectories(dir);
+
+  info := TStringList.Create();
+  try
+    info.Add('screen=' + IntToStr(FCompositor.ScreenWidth) + 'x' + IntToStr(FCompositor.ScreenHeight));
+    info.Add('windows=' + IntToStr(FCompositor.Windows.Count));
+    info.Add('needs_composite=' + BoolToStr(FNeedsComposite, 'true', 'false'));
+    info.Add('dirty_valid=' + BoolToStr(FCompositor.DirtyValid, 'true', 'false'));
+    info.Add('compose_rect=' + IntToStr(FCompositor.LastComposeRect.X) + ',' +
+             IntToStr(FCompositor.LastComposeRect.Y) + ' ' +
+             IntToStr(FCompositor.LastComposeRect.Width) + 'x' +
+             IntToStr(FCompositor.LastComposeRect.Height));
+    info.Add('present_rect=' + IntToStr(FCompositor.LastPresentRect.X) + ',' +
+             IntToStr(FCompositor.LastPresentRect.Y) + ' ' +
+             IntToStr(FCompositor.LastPresentRect.Width) + 'x' +
+             IntToStr(FCompositor.LastPresentRect.Height));
+    info.Add('presents full=' + IntToStr(FCompositor.FullPresentCount) +
+             ' partial=' + IntToStr(FCompositor.PartialPresentCount));
+    info.Add('');
+
+    for i := 0 to FCompositor.Windows.Count - 1 do
+    begin
+      compWin := TXCBCompositedWindow(FCompositor.Windows[i]);
+      info.Add(Format('win[%d] window=0x%.x frame=0x%.x geom=%d,%d %dx%d visible=%s dirty=%s image=%s pixmap=%d',
+        [i, compWin.Window, compWin.FrameWindow,
+         compWin.Geometry.X, compWin.Geometry.Y,
+         compWin.Geometry.Width, compWin.Geometry.Height,
+         BoolToStr(compWin.IsVisible, 'true', 'false'),
+         BoolToStr(compWin.IsDirty, 'true', 'false'),
+         BoolToStr(compWin.Image <> nil, 'yes', 'no'),
+         compWin.Pixmap]));
+    end;
+
+    info.SaveToFile(dir + 'scene.txt');
+  finally
+    info.Free();
+  end;
+
+  // The composited scene.
+  if FCompositor.SceneImage <> nil then
+  begin
+    w := FCompositor.ScreenWidth;
+    h := FCompositor.ScreenHeight;
+    f := TFileStream.Create(dir + 'scene.raw', fmCreate);
+    try
+      f.WriteBuffer(FCompositor.SceneImage.Data^, w * h * 4);
+    finally
+      f.Free();
+    end;
+  end;
+
+  // Each window's own client image, so a black region in the scene can be traced
+  // back to whether the source image was already black.
+  if not ADumpClients then Exit;
+  for i := 0 to FCompositor.Windows.Count - 1 do
+  begin
+    compWin := TXCBCompositedWindow(FCompositor.Windows[i]);
+    if compWin.Image = nil then Continue;
+    path := dir + 'win-' + IntToHex(PtrUInt(compWin.Window), 8) + '.raw';
+    f := TFileStream.Create(path, fmCreate);
+    try
+      f.WriteBuffer(compWin.Image.Data^, compWin.Image.Width * compWin.Image.Height * 4);
+    finally
+      f.Free();
+    end;
+  end;
+end;
+
 procedure TWMSamaCompositingWM.PaintAllFrames();
 var
   i: Integer;
@@ -2903,6 +3015,17 @@ begin
       else if FAltTabActive and (keyEv^.detail = KeycodeEscape) then
       begin
         CancelAltTab();
+        Exit(True);
+      end
+      else if (ModSuper <> 0) and
+              ((keyEv^.state and (ModSuper or XCB_MOD_MASK_SHIFT)) =
+               (ModSuper or XCB_MOD_MASK_SHIFT)) and
+              (keyEv^.detail = KeycodeD) then
+      begin
+        // Diagnostic: capture the current scene and every client image. Used to
+        // investigate WM-20, where a window renders black after an overlap drag.
+        DumpScene(FDumpDirectory, True);
+        DebugLog('scene dumped to ' + FDumpDirectory);
         Exit(True);
       end
       else if FAltTabActive and (keyEv^.detail = KeycodeReturn) then

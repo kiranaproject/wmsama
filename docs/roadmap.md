@@ -708,76 +708,87 @@ frame, regardless of what had changed — O(screen) work per frame.
 ### ☐ WM-20 — Window renders black after another window is dragged across it
 
 **Severity:** P1 (cosmetic but highly visible)
-**Status:** **reproduced, two hypotheses tested and disproven, NOT fixed.** Pre-existing.
+**Status:** **reproduced, root cause narrowed to the client's offscreen content, NOT fixed.** Pre-existing.
 
 **Symptom:** drag window B across window A, then drag B away. A's client area renders solid black
-below roughly the first two text lines, and A's bottom rounded corners and shadow are missing.
+below roughly the first two text lines; A's bottom rounded corners and shadow are missing.
 
-**Reproduction:** two `xterm` windows under `wmsama`, drag one over the other and back. Reliable.
+### Diagnostic harness (built for this item — keep it)
 
-### Established facts
+`wmsama` now has a scene-dump facility, so this bug can be observed rather than inferred:
 
-1. **Pre-existing.** Reproduced on `florialib@8d52670` (before any of this roadmap's work), on
-   `7953ae7` (before WM-12), and on current `HEAD`. Not a regression from the present-path work —
-   worth checking, because it looks exactly like one.
-2. **Geometry is correct throughout:** frame 304×246 at (200,166); client 304×212 at frame-relative
-   (0,34), fully filling the frame's client area.
-3. **In the artifact state, the frame's named pixmap contains only the top 48 rows.** Row profile:
-   rows 0–47 have content, 48+ are all zero. 48 = the 34 px titlebar plus ~14 px of client (two
-   text lines).
-4. **The client's own pixmap is complete** in the same state: `name_window_pixmap(client)` after an
-   explicit `redirect_window(client)` reports 72.5% non-zero, i.e. fully painted. (72.5% ≈ 3 of 4
-   bytes; the fourth is depth-24 padding.)
-5. **Forcing `name_window_pixmap` immediately before the fetch does NOT fix it** — a freshly named
-   frame pixmap still has the hole.
+- **`Super+Shift+D`** dumps on demand, or set `WMSAMA_DUMP_DIR` and press it.
+- Writes to the dump directory:
+  - `scene.raw` — the composited scene, BGRA32, `w*h*4`
+  - `scene.txt` — dimensions, compose/present rects, present counters, and per-window state
+    (window id, frame id, geometry, visible, dirty, image present, pixmap id)
+  - `win-<id>.raw` — each window's own client image, so a black region in the scene can be traced
+    back to whether the source image was already black
+- Raw rather than PNG because no image writer is registered in `florialib`. Convert outside:
+  `magick -size <w>x<h> -depth 8 BGRA:scene.raw scene.png`
 
-### Hypotheses tested and disproven
+It only reads state and writes files; it must stay that way, since its purpose is to observe the
+render path.
 
-**H1: "the client is a grandchild, so it has no offscreen storage, so it is absent from the frame
-pixmap."**
-Disproven by a controlled harness (`redirecttest`): frame at root, client reparented inside,
-painted, then covered by an unrelated window. The frame pixmap stayed **complete** (75% non-zero,
-identical row profile) in all four states — client not redirected, after a resize, after being
-covered, and after the client was explicitly redirected. So `name_window_pixmap` on a frame *does*
-capture its child's content, covered or not.
+Companion probes used alongside it (in `/tmp/opencode`, not committed): `pixdump` (dump any
+window's named pixmap), `clientprobe` (compare a client's pixmap with and without an explicit
+redirect), `exposeclient` (synthetic Expose), `redirecttest` (controlled frame/client/cover harness).
 
-**H2: "the pixmap is stale from a resize; re-naming fixes it."**
-Disproven by fact 5, and by the harness above where an explicit resize changed nothing.
+### Root cause — narrowed
 
-**Also disproven:** that the compositor is at fault at all in the simple case — a two-window
-compositor harness and a frame+client compositor harness both render the covered-then-uncovered
-window correctly.
+**The client's own offscreen pixmap is already black.** Dumped in the artifact state, the client
+window's named pixmap (304×212) is white in rows 0–80 and zero below. The frame's pixmap shows the
+same hole. **The compositor is faithfully rendering a client that has lost its content** — it is not
+a compositor bug, a pixmap-staleness bug, or a present-path bug.
 
-### What this narrows it to
+Supporting evidence:
+1. **Pre-existing** — reproduces on `florialib@8d52670` (before any of this roadmap's work), on
+   `7953ae7` (before WM-12), and on `HEAD`.
+2. **Not present without the compositor.** Same drag under `--no-compositor`: the window renders
+   correctly. So the loss is caused by the redirect, not by reparenting alone.
+3. **Synthetic `Expose` does not restore it.** Sending a full-size Expose to the client leaves the
+   pixmap at the same 23.5% non-zero.
+4. **A real resize does not restore it** either (grow/shrink round trip).
+5. **Geometry is correct throughout:** frame 304×246, client 304×212 at frame-relative (0,34).
+6. Forcing `name_window_pixmap` immediately before each fetch reproduces the same hole.
 
-Facts 3–5 together are strange and point somewhere specific: the *server* reports a frame pixmap
-that is complete at the top and zero below, and re-naming reproduces the same hole, while the
-client's own pixmap is complete. That means the server genuinely believes the client's content is
-absent below row ~48 when compositing the frame — which is a different claim from "the compositor
-read it too early".
+### Why redirecting the client is not a drop-in fix
 
-The leading remaining candidate is that the client window is **partially painted at the moment the
-frame pixmap is materialised** and the frame pixmap is never re-materialised afterwards, because
-`UpdatePixmap` only runs when the frame's *dimensions* change. The harness did not reproduce this
-because it painted the client synchronously and completely before anything else happened; `xterm`
-paints progressively.
+Experiment: call `redirect_window` on the client at registration. The black region disappears — and
+is replaced by **flat grey**, which is the frame's background colour (192). That is correct
+Composite semantics: redirecting a child **diverts it out of its parent's pixmap**. So the client's
+content stops being composited into the frame at all.
 
-### Why it was not fixed
+A correct fix therefore requires a data-model change, not a flag: the compositor must treat a frame
+and its client as **two separately-fetched surfaces** — fetch the frame (titlebar, decorations, with
+a hole where the client goes) and the client from its own pixmap, then draw the client into that
+hole. That is what real compositors do, and it is the direction this needs to go, but it is a
+substantial change to `TXCBCompositedWindow` (two images, two damage objects, two fetches per frame,
+and draw ordering), not a patch.
 
-Two plausible fixes were implemented and tested against a live session, and **neither worked**:
-redirecting the client explicitly on registration, and forcing a re-name before each fetch. Both
-were reverted rather than left in the tree as unverified changes to the rendering path.
+### Hypotheses tested and disproven along the way
 
-A real fix needs a reproduction that fails deterministically inside the WM path, so the change can
-be verified. The two compositor-only harnesses are not enough, and building an in-WM harness
-(planned: a `--debug-dump-scene` flag writing the scene image to disk) is the next step.
+- **"The client is a grandchild with no offscreen storage, so it is absent from the frame pixmap."**
+  Disproven: a controlled harness shows `name_window_pixmap` on a frame captures child content
+  whether the child is covered or not, redirected or not.
+- **"The pixmap is stale from a resize."** Disproven: re-naming reproduces the hole, and an explicit
+  grow does not reproduce it in the harness.
+- **"It is the present path / partial present."** Disproven by the bisect and by fact 2.
+
+### Next steps
+
+1. Confirm *why* the client stops painting: the leading candidate is that because the frame is
+   redirected, the server considers the client always-visible and never delivers the `Expose` it
+   would otherwise get after being covered — but fact 3 (synthetic Expose does not help) argues the
+   client has already given up on that region, or is not processing the event.
+2. Then implement the two-surface model above.
 
 **Cost of leaving it:** visible cosmetic defect after dragging windows over each other; no data
 loss, no input impact.
 
 ---
 
-## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals
+## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
 accident.
