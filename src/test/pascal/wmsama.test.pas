@@ -34,6 +34,8 @@ type
     procedure TestXErrorDecoding();
     procedure TestErrorEventsAreConsumed();
     procedure TestLiveFrameBehaviour();
+    procedure TestRestoreAfterMaximizeThenTile();
+    procedure TestNonSnappingDragUpdatesRestoreRect();
     procedure TestFloriaToolkitButtonStyling();
     procedure TestButtonAlignmentAndPlacement();
     procedure TestAdditionalWindowControls();
@@ -1813,6 +1815,84 @@ begin
     deskCli.CanMinimize := False;
     deskCli.Minimize();
     AssertFalse('Desktop window cannot be minimized', wsMinimized in deskCli.State);
+  finally
+    wm.Free();
+  end;
+end;
+
+// Regression: maximize, drag to a screen edge to tile, then restore used to land
+// wherever the drag ended instead of where the window started — often partly
+// off-screen.
+//
+// Cause: un-maximizing mid-drag is Restore() followed by Move(), and Move() (quite
+// correctly) updates RestoredRect once the window is floating again. TileLeft then
+// updates it a second time. The pre-drag position was overwritten twice before the
+// user ever got to restore.
+procedure TWMSamaTest.TestRestoreAfterMaximizeThenTile();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  original: TXCBRect;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(9501);
+    AssertNotNull('Client managed', cli);
+
+    original := TXCBRect.Create(200, 166, 244, 220);
+    cli.CurrentRect := original;
+    cli.RestoredRect := original;
+
+    // Maximize, then drag the titlebar to the left edge and drop it.
+    cli.Maximize();
+    AssertTrue('Maximized', wsMaximizedHorz in cli.State);
+
+    wm.BeginDrag(cli, dmMove, 300, 200);
+    wm.UpdateDrag(5, 300);   // past the left threshold, un-maximizes and snaps
+    wm.EndDrag();
+
+    AssertTrue('Tiled left after the drag', wsTiledLeft in cli.State);
+
+    // Restoring must return to the original floating position.
+    cli.Restore();
+    AssertEquals('Restored X', original.X, cli.CurrentRect.X);
+    AssertEquals('Restored Y', original.Y, cli.CurrentRect.Y);
+    AssertEquals('Restored width', original.Width, cli.CurrentRect.Width);
+    AssertEquals('Restored height', original.Height, cli.CurrentRect.Height);
+  finally
+    wm.Free();
+  end;
+end;
+
+// A drag that does NOT snap must still update the remembered position: dropping a
+// window somewhere new is how the user moves it.
+procedure TWMSamaTest.TestNonSnappingDragUpdatesRestoreRect();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(9601);
+    AssertNotNull('Client managed', cli);
+    cli.CurrentRect := TXCBRect.Create(200, 166, 244, 220);
+    cli.RestoredRect := cli.CurrentRect;
+
+    // Drag to the middle of the screen: no snap target. Movement is relative to
+    // the grab point, so (300,200) -> (700,500) moves the window by (+400,+300).
+    wm.BeginDrag(cli, dmMove, 300, 200);
+    wm.UpdateDrag(700, 500);
+    wm.EndDrag();
+
+    AssertEquals('No snap engaged', Integer(snapNone), Integer(wm.ActiveSnap));
+    AssertEquals('Dropped X is remembered', 200 + 400, cli.RestoredRect.X);
+    AssertEquals('Dropped Y is remembered', 166 + 300, cli.RestoredRect.Y);
+
+    // And a later maximize/restore returns to the dropped position.
+    cli.Maximize();
+    cli.Restore();
+    AssertEquals('Restore returns to the dropped X', 600, cli.CurrentRect.X);
+    AssertEquals('Restore returns to the dropped Y', 466, cli.CurrentRect.Y);
   finally
     wm.Free();
   end;

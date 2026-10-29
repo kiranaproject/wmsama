@@ -149,6 +149,21 @@ type
     FLastDragX          : Integer;
     FLastDragY          : Integer;
 
+    // The floating geometry to return to, captured when a drag starts.
+    //
+    // Un-maximizing mid-drag is implemented as Restore() followed by Move(), and
+    // Move() (correctly) updates RestoredRect because the window is floating again
+    // by then. TileLeft/TileRight then update it once more. So by the end of a
+    // drag-to-edge the original position has been overwritten twice, and
+    // maximizing then tiling then restoring lands wherever the drag happened to be
+    // rather than where the window started — often partly off-screen.
+    //
+    // Capturing it at BeginDrag and putting it back when the drag ends in a snap
+    // keeps the pre-drag position. A drag that does NOT snap still updates
+    // RestoredRect normally, so dropping a window at a new spot is remembered.
+    FPreDragRestoredRect : TXCBRect;
+    FPreDragRestoredValid: Boolean;
+
     function AcquireKeyboardGrab(): Boolean;
 
     procedure SetCompositorEnabled(const AValue: Boolean);
@@ -2424,6 +2439,17 @@ procedure TWMSamaCompositingWM.BeginDrag(const AClient: TXCBWMClient; const AMod
 begin
   FLastDragX := ARootX;
   FLastDragY := ARootY;
+
+  // Remember where this window came from, before the drag can overwrite it. See
+  // FPreDragRestoredRect for why this cannot be recovered later.
+  FPreDragRestoredValid := False;
+  if (AClient <> nil) and (AClient.RestoredRect.Width > 0) and
+     (AClient.RestoredRect.Height > 0) then
+  begin
+    FPreDragRestoredRect := AClient.RestoredRect;
+    FPreDragRestoredValid := True;
+  end;
+
   inherited BeginDrag(AClient, AMode, ARootX, ARootY);
 end;
 
@@ -2585,7 +2611,7 @@ begin
 
   inherited EndDrag();
 
-  if (cli <> nil) and (snap <> snapNone) and (FCompositor <> nil) then
+  if (cli <> nil) and (snap <> snapNone) then
   begin
     case snap of
       snapMaximize:
@@ -2595,7 +2621,14 @@ begin
       snapRightHalf:
         cli.TileRight();
     end;
+
+    // Put back the geometry the window had before the drag. Maximize/Tile have
+    // just saved the dragged position as the restore target, which is what made
+    // "maximize, tile, restore" forget the original placement.
+    if FPreDragRestoredValid then
+      cli.RestoredRect := FPreDragRestoredRect;
   end;
+  FPreDragRestoredValid := False;
 
   if CursorNormal <> 0 then
     UpdateHoverCursor(CursorNormal, nil);
