@@ -102,7 +102,12 @@ type
     FPressedButton      : Integer;
     FPressedWindow      : xcb_window_t;
     FHoverCursorWindow  : xcb_window_t;
+    FHoverCursorResizeWindow : xcb_window_t;
     FHoverCursor        : xcb_cursor_t;
+    // The client whose windows currently carry the hover cursor. Needed because a
+    // decorated window has two cursor targets (frame and resize window), so a
+    // window id is no longer enough to identify what we decorated.
+    FLastHoverClient    : TXCBWMClient;
 
     // Shaded Windows and Window Menu Overlay
     FShadedWindows      : array of TWMSamaShadedWindow;
@@ -296,6 +301,10 @@ type
     // The window currently carrying the hover cursor. Must only ever be the root
     // or a frame window, never a client window (see UpdateHoverCursor).
     property HoverCursorWindow  : xcb_window_t   read FHoverCursorWindow;
+    // The InputOnly resize window that also carries the hover cursor. A decorated
+    // window has two cursor targets: the frame, which is under the pointer inside
+    // the window, and this one, which is under it in the 8px resize margin.
+    property HoverCursorResizeWindow : xcb_window_t read FHoverCursorResizeWindow;
     property FramePaintCount    : Integer        read FFramePaintCount;
     // Cached titlebar GC. Zero until the first paint on a live connection.
     property TitlebarGC         : xcb_gcontext_t read FTitlebarGC;
@@ -522,6 +531,8 @@ begin
   SetButtonLayout('close,minimize,maximize:');
   FHoveredWindow := 0;
   FHoveredButton := -1;
+  FLastHoverClient := nil;
+  FHoverCursorResizeWindow := 0;
   FPressedButton := -1;
   FPressedWindow := 0;
 
@@ -2638,56 +2649,81 @@ end;
 
 // Apply a hover cursor.
 //
-// Cursor state belongs to windows the WM owns: the root and frame windows. It is
-// never written onto a client window. X resolves the cursor from the innermost
-// window under the pointer, so setting one on a client window permanently
-// overwrites the application's own cursor — the I-beam in a terminal, the hand
-// over a link — and the application has no way to take it back.
+// A decorated window has TWO cursor targets, and this is the whole point:
 //
-// AClient is the client whose frame should carry the cursor, or nil for the root.
-// Passing nil (or a client without a frame) restores the root cursor.
+//   frame        - the decorated window itself, visible over the window's interior
+//   resize window - an InputOnly window covering the window plus the 8px outer
+//                  margin, which is where the pointer actually is while the user
+//                  is in the resize margin
+//
+// The resize window's cursor was hardcoded to CursorNormal when it was created, and
+// only the frame's cursor was ever updated. So the 8px margin - the one place that
+// is unambiguously a resize area - always showed a plain arrow, while resize
+// cursors appeared at the window's *inner* edges where the frame was hit-tested.
+// That is what made the feedback feel chaotic: the arrow was in the right place and
+// the resize cursors were in the wrong one.
+//
+// Cursors are never written onto a client window: X resolves the cursor from the
+// innermost window under the pointer, so doing that would permanently replace the
+// application's own cursor (the I-beam in a terminal).
 procedure TWMSamaCompositingWM.UpdateHoverCursor(const ACursor: xcb_cursor_t; const AClient: TXCBWMClient);
 var
-  targetWin, prevWin: xcb_window_t;
+  frameWin, resizeWin: xcb_window_t;
+  prevCli: TXCBWMClient;
 begin
   if Connection = nil then Exit;
 
+  frameWin := 0;
+  resizeWin := 0;
   if (AClient <> nil) and (AClient.FrameWindow <> 0) then
-    targetWin := AClient.FrameWindow
-  else if Screen <> nil then
-    targetWin := Screen^.root
-  else
-    Exit;
-
-  if (targetWin = FHoverCursorWindow) and (ACursor = FHoverCursor) then Exit;
-
-  prevWin := FHoverCursorWindow;
-  FHoverCursorWindow := targetWin;
-  FHoverCursor := ACursor;
-
-  // Reset the window we were decorating, so a stale resize cursor does not linger
-  // on a frame after the pointer has moved on.
-  if (prevWin <> 0) and (prevWin <> targetWin) then
   begin
-    if (Screen <> nil) and (prevWin = Screen^.root) then
+    frameWin := AClient.FrameWindow;
+    resizeWin := AClient.ResizeWindow;
+  end
+  else if Screen <> nil then
+    frameWin := Screen^.root;
+
+  if (AClient = FLastHoverClient) and (ACursor = FHoverCursor) then Exit;
+
+  // Restore the windows we were decorating before, so a resize cursor does not
+  // linger on a window the pointer has left.
+  prevCli := FLastHoverClient;
+  if (prevCli <> AClient) and (prevCli <> nil) and (prevCli.FrameWindow <> 0) and
+     (CursorNormal <> 0) then
+  begin
+    SetWindowCursor(prevCli.FrameWindow, CursorNormal);
+    if prevCli.ResizeWindow <> 0 then
+      SetWindowCursor(prevCli.ResizeWindow, CursorNormal);
+  end;
+
+  FLastHoverClient := AClient;
+  FHoverCursor := ACursor;
+  FHoverCursorWindow := frameWin;
+  FHoverCursorResizeWindow := 0;
+
+  if frameWin = 0 then Exit;
+
+  if (Screen <> nil) and (frameWin = Screen^.root) then
+  begin
+    SetWindowCursor(Screen^.root, ACursor);
+    CurrentRootCursor := ACursor;
+  end
+  else
+  begin
+    SetWindowCursor(frameWin, ACursor);
+    if resizeWin <> 0 then
+    begin
+      SetWindowCursor(resizeWin, ACursor);
+      // Recorded only where it is actually applied, so a test can tell the
+      // difference between "computed the target" and "set the cursor on it".
+      FHoverCursorResizeWindow := resizeWin;
+    end;
+    if (Screen <> nil) and (CurrentRootCursor <> CursorNormal) and (CursorNormal <> 0) then
     begin
       SetWindowCursor(Screen^.root, CursorNormal);
       CurrentRootCursor := CursorNormal;
-    end
-    else if CursorNormal <> 0 then
-      SetWindowCursor(prevWin, CursorNormal);
-  end;
-
-  if (Screen <> nil) and (targetWin = Screen^.root) then
-  begin
-    if CurrentRootCursor <> ACursor then
-    begin
-      SetWindowCursor(Screen^.root, ACursor);
-      CurrentRootCursor := ACursor;
     end;
-  end
-  else
-    SetWindowCursor(targetWin, ACursor);
+  end;
 end;
 
 procedure TWMSamaCompositingWM.DoOnClientPropertiesChanged(const AClient: TXCBWMClient);

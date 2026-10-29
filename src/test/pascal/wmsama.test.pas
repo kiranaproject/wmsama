@@ -36,6 +36,7 @@ type
     procedure TestLiveFrameBehaviour();
     procedure TestRestoreAfterMaximizeThenTile();
     procedure TestNonSnappingDragUpdatesRestoreRect();
+    procedure TestHoverCursorCoversResizeWindow();
     procedure TestFloriaToolkitButtonStyling();
     procedure TestButtonAlignmentAndPlacement();
     procedure TestAdditionalWindowControls();
@@ -1895,6 +1896,77 @@ begin
     AssertEquals('Restore returns to the dropped Y', 466, cli.CurrentRect.Y);
   finally
     wm.Free();
+  end;
+end;
+
+// Regression: the hover cursor must be applied to the InputOnly resize window as
+// well as the frame.
+//
+// The resize window covers the window plus the 8px outer margin, and it is the
+// window under the pointer while the user is in the resize margin. Its cursor was
+// hardcoded to CursorNormal at creation and only the frame's cursor was updated,
+// so the margin - the one unambiguously resizeable area - always showed a plain
+// arrow, while resize cursors appeared at the window's inner edges where the frame
+// was hit-tested. That is what made the feedback feel chaotic.
+//
+// Live connection required: offline there are no frame or resize windows.
+procedure TWMSamaTest.TestHoverCursorCoversResizeWindow();
+var
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  Win, Root: xcb_window_t;
+begin
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then Exit;
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then Exit;
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then Exit;
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      if not TryClaimOwnership(wm) then Exit;
+      Root := wm.RootWindow;
+      if Root = 0 then Exit;
+
+      Win := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win, Root, 100, 100, 300, 220, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, Win);
+      xcb_flush(Obs);
+
+      cli := wm.ManageWindow(Win);
+      AssertNotNull('Client managed', cli);
+      AssertTrue('Frame window created', cli.FrameWindow <> 0);
+      AssertTrue('Resize window created', cli.ResizeWindow <> 0);
+
+      wm.UpdateHoverCursor(wm.CursorResizeLeft, cli);
+      AssertEquals('Cursor targets the frame',
+                   Integer(cli.FrameWindow), Integer(wm.HoverCursorWindow));
+      AssertEquals('Cursor also targets the resize window',
+                   Integer(cli.ResizeWindow), Integer(wm.HoverCursorResizeWindow));
+
+      // Resetting must move both back to the normal cursor rather than leaving a
+      // resize cursor behind on the window the pointer left.
+      wm.UpdateHoverCursor(wm.CursorNormal, nil);
+      AssertTrue('Resize target cleared or normal',
+                 (wm.HoverCursorResizeWindow = 0) or
+                 (wm.HoverCursorResizeWindow <> cli.ResizeWindow));
+
+      wm.UnmanageWindow(cli);
+      xcb_destroy_window(Obs, Win);
+      xcb_flush(Obs);
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
   end;
 end;
 
