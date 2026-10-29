@@ -1073,6 +1073,64 @@ not set: it is a `BadMatch` on an `InputOnly` window.
 
 ---
 
+### ☑ WM-25 — The WM spins at full CPU after the X server exits
+
+**Severity:** P1 (burns two cores indefinitely, and the process never dies)
+**Found by:** accident. The user closed their Xephyr window; wmsama and shellsama both kept
+running. Measured **56 minutes later**: wmsama at **2.0 cores**, shellsama at **2.4**, both in
+state `R`.
+
+**Cause.** `select()` reports a dead socket as readable *forever* (EOF). `PumpEventsOnce` then calls
+`xcb_poll_for_event`, which returns `nil` because there is nothing left to parse, so `Result` stays
+`False` and the loop retries immediately. No timeout is ever reached, because `select()` never
+blocks:
+
+```
+select() -> readable (EOF, always)
+  -> xcb_poll_for_event() -> nil
+    -> Result = False
+      -> loop again, no delay
+```
+
+Checking the connection is the only way to distinguish *"readable, will have data next time"* from
+*"readable, will never have data again"*.
+
+**Fix.** After a readable-but-empty drain, `PumpEventsOnce` checks
+`xcb_connection_has_error(FConn)` and clears `FIsRunning`. Gated on `drained = 0` so a live
+connection caught mid-burst is never mistaken for a dead one.
+
+**Same bug in the toolkit.** shellsama does not use the WM pump — it runs the Floria Toolkit's own
+loop (`FtBackendMainLoop` in `ft.backend.x11.pas`), which has the same defect and was spinning at
+2.4 cores. Fixed separately in `floria-toolkit@9b3b290`: check the connection once per iteration
+and clear `GRunning`.
+
+**Verification** — a harness that starts a private Xephyr, runs the binary against it, kills the
+server, and checks the process exits on its own:
+
+| Build | Result |
+| :--- | :--- |
+| with the fix | exits within ~1 s; idle CPU 1–2 ticks/2 s beforehand |
+| check removed (sabotage) | still alive 10 s later at **200 ticks/2 s = 2 full cores** |
+
+So the harness is sensitive and the symptom it reports is the real one.
+
+**Not unit-testable:** it needs an X server that dies mid-run. The Xephyr recipe above is the
+regression check.
+
+**Separate finding, deliberately not fixed here:** shellsama burns **~1.33 cores at idle** (wmsama
+idles at 0). The toolkit's tick-callback branch polls with a zero timeout and only sleeps while a
+window is being resized, so an idle shell busy-loops. That is the loop's documented design
+("continuous high-framerate rendering"), so changing it is a frame-rate policy decision, not a
+drive-by fix.
+
+**Also observed, pre-existing:** `TestEGLDisplayInitialization` in florialib is flaky on Xephyr
+(`libEGL warning: DRI3 error`). A standalone probe that only calls
+`InitializeDefaultDisplay()` 40 times — no WM code involved — failed in **2 of 5 runs**, so it is
+environmental, not caused by the WM. Occasionally it crashes the whole test runner with SIGFPE.
+Left as-is; recorded so it is not mistaken for a regression later.
+
+---
+
 ## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -1134,6 +1192,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-30 | WM-25 | done | `florialib@592a338` + `floria-toolkit@9b3b290` | **Found by accident** when the user closed Xephyr. WM and shell both spun at 2.0/2.4 cores for 56 minutes: `select()` reports a dead socket as readable forever, so the pump retried with no delay. Both loops now check `xcb_connection_has_error`. Sabotage-verified: removing the check reproduces 200 ticks/2s. Live-server check (needs a dying display), recipe recorded. Also recorded: shellsama idles at 1.33 cores (uncapped render loop, needs a policy decision) and florialib's EGL test is environmentally flaky |
 | 2026-10-30 | WM-24 | done | `6d317e1` + `1b573a4` | **Found by user report.** WM-23's two-target model was wrong: writing a resize cursor to the frame leaked it across the client, which inherits the frame's cursor. It stuck because motion over the client never reaches the WM. Resize cursors now go to the resize window only; titlebar inner resize zones removed; menu grab cursor made explicit. Sabotage-verified; motion-delivery gap measured, not assumed |
 | 2026-10-30 | WM-23 | done | `648817b` | **Found by user report.** A decorated window has two cursor targets; only the frame's cursor was updated, so the 8px margin showed a plain arrow and resize cursors appeared at the window's inner edges. Both windows are now set and restored. Verified all 8 directions live on mate-terminal and xterm. Tests +1 |
 | 2026-10-29 | WM-22 | done | `77d620d` | **Found by user report, with the xterm-vs-mate-terminal asymmetry as the lead.** GTK snaps to resize increments and re-asserts geometry while tiled, which overwrote RestoredRect. Instrumented to confirm (req 504x756 vs saved 814x693) rather than assumed. Geometry requests from non-floating windows are now ignored. Tests +1, and an existing test's expectation corrected |
