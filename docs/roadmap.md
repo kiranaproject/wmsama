@@ -927,6 +927,61 @@ measurement in one step.
 
 ---
 
+### ☑ WM-23 — Resize cursors appear in the wrong place
+
+**Severity:** P1 (actively misleading hover feedback)
+**Found by:** user report — "the resize drag area is correct but when I hover it, the cursor is
+kind of chaotic", with the observation that the margin showed no resize cursor while the right one
+appeared *inside* the window.
+
+**The layout that explains it.** A decorated window has **two** cursor targets:
+
+| Window | Covers | Under the pointer when… |
+| :--- | :--- | :--- |
+| frame | the decorated window | the pointer is **inside** the window |
+| resize window | the window **plus the 8px outer margin** | the pointer is in the resize **margin** |
+
+`CreateResizeWindow` hardcodes the resize window's cursor to `CursorNormal`, and `UpdateHoverCursor`
+only ever set the cursor on the frame. Consequences:
+
+- the 8px margin — the one unambiguously resizeable area — always showed a **plain arrow**
+- resize cursors appeared at the window's **inner** edges, where the frame was hit-tested and
+  where there is nothing to resize
+- because the resize window covers the whole window, its arrow also overrode the frame's cursor
+  across most of the interior
+
+That is why it read as "chaotic", and why it varied by application: the further an app's content
+sits from the frame edge, the more of the mismatch is visible. MATE Terminal and MATE Settings have
+different insets from xterm, so they showed different amounts of the same underlying bug.
+
+**Fix:** `UpdateHoverCursor` takes the client and sets the cursor on **both** windows, restoring
+both when the pointer moves on. Cursors are still never written onto a client window, which would
+clobber the application's own cursor (WM-07).
+
+**Verified** by instrumenting every region around live windows, for both mate-terminal and xterm:
+
+| Region | Cursor |
+| :--- | :--- |
+| interior | `normal` (and the client keeps its own I-beam) |
+| left / right / top / bottom margin | the matching `resize-*` |
+| all four corners | the matching `resize-*-corner` |
+| titlebar centre | `normal` (drag zone) |
+
+All eight directions confirmed correct on mate-terminal, and the pointer in every margin resolves
+to the resize window id.
+
+**Correction to an earlier assumption:** the hit-test itself was already correct — all four corners
+were covered by an existing test, and `GetResizeModeForPoint` returns the right mode for every
+region. The bug was purely *which window carried the cursor*.
+
+**Tests:** 35 → 36. The new test fails with the resize-window assignment removed
+(`expected 2097194, got 0`). Worth recording that it **silently skips when another WM owns the
+display**, which briefly made it look insensitive — the sabotage appeared to pass until the test was
+run on a display with no WM. The property records the cursor only where it is actually *applied*, so
+the test can distinguish "computed the target" from "set the cursor on it".
+
+---
+
 ## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -988,6 +1043,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-30 | WM-23 | done | `648817b` | **Found by user report.** A decorated window has two cursor targets; only the frame's cursor was updated, so the 8px margin showed a plain arrow and resize cursors appeared at the window's inner edges. Both windows are now set and restored. Verified all 8 directions live on mate-terminal and xterm. Tests +1 |
 | 2026-10-29 | WM-22 | done | `77d620d` | **Found by user report, with the xterm-vs-mate-terminal asymmetry as the lead.** GTK snaps to resize increments and re-asserts geometry while tiled, which overwrote RestoredRect. Instrumented to confirm (req 504x756 vs saved 814x693) rather than assumed. Geometry requests from non-floating windows are now ignored. Tests +1, and an existing test's expectation corrected |
 | 2026-10-29 | WM-21 | done | `a5a6134` | **Found by user report.** Maximize + drag-to-tile + restore restored the drag position instead of the original (measured -117,-83 vs 200,166). Pre-drag rect is now captured at BeginDrag and reinstated only when a snap occurred. Verified with and without shellsama's panel; tests +2, both failing without the fix |
 | 2026-10-29 | WM-20 | limitation | `d476226` | Two-surface refactor done; then swept every remediation empirically. Synthetic Expose, same-size ConfigureNotify, XClearArea (which does deliver real Expose, verified with xev), 1px resize and remap all fail; only a substantial shrink-and-grow works, and it is too disruptive to ship. xterm with no WM is unaffected, xeyes is unaffected under wmsama — so it is xterm-specific under a reparenting compositor. Documented rather than patched |
