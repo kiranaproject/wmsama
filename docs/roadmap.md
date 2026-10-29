@@ -708,8 +708,11 @@ frame, regardless of what had changed — O(screen) work per frame.
 ### ☐ WM-20 — Window renders black after another window is dragged across it
 
 **Severity:** P1 (cosmetic but highly visible)
-**Status:** two-surface refactor **done** (`florialib@d476226`); the artifact **persists**.
-Root cause is now known to be in the client's own painting, not in the compositor's model.
+**Status:** two-surface refactor **done** (`florialib@d476226`); remediation options **tested
+empirically** and none is acceptable. Closing as a documented limitation.
+
+The client loses its offscreen content and is never told to repaint. No mechanism available to a
+window manager restores it except a substantial resize, which is too disruptive to ship.
 
 ### What was built
 
@@ -743,19 +746,86 @@ Evidence, all from the dump harness:
 7. Reproduces with `REDIRECT_MANUAL` and `REDIRECT_AUTOMATIC`, with nested redirection, and with a
    client resize after redirection. All four tested.
 
-### Where that leaves it
+### Empirical test of remediation options
 
-The WM is not corrupting anything; it is not being told, and cannot force, a repaint. A real fix
-needs to make the client repaint when it is uncovered — and since synthetic Expose is ignored, the
-options are:
+Built a probe (`repaintprobe`) that puts a client back into the broken state, applies one
+remediation, and measures whether the client's offscreen content returns. Swept against xterm.
 
-- **Send a real ConfigureNotify with the *same* size.** Some toolkits treat this as a geometry
-  event and re-layout. Needs testing per toolkit; may cause spurious resizes in others.
-- **Toggle the client's size by 1px and back** on uncover. Guaranteed to force a repaint, but
-  visible as a flicker and disruptive to applications that own their layout.
-- **Accept it and document it**, since a keystroke or any real interaction restores the window.
+| Method | Result |
+| :--- | :--- |
+| control (nothing) | no change |
+| synthetic `Expose` | no change |
+| synthetic `ConfigureNotify`, same size/position | no change |
+| **`XClearArea` with `exposures=1`** | **no change** |
+| real 1px resize, then back | no change |
+| `unmap` + `map` | no change |
+| **substantial shrink, then grow** | **REPAINTED** (37.1% → 73.5%) |
 
-None of these is a clean fix, which is why this is left open rather than patched.
+Two of those results are worth pulling out.
+
+**`XClearArea` is not a dead end at the protocol level.** Verified against `xev`: it delivers
+**real** `Expose` events (`synthetic NO`, 4 of them for one call). So the mechanism works — xterm
+receives them and still does not repaint. That rules out "the WM cannot generate a real Expose" and
+points at xterm ignoring Expose in this state.
+
+**A 1px resize only repaints the newly exposed strip.** That explains why the earlier ad-hoc resize
+test appeared to do nothing: it was working, just on one column. A *substantial* shrink forces a
+full re-layout and does restore the window.
+
+### What the client actually receives
+
+Instrumented with `xev` under wmsama, covering and uncovering it:
+
+- **Expose events after cover+uncover: 0.** The client is never told to repaint.
+- Visibility events: 4.
+
+So the chain is: no Expose on uncover → client never repaints → its offscreen pixmap stays as the
+server left it.
+
+### Ruled out by controlled harnesses
+
+Each of these was tested in isolation and does **not** reproduce the loss:
+
+- reparenting the client *after* it is mapped (wmsama's order) vs creating it inside the frame
+- nested redirection (frame redirected *and* client redirected)
+- `REDIRECT_MANUAL` vs `REDIRECT_AUTOMATIC`
+- resizing the client after redirecting it
+- the synthetic `ConfigureNotify` wmsama sends on every move (disabling it changed nothing)
+- **xterm with no window manager at all**: redirect + cover + uncover leaves its content intact
+  (73.1% throughout)
+
+That last one is the important boundary: this is not "xterm is broken with Composite", it is
+"xterm under a reparenting compositor". And `xeyes` under the same wmsama does **not** lose content,
+so it is not a general property of clients either.
+
+### Conclusion: do not ship a remedy
+
+The only method that works is a substantial shrink-and-grow, and it is not acceptable as a default:
+
+- it is plainly visible (the window jumps to half size and back)
+- it disrupts application layout — scroll position, terminal reflow, widget re-layout
+- it would fire on every uncover, which is constant in normal use (alt-tab, moving windows)
+
+Making it opt-in behind a flag was considered and rejected: a flag that makes windows visibly jump
+is not a feature, and nobody would leave it on.
+
+**WM-20 stays open as a documented limitation.** It is cosmetic, it is recoverable by any real
+interaction (a keystroke restores the window), and the remaining cause is inside xterm's handling of
+being uncovered under a reparenting compositor — which the WM cannot influence through any
+mechanism available to it.
+
+### A bug in the probe itself, worth recording
+
+The first sweep reported `0.0%` for every application and every method — a full table of
+meaningless results. The probe had a local variable `w` (window width) shadowing the global `W`
+(the window id), because **FPC is case-insensitive**. Every geometry query was therefore asking
+about window 0.
+
+Same family as the earlier `Screen`/`SetUp` collision and the `FrameWindow`-that-holds-a-client
+naming: a name that reads correctly and means something else. Fixed by renaming to `gw`/`gh`. The
+lesson is not "be careful" — it is that a measurement harness needs a sanity check against a
+known-good case before its output is trusted, which is what caught it (`pixdump` said 73.5% on the
+same window the probe called 0.0%).
 
 ### Diagnostic harness (keep it)
 
@@ -826,6 +896,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-29 | WM-20 | limitation | `d476226` | Two-surface refactor done; then swept every remediation empirically. Synthetic Expose, same-size ConfigureNotify, XClearArea (which does deliver real Expose, verified with xev), 1px resize and remap all fail; only a substantial shrink-and-grow works, and it is too disruptive to ship. xterm with no WM is unaffected, xeyes is unaffected under wmsama — so it is xterm-specific under a reparenting compositor. Documented rather than patched |
 | 2026-10-29 | WM-18 | done | `7b16006` | Shadow cached instead of re-rasterized per frame: 86-91% of compose time. Pixel-equivalence verified (max delta 5/255, scales with pass count = rounding). ~7x on the shadow |
 | 2026-10-29 | WM-19 | done | `7b16006` | Compose clipped to the damage region; `ClearRect` added. 1080p compose 235-259 ms -> 35 ms |
 | 2026-10-29 | WM-14 | done | `9dd22fe` | Event base must be non-zero; `HasDamage` now implies a resolved base. Offline + live assertions |
