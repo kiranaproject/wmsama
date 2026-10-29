@@ -835,6 +835,46 @@ itself twice: it disproved the present-path theory, and it isolated this bug to 
 
 ---
 
+### ☑ WM-21 — Window position forgotten after maximize + tile
+
+**Severity:** P1 (window could end up partly off-screen)
+**Found by:** user report after using it normally — not by any test.
+
+**Symptom:** maximize a window, drag it to a screen edge to tile it, then restore. The window
+lands wherever the drag ended rather than where it started, often partly off-screen. Measured:
+restored at `-117,-83` instead of `200,166`.
+
+**Cause:** un-maximizing mid-drag is implemented as `Restore()` followed by `Move()`. `Move()`
+correctly updates `RestoredRect` because the window is floating again by then, and `TileLeft` /
+`TileRight` update it a second time. The pre-drag position was overwritten twice before the user
+ever got to restore it, so "restore" restored the drag.
+
+**Fix:** capture `RestoredRect` in `BeginDrag` and put it back in `EndDrag` when the drag ends in a
+snap. A drag that does **not** snap still updates `RestoredRect` normally — dropping a window
+somewhere new is how the user moves it, and that must keep working.
+
+**Verified live**, with and without `shellsama`'s panel (workarea 1280×800 vs 1280×762):
+
+| Sequence | Result |
+| :--- | :--- |
+| floating → maximize → tile → restore | returns to the original position |
+| floating drag to edge → restore | returns to the pre-drag position |
+| non-snapping drag, then maximize/restore | returns to the dropped position |
+
+**Tests:** 33 → 35, both new tests failing with the fix removed.
+
+**Note on the investigation:** the offline state machine was traced through five
+maximize/tile/restore sequences first, and `RestoredRect` looked correct in every one. That was
+misleading, because the corruption happens in the *drag* path (`UpdateDrag`), which the offline
+trace never exercised. The live reproduction was what localised it.
+
+**Note on the user's hypothesis:** it was suggested this might be caused by running `shellsama`
+alongside `wmsama` (its panel changes the workarea). It is not — the bug reproduces with no panel
+at all, and is in fact slightly *worse* without one. The panel only changes the workarea that
+maximize and tile are computed against, which behaves correctly.
+
+---
+
 ## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -896,6 +936,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-29 | WM-21 | done | `a5a6134` | **Found by user report.** Maximize + drag-to-tile + restore restored the drag position instead of the original (measured -117,-83 vs 200,166). Pre-drag rect is now captured at BeginDrag and reinstated only when a snap occurred. Verified with and without shellsama's panel; tests +2, both failing without the fix |
 | 2026-10-29 | WM-20 | limitation | `d476226` | Two-surface refactor done; then swept every remediation empirically. Synthetic Expose, same-size ConfigureNotify, XClearArea (which does deliver real Expose, verified with xev), 1px resize and remap all fail; only a substantial shrink-and-grow works, and it is too disruptive to ship. xterm with no WM is unaffected, xeyes is unaffected under wmsama — so it is xterm-specific under a reparenting compositor. Documented rather than patched |
 | 2026-10-29 | WM-18 | done | `7b16006` | Shadow cached instead of re-rasterized per frame: 86-91% of compose time. Pixel-equivalence verified (max delta 5/255, scales with pass count = rounding). ~7x on the shadow |
 | 2026-10-29 | WM-19 | done | `7b16006` | Compose clipped to the damage region; `ClearRect` added. 1080p compose 235-259 ms -> 35 ms |
