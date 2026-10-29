@@ -36,7 +36,7 @@ type
     procedure TestLiveFrameBehaviour();
     procedure TestRestoreAfterMaximizeThenTile();
     procedure TestNonSnappingDragUpdatesRestoreRect();
-    procedure TestHoverCursorCoversResizeWindow();
+    procedure TestHoverCursorTargetsResizeWindowOnly();
     procedure TestFloriaToolkitButtonStyling();
     procedure TestButtonAlignmentAndPlacement();
     procedure TestAdditionalWindowControls();
@@ -643,14 +643,19 @@ begin
       AssertTrue('Frame window created', cli.FrameWindow <> 0);
 
       wm.UpdateHoverCursor(wm.CursorResizeRight, cli);
-      AssertEquals('Cursor target is the frame, not the client',
-                   Integer(cli.FrameWindow), Integer(wm.HoverCursorWindow));
       AssertTrue('Cursor target is never the client window',
-                 wm.HoverCursorWindow <> cli.ClientWindow);
+                 wm.HoverCursorResizeWindow <> cli.ClientWindow);
+      // The frame must never be a cursor target either: the client is its child and
+      // inherits its cursor, so a resize cursor written there leaks across the whole
+      // interior and then sticks, because motion over the client never reaches the WM.
+      AssertTrue('Cursor target is never the frame window',
+                 wm.HoverCursorResizeWindow <> cli.FrameWindow);
+      AssertEquals('Cursor target is the resize window',
+                   Integer(cli.ResizeWindow), Integer(wm.HoverCursorResizeWindow));
 
       wm.UpdateHoverCursor(wm.CursorNormal, nil);
-      AssertTrue('Root cursor target is not a client window',
-                 wm.HoverCursorWindow <> cli.ClientWindow);
+      AssertTrue('Cursor target cleared on leaving',
+                 wm.HoverCursorResizeWindow = 0);
 
       // ---- WM-16: one GC, reused ---------------------------------------
       firstGC := wm.TitlebarGC;
@@ -969,6 +974,13 @@ begin
     AssertEquals('Client app bottom-left', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 105, 395)));
     AssertEquals('Client app bottom-right', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 495, 395)));
     AssertEquals('Titlebar center draggable', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 120)));
+    // The titlebar used to carry resize corners and a 4px top edge. Those are frame
+    // areas, and the frame must keep a normal cursor because the client inherits it,
+    // so a resize zone there could never show a resize cursor. Resizing is now purely
+    // the outer margin, which is the only place the cursor changes.
+    AssertEquals('Titlebar top-left is not a resize zone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 102, 104)));
+    AssertEquals('Titlebar top-right is not a resize zone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 496, 104)));
+    AssertEquals('Titlebar top edge is not a resize zone', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 102)));
     AssertEquals('Client app interior', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 250, 250)));
     AssertEquals('Far outside window', Integer(dmNone), Integer(wm.GetResizeModeForPoint(cli, 50, 50)));
 
@@ -1899,18 +1911,19 @@ begin
   end;
 end;
 
-// Regression: the hover cursor must be applied to the InputOnly resize window as
-// well as the frame.
+// Regression: resize cursors must only ever be written to the InputOnly resize
+// window, never to the frame.
 //
-// The resize window covers the window plus the 8px outer margin, and it is the
-// window under the pointer while the user is in the resize margin. Its cursor was
-// hardcoded to CursorNormal at creation and only the frame's cursor was updated,
-// so the margin - the one unambiguously resizeable area - always showed a plain
-// arrow, while resize cursors appeared at the window's inner edges where the frame
-// was hit-tested. That is what made the feedback feel chaotic.
+// The client window is a CHILD of the frame and defines no cursor over most of its
+// area, so it inherits the frame's cursor. Writing a resize cursor onto the frame
+// therefore painted it across the client's interior too. That was hidden while the
+// application defined its own cursor (the I-beam over terminal text), but pointer
+// motion is not delivered to the WM over the client interior, so the WM never got a
+// chance to put the cursor back: it stayed stuck in resize mode until the pointer
+// reached a spot where the application defines its own cursor.
 //
 // Live connection required: offline there are no frame or resize windows.
-procedure TWMSamaTest.TestHoverCursorCoversResizeWindow();
+procedure TWMSamaTest.TestHoverCursorTargetsResizeWindowOnly();
 var
   Conn, Obs: Pxcb_connection_t;
   ScreenNum: Integer;
@@ -1946,17 +1959,19 @@ begin
       AssertTrue('Resize window created', cli.ResizeWindow <> 0);
 
       wm.UpdateHoverCursor(wm.CursorResizeLeft, cli);
-      AssertEquals('Cursor targets the frame',
-                   Integer(cli.FrameWindow), Integer(wm.HoverCursorWindow));
-      AssertEquals('Cursor also targets the resize window',
+      AssertEquals('Resize cursor goes to the resize window',
                    Integer(cli.ResizeWindow), Integer(wm.HoverCursorResizeWindow));
 
-      // Resetting must move both back to the normal cursor rather than leaving a
-      // resize cursor behind on the window the pointer left.
+      // Hovering off the margin applies the normal cursor to that same window, so
+      // the resize cursor does not stay painted on it.
+      wm.UpdateHoverCursor(wm.CursorNormal, cli);
+      AssertEquals('Normal cursor applied to the same window',
+                   Integer(cli.ResizeWindow), Integer(wm.HoverCursorResizeWindow));
+
+      // Leaving the client clears the target entirely.
       wm.UpdateHoverCursor(wm.CursorNormal, nil);
-      AssertTrue('Resize target cleared or normal',
-                 (wm.HoverCursorResizeWindow = 0) or
-                 (wm.HoverCursorResizeWindow <> cli.ResizeWindow));
+      AssertEquals('Leaving the client clears the target',
+                   0, Integer(wm.HoverCursorResizeWindow));
 
       wm.UnmanageWindow(cli);
       xcb_destroy_window(Obs, Win);

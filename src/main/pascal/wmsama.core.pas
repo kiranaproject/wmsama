@@ -101,12 +101,10 @@ type
     FHoveredButton      : Integer;
     FPressedButton      : Integer;
     FPressedWindow      : xcb_window_t;
-    FHoverCursorWindow  : xcb_window_t;
     FHoverCursorResizeWindow : xcb_window_t;
     FHoverCursor        : xcb_cursor_t;
-    // The client whose windows currently carry the hover cursor. Needed because a
-    // decorated window has two cursor targets (frame and resize window), so a
-    // window id is no longer enough to identify what we decorated.
+    // The client whose resize window currently carries the hover cursor. The frame
+    // is never a cursor target (see UpdateHoverCursor), so this is enough.
     FLastHoverClient    : TXCBWMClient;
 
     // Shaded Windows and Window Menu Overlay
@@ -298,12 +296,10 @@ type
     property DumpDirectory      : AnsiString     read FDumpDirectory       write FDumpDirectory;
     property HoveredButton      : Integer        read FHoveredButton;
     property HoveredWindow      : xcb_window_t   read FHoveredWindow;
-    // The window currently carrying the hover cursor. Must only ever be the root
-    // or a frame window, never a client window (see UpdateHoverCursor).
-    property HoverCursorWindow  : xcb_window_t   read FHoverCursorWindow;
-    // The InputOnly resize window that also carries the hover cursor. A decorated
-    // window has two cursor targets: the frame, which is under the pointer inside
-    // the window, and this one, which is under it in the 8px resize margin.
+    // The InputOnly resize window that carries the hover cursor. This is the ONLY
+    // cursor target: it covers the 8px outer margin, and the frame is deliberately
+    // left at CursorNormal because the client inherits the frame's cursor (see
+    // UpdateHoverCursor for why that matters).
     property HoverCursorResizeWindow : xcb_window_t read FHoverCursorResizeWindow;
     property FramePaintCount    : Integer        read FFramePaintCount;
     // Cached titlebar GC. Zero until the first paint on a live connection.
@@ -1930,21 +1926,15 @@ begin
   if (ARootX >= wx) and (ARootX < wx + ww) and (ARootY >= wy + FTitlebarHeight) and (ARootY < wy + wh) then
     Exit(dmNone);
 
-  // Titlebar top edge and corners (on FrameWindow)
+  // The whole titlebar is a drag zone.
+  //
+  // It used to also carry resize corners and a 4px top edge, but those are frame
+  // areas, and the frame must keep a normal cursor because the client inherits it
+  // (see UpdateHoverCursor). A resize zone that cannot show a resize cursor is
+  // worse than no resize zone at all, so resizing is purely the outer margin - the
+  // one place where the cursor actually changes.
   if (ARootY >= wy) and (ARootY < wy + FTitlebarHeight) then
-  begin
-    // Top-Left corner (within cornerSize on titlebar)
-    if (ARootX >= wx) and (ARootX < wx + cornerSize) and (ARootY < wy + cornerSize) then
-      Exit(dmResizeTopLeft);
-    // Top-Right corner (within cornerSize on titlebar)
-    if (ARootX >= wx + ww - cornerSize) and (ARootX < wx + ww) and (ARootY < wy + cornerSize) then
-      Exit(dmResizeTopRight);
-    // Top edge (top 4px of titlebar)
-    if (ARootX >= wx + cornerSize) and (ARootX < wx + ww - cornerSize) and (ARootY < wy + 4) then
-      Exit(dmResizeTop);
-    // Center / rest of titlebar is for dragging window position (dmNone)
     Exit(dmNone);
-  end;
 
   // Check if point is within outer margin surrounding the window
   inOuterX := (ARootX >= wx - margin) and (ARootX < wx + ww + margin);
@@ -2155,7 +2145,10 @@ begin
       XCB_GRAB_MODE_ASYNC,
       XCB_GRAB_MODE_ASYNC,
       XCB_NONE,
-      XCB_NONE,
+      // Explicit grab cursor. XCB_NONE means "keep whatever the pointer currently
+      // has", so opening the menu straight out of a resize margin froze the resize
+      // cursor on screen for as long as the menu was up.
+      CursorNormal,
       XCB_CURRENT_TIME
     );
     xcb_flush(Connection);
@@ -2649,80 +2642,57 @@ end;
 
 // Apply a hover cursor.
 //
-// A decorated window has TWO cursor targets, and this is the whole point:
+// There is exactly ONE cursor target: the InputOnly resize window, which covers the
+// 8px outer margin. That is the only place the WM shows a resize cursor.
 //
-//   frame        - the decorated window itself, visible over the window's interior
-//   resize window - an InputOnly window covering the window plus the 8px outer
-//                  margin, which is where the pointer actually is while the user
-//                  is in the resize margin
+// The frame is deliberately never given a resize cursor, and this is subtle enough
+// to be worth spelling out. The client window is a CHILD of the frame, and X
+// resolves a cursor from the innermost window under the pointer that defines one,
+// falling back to the parent chain. Most of a client window defines no cursor, so
+// it inherits the frame's. Writing a resize cursor onto the frame therefore paints
+// it across the client's interior as well.
 //
-// The resize window's cursor was hardcoded to CursorNormal when it was created, and
-// only the frame's cursor was ever updated. So the 8px margin - the one place that
-// is unambiguously a resize area - always showed a plain arrow, while resize
-// cursors appeared at the window's *inner* edges where the frame was hit-tested.
-// That is what made the feedback feel chaotic: the arrow was in the right place and
-// the resize cursors were in the wrong one.
+// That is invisible at first: the application's own cursor (the I-beam over terminal
+// text) overrides it wherever the app defines one. But pointer motion is not
+// delivered to the WM over the client interior - the app consumes it, and
+// MotionNotify does not propagate to the frame - so the WM never gets a chance to
+// put the cursor back. The result was a resize cursor left stuck over the client
+// until the pointer happened to reach a spot where the application defines its own
+// cursor.
 //
-// Cursors are never written onto a client window: X resolves the cursor from the
-// innermost window under the pointer, so doing that would permanently replace the
-// application's own cursor (the I-beam in a terminal).
+// Keeping the frame at CursorNormal (set once when the frame is created) and putting
+// resize cursors only on the resize window fixes that, because the client then
+// inherits "normal" rather than "resize".
 procedure TWMSamaCompositingWM.UpdateHoverCursor(const ACursor: xcb_cursor_t; const AClient: TXCBWMClient);
 var
-  frameWin, resizeWin: xcb_window_t;
+  resizeWin: xcb_window_t;
   prevCli: TXCBWMClient;
 begin
   if Connection = nil then Exit;
 
-  frameWin := 0;
   resizeWin := 0;
-  if (AClient <> nil) and (AClient.FrameWindow <> 0) then
-  begin
-    frameWin := AClient.FrameWindow;
+  if AClient <> nil then
     resizeWin := AClient.ResizeWindow;
-  end
-  else if Screen <> nil then
-    frameWin := Screen^.root;
 
   if (AClient = FLastHoverClient) and (ACursor = FHoverCursor) then Exit;
 
-  // Restore the windows we were decorating before, so a resize cursor does not
-  // linger on a window the pointer has left.
+  // Restore the window we were decorating before, so a resize cursor does not
+  // linger on a margin the pointer has left.
   prevCli := FLastHoverClient;
-  if (prevCli <> AClient) and (prevCli <> nil) and (prevCli.FrameWindow <> 0) and
+  if (prevCli <> AClient) and (prevCli <> nil) and (prevCli.ResizeWindow <> 0) and
      (CursorNormal <> 0) then
-  begin
-    SetWindowCursor(prevCli.FrameWindow, CursorNormal);
-    if prevCli.ResizeWindow <> 0 then
-      SetWindowCursor(prevCli.ResizeWindow, CursorNormal);
-  end;
+    SetWindowCursor(prevCli.ResizeWindow, CursorNormal);
 
   FLastHoverClient := AClient;
   FHoverCursor := ACursor;
-  FHoverCursorWindow := frameWin;
   FHoverCursorResizeWindow := 0;
 
-  if frameWin = 0 then Exit;
-
-  if (Screen <> nil) and (frameWin = Screen^.root) then
+  if (resizeWin <> 0) and (ACursor <> 0) then
   begin
-    SetWindowCursor(Screen^.root, ACursor);
-    CurrentRootCursor := ACursor;
-  end
-  else
-  begin
-    SetWindowCursor(frameWin, ACursor);
-    if resizeWin <> 0 then
-    begin
-      SetWindowCursor(resizeWin, ACursor);
-      // Recorded only where it is actually applied, so a test can tell the
-      // difference between "computed the target" and "set the cursor on it".
-      FHoverCursorResizeWindow := resizeWin;
-    end;
-    if (Screen <> nil) and (CurrentRootCursor <> CursorNormal) and (CursorNormal <> 0) then
-    begin
-      SetWindowCursor(Screen^.root, CursorNormal);
-      CurrentRootCursor := CursorNormal;
-    end;
+    SetWindowCursor(resizeWin, ACursor);
+    // Recorded only where it is actually applied, so a test can tell the difference
+    // between "computed the target" and "set the cursor on it".
+    FHoverCursorResizeWindow := resizeWin;
   end;
 end;
 
@@ -3228,8 +3198,10 @@ begin
         if (targetCli <> nil) and (resizeMode <> dmNone) then
           UpdateHoverCursor(CursorForDragMode(resizeMode), targetCli)
         else
-          // Not on a resize margin: normal cursor on the frame under the pointer,
-          // or the root. Never on the client window itself, which owns its cursor.
+          // Not on a resize margin: put the cursor back to normal. The target is
+          // the client, but the cursor lands on its resize window only - never on
+          // the client itself (it owns its cursor) and never on the frame (the
+          // client would inherit a resize cursor from it).
           UpdateHoverCursor(CursorNormal, FindClient(motionEv^.event));
       end;
     end;
@@ -3237,20 +3209,14 @@ begin
     XCB_LEAVE_NOTIFY:
     begin
       leaveEv := Pxcb_leave_notify_event_t(AEvent);
-      // Leaving a frame we had decorated: put its cursor back rather than just
-      // forgetting about it, otherwise the resize cursor stays painted on the
-      // frame for as long as the pointer is elsewhere.
-      if (FHoverCursorWindow <> 0) and (leaveEv^.event = FHoverCursorWindow) then
+      // Leaving the resize margin: put its cursor back rather than just forgetting
+      // about it, otherwise the resize cursor stays painted there for as long as the
+      // pointer is elsewhere.
+      if (FHoverCursorResizeWindow <> 0) and (leaveEv^.event = FHoverCursorResizeWindow) then
       begin
-        if (Screen <> nil) and (FHoverCursorWindow = Screen^.root) then
-        begin
-          if CursorNormal <> 0 then
-            SetWindowCursor(Screen^.root, CursorNormal);
-          CurrentRootCursor := CursorNormal;
-        end
-        else if CursorNormal <> 0 then
-          SetWindowCursor(FHoverCursorWindow, CursorNormal);
-        FHoverCursorWindow := 0;
+        if CursorNormal <> 0 then
+          SetWindowCursor(FHoverCursorResizeWindow, CursorNormal);
+        FHoverCursorResizeWindow := 0;
         FHoverCursor := 0;
       end;
       if (FHoveredWindow <> 0) and (leaveEv^.event = FHoveredWindow) then
