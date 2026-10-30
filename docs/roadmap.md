@@ -1301,6 +1301,24 @@ unit-testable without an X server. Tests: **88 → 94**, both sabotage-verified:
 needs the browser's compositor phase-locked to ours, which a timer cannot express), and an uncapped
 mode for >60 Hz displays. Both are only worth adding when something actually needs them.
 
+**Documented** (`floria-toolkit@5ff9af3`). New "Main Loop Pacing & Periodic Work" section in the C
+API reference covering the three rate sources, why a tick is wrong for slow work (with the measured
+numbers above), the drift / catch-up / remainder / idle-blocked guarantees, and an explicit
+"not covered" list for >60 Hz and browser embedding.
+
+Writing it surfaced a documentation rot problem: **eight rows described functions that did not
+exist.** Four had no export at all (`ft_widget_add_tick_callback`, `ft_widget_remove_tick_callback`,
+`ft_window_is_modal`, and the three EGL handle getters); four had been renamed
+(`ft_window_grab_pointer` -> `ft_window_grab_input`, `ft_window_install_event_filter` ->
+`ft_register_event_filter`, `ft_window_get_native_window` -> `ft_window_get_native_handle`). The same
+stale names appeared in the README.
+
+Added `scripts/audit-docs.py`, which checks every `ft_*` name in `docs/` against the symbols
+`libft.so` actually exports and exits non-zero on a mismatch, so a renamed API cannot silently leave
+the docs lying. Verified it fails on a reintroduced stale name and passes when clean. It also reports
+coverage: 380 exported functions are currently undocumented, mostly low-level bitmap/batch/camera
+entry points.
+
 ---
 
 ## 5. Deliberate Non-Goals
