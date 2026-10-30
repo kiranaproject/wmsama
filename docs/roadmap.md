@@ -1196,6 +1196,45 @@ the string differs would recover most of it.
 
 ---
 
+### ☑ WM-27 — The tick throttle halved the frame rate of uncapped apps
+
+**Severity:** P1 regression, self-inflicted
+**Found by:** user report - *"floria-toolkit/target/example_c_gpu_vector_stress_test now has really
+low fps"*, noticed right after WM-26.
+
+**What went wrong.** WM-26 fixed the busy loop by waiting a full frame (16 ms) after every tick.
+That looks like "cap at 60 fps" but is not: the frame's work has already happened by the time the
+wait starts, so the period became `work + 16ms` instead of `max(work, 16ms)`. Any frame already
+taking ~16 ms got pushed to ~32 ms — a flat 2x regression for anything running uncapped.
+
+Measured on the GPU stress-test example:
+
+| Build | 1 entity | 2000 entities |
+| :--- | ---: | ---: |
+| pre-WM-26 (uncapped) | 52-60 fps | 51-54 fps |
+| WM-26 (whole-frame wait) | **31 fps** | **31 fps** |
+| fixed (remainder wait) | 55-60 fps | 51-54 fps |
+
+The regression was load-independent (31 fps even with 1 entity), which is the signature: a fixed
+per-frame tax, not a rendering cost.
+
+**Fix** (`floria-toolkit@ef0bd82`): wait only the *remainder* of the frame —
+`wait = 16 - elapsed`, clamped at 0 — so a frame that overran runs again immediately instead of being
+delayed further.
+
+The idle win survives: shellsama still idles at **0.021 cores**, against **0.675** before the loop
+was touched at all.
+
+> **Method note — the A/B that "cleared" this was invalid, and I reported it as evidence.** My first
+> check stashed the change to compare against the old code, but the tree was already clean, so the
+> stash was a no-op and **both runs measured the same binary** (31 fps vs 31 fps). The conclusion
+> "not caused by my change" was therefore worthless even though it was stated confidently.
+> Rebuilding from `c201f3f^` gave the real before-number. Verify the build actually changed before
+> trusting an A/B — this is the second measurement error in this session, after the ticks-per-second
+> mistake in WM-25.
+
+---
+
 ## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -1257,6 +1296,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-30 | WM-27 | done | `floria-toolkit@ef0bd82` | **Self-inflicted regression, user-reported.** WM-26 waited a whole frame after the work, making the period work+16ms instead of max(work,16ms): uncapped apps went 52-60 -> 31 fps, load-independently. Now waits only the remainder. Idle win retained (0.021 cores). The A/B that originally cleared my change was invalid - the tree was clean, so both runs measured the same binary |
 | 2026-10-30 | WM-26 | done | `floria-toolkit@c201f3f` + `shellsama@fa6fc5f` | Idle CPU: **0.675 -> 0.021 cores** (32x). Two causes: the toolkit's tick-callback branch never blocked (~53k poll/s), and the volume applet spawned `wpctl` every 1.5 s on the main thread (0.053 of the 0.075 remaining). Both measured by bisection, not guessed. Also **corrects WM-25's "1.33 cores" to 0.675** - I had read ticks-per-2s as ticks-per-second |
 | 2026-10-30 | WM-25 | done | `florialib@592a338` + `floria-toolkit@9b3b290` | **Found by accident** when the user closed Xephyr. WM and shell both spun at 2.0/2.4 cores for 56 minutes: `select()` reports a dead socket as readable forever, so the pump retried with no delay. Both loops now check `xcb_connection_has_error`. Sabotage-verified: removing the check reproduces 200 ticks/2s. Live-server check (needs a dying display), recipe recorded. Also recorded: shellsama idles at 1.33 cores (uncapped render loop, needs a policy decision) and florialib's EGL test is environmentally flaky |
 | 2026-10-30 | WM-24 | done | `6d317e1` + `1b573a4` | **Found by user report.** WM-23's two-target model was wrong: writing a resize cursor to the frame leaked it across the client, which inherits the frame's cursor. It stuck because motion over the client never reaches the WM. Resize cursors now go to the resize window only; titlebar inner resize zones removed; menu grab cursor made explicit. Sabotage-verified; motion-delivery gap measured, not assumed |
