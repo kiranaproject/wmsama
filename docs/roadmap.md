@@ -1117,17 +1117,82 @@ So the harness is sensitive and the symptom it reports is the real one.
 **Not unit-testable:** it needs an X server that dies mid-run. The Xephyr recipe above is the
 regression check.
 
-**Separate finding, deliberately not fixed here:** shellsama burns **~1.33 cores at idle** (wmsama
-idles at 0). The toolkit's tick-callback branch polls with a zero timeout and only sleeps while a
-window is being resized, so an idle shell busy-loops. That is the loop's documented design
-("continuous high-framerate rendering"), so changing it is a frame-rate policy decision, not a
-drive-by fix.
+**Separate finding, fixed in WM-26:** shellsama burned CPU at idle. **Correction:** initially
+recorded here as "~1.33 cores", which was wrong - that figure came from reading `/proc/<pid>/stat`
+ticks-per-2-seconds as ticks-per-second. The real figure is **0.675 cores**. See WM-26.
 
 **Also observed, pre-existing:** `TestEGLDisplayInitialization` in florialib is flaky on Xephyr
 (`libEGL warning: DRI3 error`). A standalone probe that only calls
 `InitializeDefaultDisplay()` 40 times — no WM code involved — failed in **2 of 5 runs**, so it is
 environmental, not caused by the WM. Occasionally it crashes the whole test runner with SIGFPE.
 Left as-is; recorded so it is not mistaken for a regression later.
+
+---
+
+### ☑ WM-26 — shellsama burns CPU at idle
+
+**Severity:** P2 (a desktop shell that is always running and always visible)
+**Found by:** following up on WM-25 - the spin bug made it obvious the shell was not idle, and the
+question was how much of that was the bug and how much was the design.
+
+**Correction to WM-25 first.** WM-25 recorded shellsama at "~1.33 cores". That was **wrong**. It came
+from reading `/proc/<pid>/stat` fields 14+15 as ticks *per second* when they are ticks over the
+2-second sample window. The real figure is **0.675 cores**, which `top` agrees with. Recorded here
+so the number is not trusted later.
+
+**Two separate causes, fixed in order.**
+
+**1. The toolkit never blocked (`floria-toolkit@c201f3f`).** The tick-callback branch of the main loop
+polled with a zero timeout and then did not sleep at all, on the theory that tick callbacks want
+continuous high-framerate rendering. So the process never blocked:
+
+```
+strace, 8 seconds:  ~53,000 poll  +  ~53,000 clock_gettime  calls
+                    vs a handful of actual X events
+```
+
+A tick callback needs to run *frequently*, not *continuously*. Ticks carry their own elapsed time, so
+delaying to the next frame boundary costs nothing but CPU, and early wake-up is preserved by waking
+on input. The idle poll timeout is now one frame (16 ms), and 1 ms while a window is being resized.
+
+Result: **0.675 -> 0.075 cores.**
+
+**2. The volume applet shelled out to `wpctl` forever (`shellsama@fa6fc5f`).** That was 70% of what
+remained. Measured by bisecting `Tick()` with early returns - not guessed:
+
+| Tick() runs up to | cores |
+| :--- | ---: |
+| nothing (early return) | 0.005 |
+| `UpdateClock()` only | 0.015 |
+| + volume applet | **0.068** |
+| + launcher button sync | 0.072 |
+| + active-window query | 0.075 |
+
+The probe ran every 1.5 s forever, and each probe is a **separate process** (`wpctl`, 10-100 ms
+measured). Worse, it runs on the main loop thread, so the event loop stalled for up to 100 ms every
+1.5 s. This also explains a confusing stray measurement: an instrumented `Tick()` showed
+`T vol=89 / 43 / 100` ms, which looked like the shell burning CPU on its own work but was really it
+blocked in `waitpid`.
+
+The probe now only runs while the popup is open, plus once at construction. `ShowPopup()` calls
+`Tick()` directly, so a change made elsewhere (a keyboard volume key) is still picked up on open.
+
+**Behaviour change, accepted:** the volume icon is stale while the popup is closed. Before, it
+updated within 1.5 s of any change. This buys 70% of the remaining idle cost.
+
+**Verified** end to end by tracing `execve`: **1** `wpctl` call while closed (construction), **4**
+more within 6 s of opening the popup. Panel, desktop wallpaper and Super launcher all still work.
+
+**Final: 0.675 -> 0.021 cores** - a 32x reduction.
+
+> **Method note.** `strace -p` silently attaches to nothing here (`ptrace_scope=1`), so an early
+> check reported "0 execve" and briefly looked like the popup path was dead. Tracing from launch
+> (`strace -f -o ... ./shellsama`) gave the real answer. Beware exit status 1 with no output from
+> `strace -p`.
+
+**Remaining, not fixed:** `UpdateClock()` still costs ~0.010 cores because `FormatDateTime` runs every
+frame and `FClockText.Text` is assigned unconditionally on each second boundary. Assigning only when
+the string differs would recover most of it.
 
 ---
 
@@ -1192,6 +1257,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-30 | WM-26 | done | `floria-toolkit@c201f3f` + `shellsama@fa6fc5f` | Idle CPU: **0.675 -> 0.021 cores** (32x). Two causes: the toolkit's tick-callback branch never blocked (~53k poll/s), and the volume applet spawned `wpctl` every 1.5 s on the main thread (0.053 of the 0.075 remaining). Both measured by bisection, not guessed. Also **corrects WM-25's "1.33 cores" to 0.675** - I had read ticks-per-2s as ticks-per-second |
 | 2026-10-30 | WM-25 | done | `florialib@592a338` + `floria-toolkit@9b3b290` | **Found by accident** when the user closed Xephyr. WM and shell both spun at 2.0/2.4 cores for 56 minutes: `select()` reports a dead socket as readable forever, so the pump retried with no delay. Both loops now check `xcb_connection_has_error`. Sabotage-verified: removing the check reproduces 200 ticks/2s. Live-server check (needs a dying display), recipe recorded. Also recorded: shellsama idles at 1.33 cores (uncapped render loop, needs a policy decision) and florialib's EGL test is environmentally flaky |
 | 2026-10-30 | WM-24 | done | `6d317e1` + `1b573a4` | **Found by user report.** WM-23's two-target model was wrong: writing a resize cursor to the frame leaked it across the client, which inherits the frame's cursor. It stuck because motion over the client never reaches the WM. Resize cursors now go to the resize window only; titlebar inner resize zones removed; menu grab cursor made explicit. Sabotage-verified; motion-delivery gap measured, not assumed |
 | 2026-10-30 | WM-23 | done | `648817b` | **Found by user report.** A decorated window has two cursor targets; only the frame's cursor was updated, so the 8px margin showed a plain arrow and resize cursors appeared at the window's inner edges. Both windows are now set and restored. Verified all 8 directions live on mate-terminal and xterm. Tests +1 |
