@@ -1235,6 +1235,74 @@ was touched at all.
 
 ---
 
+### ☑ WM-28 — Update rate decoupled from the frame rate (`ft_set_timer`)
+
+**Severity:** P2, architectural (the frame rate was also the app's only clock)
+**Found by:** continuing WM-26. After the volume applet was gated, the remaining idle cost was
+`UpdateClock()` — 0.015 of 0.075 cores — not because formatting a time is expensive, but because it
+ran 60 times a second to detect 59 no-ops.
+
+**The design point.** A frame loop should wake because *something needs redrawing*, not because a
+clock said so. A tick callback means "every frame", which is correct for animation and wasteful for
+anything slow. Qt separates these: animations go through `QUnifiedTimer` at frame rate, while a clock
+goes through `QTimer` at 1000 ms and does nothing in between.
+
+floria-toolkit conflated them — one callback, one rate.
+
+**API added** (`floria-toolkit@4002942`, bound in `ftpas@61e5a58`):
+
+```c
+void ft_set_timer(int32_t interval_ms, FtTickCallback cb, void* ud);
+```
+
+The main loop now sleeps until **whichever comes first**: the next frame boundary or the next timer
+deadline. With a timer but no tick callback it blocks indefinitely in `poll()` between fires.
+
+This also collapsed three pacing branches into one deadline calculation.
+
+**Measured**, with a probe registering both a 60 Hz tick and a slow timer:
+
+| Timer interval | Tick/s | Timer/s |
+| :--- | ---: | ---: |
+| 1000 ms | 62.0 | 1.0 |
+| 250 ms | 64.0 | 4.0 |
+| 100 ms | 70.0 | 10.0 |
+
+Timer-only, no tick callback: **0.0000 cores**, against 0.021 for the same app polling at frame rate.
+
+**shellsama migrated** (`shellsama@ebf6be2`) from a 60 Hz tick to a 250 ms timer: **0.021 → 0.010
+cores**, with no tick callback registered at all. 250 ms rather than 1000 ms so the clock updates on
+the second boundary rather than up to a second late.
+
+Verified the panel, desktop wallpaper, Super launcher and volume popup still work, and that the clock
+region genuinely repaints each second by sampling panel pixels (the clock column changes, the rest
+does not) — rather than trusting "the timer fired".
+
+**Scheduling details that needed care**, both covered by tests:
+
+- the deadline advances from the *previous* deadline, not from now, so a slow callback does not
+  accumulate drift and stretch the interval
+- falling a whole interval behind *resynchronises* instead of firing a burst to catch up — a burst is
+  worse than a skipped tick for work that is not urgent
+- the wait budget is the smaller of the frame remainder and the timer delta, and `-1` when neither is
+  scheduled, which `poll()` reads as "block until input"
+
+The arithmetic lives in two pure functions (`AdvanceTimerDeadline`, `WaitBudgetMs`) so it is
+unit-testable without an X server. Tests: **88 → 94**, both sabotage-verified:
+
+| Sabotage | Failure |
+| :--- | :--- |
+| advance from `now` instead of the last deadline | `expected 1100, got 1150` |
+| ignore the timer in the wait budget | `expected 5, got 12` |
+
+**Idle CPU across the whole exercise:** 0.675 → 0.021 (WM-26) → **0.010** cores.
+
+**Not done:** a begin-frame hook for external frame sources (an embedded Chromium will need one; it
+needs the browser's compositor phase-locked to ours, which a timer cannot express), and an uncapped
+mode for >60 Hz displays. Both are only worth adding when something actually needs them.
+
+---
+
 ## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -1296,6 +1364,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-30 | WM-28 | done | `floria-toolkit@4002942` + `ftpas@61e5a58` + `shellsama@ebf6be2` | **Update rate decoupled from frame rate.** Added `ft_set_timer`; the loop sleeps until the next frame boundary or timer deadline, whichever is sooner, and blocks indefinitely with a timer and no tick. Timer rates verified at 100/250/1000 ms; timer-only CPU 0.0000 cores. shellsama migrated to a 250 ms timer: 0.021 -> **0.010 cores**. Drift and catch-up semantics in two pure functions, sabotage-verified. Tests 88 -> 94 |
 | 2026-10-30 | WM-27 | done | `floria-toolkit@ef0bd82` | **Self-inflicted regression, user-reported.** WM-26 waited a whole frame after the work, making the period work+16ms instead of max(work,16ms): uncapped apps went 52-60 -> 31 fps, load-independently. Now waits only the remainder. Idle win retained (0.021 cores). The A/B that originally cleared my change was invalid - the tree was clean, so both runs measured the same binary |
 | 2026-10-30 | WM-26 | done | `floria-toolkit@c201f3f` + `shellsama@fa6fc5f` | Idle CPU: **0.675 -> 0.021 cores** (32x). Two causes: the toolkit's tick-callback branch never blocked (~53k poll/s), and the volume applet spawned `wpctl` every 1.5 s on the main thread (0.053 of the 0.075 remaining). Both measured by bisection, not guessed. Also **corrects WM-25's "1.33 cores" to 0.675** - I had read ticks-per-2s as ticks-per-second |
 | 2026-10-30 | WM-25 | done | `florialib@592a338` + `floria-toolkit@9b3b290` | **Found by accident** when the user closed Xephyr. WM and shell both spun at 2.0/2.4 cores for 56 minutes: `select()` reports a dead socket as readable forever, so the pump retried with no delay. Both loops now check `xcb_connection_has_error`. Sabotage-verified: removing the check reproduces 200 ticks/2s. Live-server check (needs a dying display), recipe recorded. Also recorded: shellsama idles at 1.33 cores (uncapped render loop, needs a policy decision) and florialib's EGL test is environmentally flaky |
