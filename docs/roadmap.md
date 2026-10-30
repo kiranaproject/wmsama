@@ -1321,6 +1321,58 @@ entry points.
 
 ---
 
+### ☐ WM-29 — An EGL window stops reaching a Composite-redirected window
+
+**Severity:** P1 (visible blank panel)
+**Found by:** user report — the shellsama bottom panel goes blank after closing a window, "but
+somewhat clickable".
+
+**Status:** worked around in `shellsama@3f031eb`; root cause **not** found. This entry records what
+was ruled out so the next attempt does not repeat it.
+
+**Symptom.** After any window closes, the panel renders as a uniform strip. It stays mapped and
+remains clickable — buttons still work, the launcher still opens — so only the pixels are gone.
+
+**Ruled out, by measurement:**
+
+| Hypothesis | Result |
+| :--- | :--- |
+| Panel's widget tree stopped drawing | No — all 5 children draw every frame, visible, clipped in |
+| Widgets destroyed | No — launcher button still opens the launcher |
+| Panel-side invalidation/damage | No — it repaints 100+ times after the close |
+| `CleanupGLPipeline` deleting shared GL objects | No — disabling it changes nothing |
+| Any EGL teardown at all | No — skipping `CleanupEGL` entirely changes nothing |
+| **wmsama's compositor** | **No** — the user reproduced it under **Marco** too |
+
+**What the evidence points to.** Three conditions must hold:
+
+| Condition | Blank? |
+| :--- | :--- |
+| No window manager | no |
+| Compositing WM + `FT_RENDERER=software` | no |
+| Compositing WM + EGL | **yes** |
+
+So the common factor is **any compositing WM plus the EGL path** — not any particular compositor.
+That places the defect in `floria-toolkit`'s EGL backend, not in wmsama.
+
+Notably, capturing the panel's *own* window (not the composited screen) shows a uniform image, so
+the redirected pixmap itself is empty even though drawing runs. The leading hypothesis is that the
+EGL window surface, created before Composite redirects the window, ends up writing somewhere other
+than the pixmap the compositor names. The panel is the only long-lived window that is never resized
+or remapped, which would explain why it alone is affected.
+
+**Unproven.** The above is inference from four observations, not a demonstrated mechanism.
+
+**Next step.** In `ft.backend.egl.pas`, log `FEGLSurface`/`FEGLContext` identity and
+`eglQuerySurface` dimensions before and after a `Repaint` that follows a window destroy, and check
+whether `eglSwapBuffers` still targets the drawable the compositor names. Doing the same under
+Marco would confirm the WM-independence.
+
+**Workaround.** `shellsama` renders the panel with `ft_window_set_hardware_accelerated(..., 0)`.
+The panel is 1024x38 at 4 Hz, so the cost is negligible; other windows keep EGL.
+
+---
+
 ## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -1382,6 +1434,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
+| 2026-10-30 | WM-29 | **open** | `shellsama@3f031eb` | Panel goes blank after a window closes. Ruled out: drawing, widgets, damage, GL cleanup, EGL teardown, and wmsama itself (reproduces under Marco). Trigger is any compositing WM + EGL. Worked around by software-rendering the panel; root cause still unidentified |
 | 2026-10-30 | WM-28 | done | `floria-toolkit@4002942` + `ftpas@61e5a58` + `shellsama@ebf6be2` | **Update rate decoupled from frame rate.** Added `ft_set_timer`; the loop sleeps until the next frame boundary or timer deadline, whichever is sooner, and blocks indefinitely with a timer and no tick. Timer rates verified at 100/250/1000 ms; timer-only CPU 0.0000 cores. shellsama migrated to a 250 ms timer: 0.021 -> **0.010 cores**. Drift and catch-up semantics in two pure functions, sabotage-verified. Tests 88 -> 94 |
 | 2026-10-30 | WM-27 | done | `floria-toolkit@ef0bd82` | **Self-inflicted regression, user-reported.** WM-26 waited a whole frame after the work, making the period work+16ms instead of max(work,16ms): uncapped apps went 52-60 -> 31 fps, load-independently. Now waits only the remainder. Idle win retained (0.021 cores). The A/B that originally cleared my change was invalid - the tree was clean, so both runs measured the same binary |
 | 2026-10-30 | WM-26 | done | `floria-toolkit@c201f3f` + `shellsama@fa6fc5f` | Idle CPU: **0.675 -> 0.021 cores** (32x). Two causes: the toolkit's tick-callback branch never blocked (~53k poll/s), and the volume applet spawned `wpctl` every 1.5 s on the main thread (0.053 of the 0.075 remaining). Both measured by bisection, not guessed. Also **corrects WM-25's "1.33 cores" to 0.675** - I had read ticks-per-2s as ticks-per-second |
