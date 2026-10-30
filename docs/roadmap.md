@@ -1327,8 +1327,10 @@ entry points.
 **Found by:** user report — the shellsama bottom panel goes blank after closing a window, "but
 somewhat clickable".
 
-**Status:** worked around in `shellsama@3f031eb`; root cause **not** found. This entry records what
-was ruled out so the next attempt does not repeat it.
+**Status:** worked around in `shellsama@3f031eb`; root cause **not** found after two instrumented
+passes. This entry records what was ruled out and what was measured, so the next attempt does not
+repeat it. All instrumentation has been reverted — nothing from the investigation is left in the
+tree.
 
 **Symptom.** After any window closes, the panel renders as a uniform strip. It stays mapped and
 remains clickable — buttons still work, the launcher still opens — so only the pixels are gone.
@@ -1356,17 +1358,67 @@ So the common factor is **any compositing WM plus the EGL path** — not any par
 That places the defect in `floria-toolkit`'s EGL backend, not in wmsama.
 
 Notably, capturing the panel's *own* window (not the composited screen) shows a uniform image, so
-the redirected pixmap itself is empty even though drawing runs. The leading hypothesis is that the
-EGL window surface, created before Composite redirects the window, ends up writing somewhere other
-than the pixmap the compositor names. The panel is the only long-lived window that is never resized
-or remapped, which would explain why it alone is affected.
+the redirected pixmap itself is empty even though drawing runs.
 
-**Unproven.** The above is inference from four observations, not a demonstrated mechanism.
+### Instrumented findings (second pass)
 
-**Next step.** In `ft.backend.egl.pas`, log `FEGLSurface`/`FEGLContext` identity and
-`eglQuerySurface` dimensions before and after a `Repaint` that follows a window destroy, and check
-whether `eglSwapBuffers` still targets the drawable the compositor names. Doing the same under
-Marco would confirm the WM-independence.
+Both sides were instrumented at once: `ft.backend.egl.pas` logged EGL surface identity and swap
+results, `floria.xcb.wm.compositor.pas` logged the named pixmap and sampled the pixels it actually
+read back.
+
+**1. The compositor's named pixmap never contains the panel's content — not even while the panel is
+displaying correctly.**
+
+```
+NAMEPIX win=0x400023 pix=0x20002E 1024x38
+FETCH   win=0x400023 pix=0x20002E 1024x38
+        px[0]=FF1E1E2E  px[mid]=FF1E1E2E  px[last]=FF1E1E2E
+```
+
+`FF1E1E2E` is `(30,30,46)`, a dark colour. The panel's real background is `(240,242,245)`. So the
+pixmap named for the panel is uniformly wrong from the very first frame.
+
+At startup this is invisible: the panel is still drawn directly by X on top of the root, so the
+correct pixels reach the screen and the compositor's bad copy sits underneath. Once the panel becomes
+redirected, that underlying copy is all that is left to show — hence "blank but clickable".
+
+**2. The EGL surface is healthy throughout.** Swaps succeed, at the right size, on the right window:
+
+```
+SWAP xwin=0x400023 surf=0x3B8CEF50 q=1024x38 win=1024x38 rc=1
+```
+
+`rc=1` is `EGL_TRUE`. So this is not a failing swap, a lost context, or a surface/geometry mismatch.
+`eglQuerySurface` agrees with the window size.
+
+**3. The "surface created before the window is mapped" hypothesis is disproven.** It was the leading
+theory from the first pass, and it was implemented: a `Show` override on `TFtEGLWindow` that destroys
+and recreates the EGL surface after map. It changes nothing:
+
+```
+GPU panel, close 1: 95.0% distinct=2 BLANK
+GPU panel, close 2: 95.0% distinct=2 BLANK
+GPU panel, close 3: 95.0% distinct=2 BLANK
+```
+
+Reverted; it is not a fix and is not in the tree.
+
+**4. One unexplained observation.** On one `UpdateSurfaces` call the panel reported `oldPix=0` — its
+pixmap field had already been zeroed by something outside that function. Worth chasing: it suggests
+the pixmap is freed or cleared on a path not yet identified.
+
+### Where that leaves it
+
+The trigger is the **close**, not the surface creation order. The mechanism is still unknown, but it
+is now constrained to: *the pixmap the compositor names for the panel does not receive EGL output,
+from the start*. Candidate next steps, in order:
+
+1. Check whether `xcb_composite_name_window_pixmap` is re-issued, or the pixmap freed, around
+   `UnregisterWindow` / the close path — starting from the `oldPix=0` observation.
+2. Compare the panel's named pixmap against a normal window's named pixmap at startup, to see whether
+   this is specific to the panel or universal to windows created after `redirect_subwindows`.
+3. Confirm under Marco whether the same `FF1E1E2E` readback appears, which would pin the defect to
+   the EGL/pixmap interaction rather than to wmsama's compositor.
 
 **Workaround.** `shellsama` renders the panel with `ft_window_set_hardware_accelerated(..., 0)`.
 The panel is 1024x38 at 4 Hz, so the cost is negligible; other windows keep EGL.
@@ -1434,7 +1486,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-07 | done | `c4c0c48` | Cursor target is now a client handle, so a client window is not expressible. Measured with XFixesGetCursorImage: old build 24x24 arrow over xterm text, new build 9x16 I-beam. Sabotage-verified |
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
-| 2026-10-30 | WM-29 | **open** | `shellsama@3f031eb` | Panel goes blank after a window closes. Ruled out: drawing, widgets, damage, GL cleanup, EGL teardown, and wmsama itself (reproduces under Marco). Trigger is any compositing WM + EGL. Worked around by software-rendering the panel; root cause still unidentified |
+| 2026-10-30 | WM-29 | **open** | `shellsama@3f031eb` | Panel goes blank after a window closes. Ruled out: drawing, widgets, damage, GL cleanup, EGL teardown, wmsama itself (reproduces under Marco), and surface-creation-order (post-map recreation tried, no effect). Second instrumented pass found the compositor's named pixmap is uniformly `FF1E1E2E` from the first frame while EGL swaps return `EGL_TRUE` — so the pixmap never receives EGL output. Worked around by software-rendering the panel |
 | 2026-10-30 | WM-28 | done | `floria-toolkit@4002942` + `ftpas@61e5a58` + `shellsama@ebf6be2` | **Update rate decoupled from frame rate.** Added `ft_set_timer`; the loop sleeps until the next frame boundary or timer deadline, whichever is sooner, and blocks indefinitely with a timer and no tick. Timer rates verified at 100/250/1000 ms; timer-only CPU 0.0000 cores. shellsama migrated to a 250 ms timer: 0.021 -> **0.010 cores**. Drift and catch-up semantics in two pure functions, sabotage-verified. Tests 88 -> 94 |
 | 2026-10-30 | WM-27 | done | `floria-toolkit@ef0bd82` | **Self-inflicted regression, user-reported.** WM-26 waited a whole frame after the work, making the period work+16ms instead of max(work,16ms): uncapped apps went 52-60 -> 31 fps, load-independently. Now waits only the remainder. Idle win retained (0.021 cores). The A/B that originally cleared my change was invalid - the tree was clean, so both runs measured the same binary |
 | 2026-10-30 | WM-26 | done | `floria-toolkit@c201f3f` + `shellsama@fa6fc5f` | Idle CPU: **0.675 -> 0.021 cores** (32x). Two causes: the toolkit's tick-callback branch never blocked (~53k poll/s), and the volume applet spawned `wpctl` every 1.5 s on the main thread (0.053 of the 0.075 remaining). Both measured by bisection, not guessed. Also **corrects WM-25's "1.33 cores" to 0.675** - I had read ticks-per-2s as ticks-per-second |
