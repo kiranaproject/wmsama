@@ -1321,16 +1321,23 @@ entry points.
 
 ---
 
-### ☐ WM-29 — An EGL window stops reaching a Composite-redirected window
+### ☑ WM-29 — An EGL window goes blank after a popup menu is destroyed
 
 **Severity:** P1 (visible blank panel)
 **Found by:** user report — the shellsama bottom panel goes blank after closing a window, "but
 somewhat clickable".
 
-**Status:** worked around in `shellsama@3f031eb`; root cause **not** found after two instrumented
-passes. This entry records what was ruled out and what was measured, so the next attempt does not
-repeat it. All instrumentation has been reverted — nothing from the investigation is left in the
-tree.
+**Status:** **fixed 2026-10-31** — the trigger was the taskbar's `RefreshTasks` destroying a
+closed task's **context-menu window**, which is itself an EGL window; its EGL teardown
+(`CleanupGLPipeline` + `eglDestroySurface/Context`) corrupted the panel's redirected storage.
+Fixed in the toolkit by rendering popup-menu windows on the software path
+(`floria-toolkit`, `ft.widget.menus.pas`); the shellsama panel workaround
+(`ft_window_set_hardware_accelerated(panel, 0)`) is removed. Verified across 3 close cycles on
+EGL, panel storage 61 → 61 → 61 → 61 distinct colours. Full write-up in
+`/tmp/opencode/wm29-findings-and-fix.md`. The earlier instrumentation-based findings below are
+retained for history; note that their "storage is uniformly wrong from the first frame"
+observation was a **measurement artifact** — storage is correct at startup, and the failure is
+strictly close-triggered.
 
 **Symptom.** After any window closes, the panel renders as a uniform strip. It stays mapped and
 remains clickable — buttons still work, the launcher still opens — so only the pixels are gone.
@@ -1420,8 +1427,33 @@ from the start*. Candidate next steps, in order:
 3. Confirm under Marco whether the same `FF1E1E2E` readback appears, which would pin the defect to
    the EGL/pixmap interaction rather than to wmsama's compositor.
 
-**Workaround.** `shellsama` renders the panel with `ft_window_set_hardware_accelerated(..., 0)`.
-The panel is 1024x38 at 4 Hz, so the cost is negligible; other windows keep EGL.
+### Resolution
+
+**Fix:** `floria-toolkit@69f94af` renders popup-menu windows on the software path. This covers every
+menu, dropdown, combo popup and tooltip the toolkit creates, for all consumers — not just shellsama's
+taskbar. A menu is small and drawn once per open, so the cost is nil.
+
+**Workaround removed:** `shellsama@f54b80e`. The panel is back on EGL.
+
+**Independently verified by A/B** on the same display, same open/close sequence, panel on the EGL
+path with the workaround gone:
+
+```
+without the menu fix : BLANK 3/3  (95.0% dominant, 2 colours)
+with the menu fix    : OK    4/4  (74.2% dominant, ~210 colours)
+```
+
+The A/B matters more than the "3 close cycles" result alone, because this bug was intermittent
+enough that a single passing run proves little. The panel blanked on 3 of 3 cycles without the fix
+and on 0 of 4 with it.
+
+**Mechanism, stated with its remaining uncertainty.** The trigger is `TFtPopupMenu` destruction, and
+making menus non-EGL fixes it. Which specific teardown call does the damage —
+`CleanupGLPipeline`, `eglDestroySurface`, or `eglDestroyContext` — was not isolated. Note that the
+fix itself calls `CleanupEGL` on the menu window at *create* time (setting `IsHardwareAccelerated`
+false after creation) and that is harmless, so the poison is not the teardown in isolation; it
+depends on the state of the window being destroyed. Worth knowing before anyone tries to narrow
+further.
 
 ---
 
@@ -1487,6 +1519,7 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-08 | done | `c4c0c48` | Frame branch consumes the click; base-class fallback move unreachable. Sabotage-verified |
 | 2026-10-28 | WM-16 | done | `c4c0c48` | One cached GC, one flush per batch, focus change repaints 2 frames not all. Sabotage-verified both |
 | 2026-10-30 | WM-29 | **open** | `shellsama@3f031eb` | Panel goes blank after a window closes. Ruled out: drawing, widgets, damage, GL cleanup, EGL teardown, wmsama itself (reproduces under Marco), and surface-creation-order (post-map recreation tried, no effect). Second instrumented pass found the compositor's named pixmap is uniformly `FF1E1E2E` from the first frame while EGL swaps return `EGL_TRUE` — so the pixmap never receives EGL output. Worked around by software-rendering the panel |
+| 2026-10-31 | WM-29 | done | `floria-toolkit@69f94af` + `shellsama@f54b80e` | **Root cause found and fixed.** The trigger is the taskbar's `RefreshTasks` freeing a closed task's context-menu window — itself an EGL window whose `CleanupGLPipeline` + `eglDestroySurface/Context` corrupts the panel's redirected storage. Bisected: disabling the menu free keeps the panel alive; freeing the button alone is harmless; freeing the menu alone blanks it. Fixed by rendering popup-menu windows on the software path (`ft.widget.menus.pas`); panel workaround removed. Verified: 3 close cycles, storage 61→61→61→61. The "uniformly wrong from first frame" reading was a measurement artifact — storage is correct at startup; the failure is strictly close-triggered |
 | 2026-10-30 | WM-28 | done | `floria-toolkit@4002942` + `ftpas@61e5a58` + `shellsama@ebf6be2` | **Update rate decoupled from frame rate.** Added `ft_set_timer`; the loop sleeps until the next frame boundary or timer deadline, whichever is sooner, and blocks indefinitely with a timer and no tick. Timer rates verified at 100/250/1000 ms; timer-only CPU 0.0000 cores. shellsama migrated to a 250 ms timer: 0.021 -> **0.010 cores**. Drift and catch-up semantics in two pure functions, sabotage-verified. Tests 88 -> 94 |
 | 2026-10-30 | WM-27 | done | `floria-toolkit@ef0bd82` | **Self-inflicted regression, user-reported.** WM-26 waited a whole frame after the work, making the period work+16ms instead of max(work,16ms): uncapped apps went 52-60 -> 31 fps, load-independently. Now waits only the remainder. Idle win retained (0.021 cores). The A/B that originally cleared my change was invalid - the tree was clean, so both runs measured the same binary |
 | 2026-10-30 | WM-26 | done | `floria-toolkit@c201f3f` + `shellsama@fa6fc5f` | Idle CPU: **0.675 -> 0.021 cores** (32x). Two causes: the toolkit's tick-callback branch never blocked (~53k poll/s), and the volume applet spawned `wpctl` every 1.5 s on the main thread (0.053 of the 0.075 remaining). Both measured by bisection, not guessed. Also **corrects WM-25's "1.33 cores" to 0.675** - I had read ticks-per-2s as ticks-per-second |
