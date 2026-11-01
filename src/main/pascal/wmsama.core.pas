@@ -873,7 +873,6 @@ end;
 procedure TWMSamaCompositingWM.RenderComposite();
 begin
   if not FCompositorEnabled or not FNeedsComposite or (FCompositor = nil) then Exit;
-
   FCompositor.CompositeScene();
   FCompositor.PresentToScreen();
   FNeedsComposite := False;
@@ -1908,8 +1907,11 @@ var
 begin
   Result.Left := 0;
   Result.Right := 0;
-  Result.Top := FTitlebarHeight;
+  Result.Top := 0;
   Result.Bottom := 0;
+
+  if (AClient = nil) or not AClient.ExtendedClientArea then Exit;
+  Result.Top := FTitlebarHeight;
 
   w := AWidth;
   if (w <= 0) and (AClient <> nil) then
@@ -2088,6 +2090,8 @@ var
 begin
   if (AWindow = nil) or (ACanvas = nil) then Exit;
   cli := FindClient(AWindow.Window);
+  if cli = nil then
+    cli := FindClient(AWindow.ClientWindow);
   if (cli = nil) or not cli.ExtendedClientArea or (wsMinimized in cli.State) then Exit;
 
   CalculateButtons(cli, cli.CurrentRect.Width, btns, titleX, titleW);
@@ -2978,11 +2982,10 @@ begin
   inherited DoOnClientPropertiesChanged(AClient);
   if AClient <> nil then
   begin
-    if AClient.ExtendedClientArea then
-    begin
-      UpdateControlsWindow(AClient);
-      UpdateControlsInsetProperty(AClient);
-    end;
+    UpdateControlsWindow(AClient);
+    UpdateControlsInsetProperty(AClient);
+    UpdateFrameExtents(AClient);
+    AClient.SetGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y, AClient.CurrentRect.Width, AClient.CurrentRect.Height);
     PaintClientFrame(AClient);
     RequestComposite();
   end;
