@@ -1408,6 +1408,9 @@ begin
   begin
     UpdateControlsWindow(AClient);
     UpdateControlsInsetProperty(AClient);
+    UpdateFrameExtents(AClient);
+    if Connection <> nil then
+      xcb_flush(Connection);
   end;
 
   PaintClientFrame(AClient);
@@ -1526,6 +1529,9 @@ begin
   begin
     UpdateControlsWindow(AClient);
     UpdateControlsInsetProperty(AClient);
+    UpdateFrameExtents(AClient);
+    if Connection <> nil then
+      xcb_flush(Connection);
   end;
 
   PaintClientFrame(AClient);
@@ -1681,6 +1687,9 @@ begin
   begin
     UpdateControlsWindow(AClient);
     UpdateControlsInsetProperty(AClient);
+    UpdateFrameExtents(AClient);
+    if Connection <> nil then
+      xcb_flush(Connection);
   end;
 
   PaintClientFrame(AClient);
@@ -1968,6 +1977,7 @@ begin
     4,
     @values[0]
   );
+  xcb_flush(Connection);
 end;
 
 procedure TWMSamaCompositingWM.UpdateControlsWindow(const AClient: TXCBWMClient);
@@ -2078,6 +2088,7 @@ begin
   if rectCount > 0 then
     xcb_shape_rectangles(Connection, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT,
                          XCB_SHAPE_SO_SET, AClient.ControlsWindow, 0, 0, rectCount, @rects[0]);
+  xcb_flush(Connection);
 end;
 
 procedure TWMSamaCompositingWM.DoOnWindowOverlayRender(ASender: TObject; AWindow: TXCBCompositedWindow; ACanvas: TFloriaCanvasAgg; const ARect: TXCBRect);
@@ -2269,6 +2280,9 @@ begin
   begin
     UpdateControlsWindow(AClient);
     UpdateControlsInsetProperty(AClient);
+    UpdateFrameExtents(AClient);
+    if Connection <> nil then
+      xcb_flush(Connection);
   end;
 
   PaintClientFrame(AClient);
@@ -2358,6 +2372,9 @@ begin
   begin
     UpdateControlsWindow(AClient);
     UpdateControlsInsetProperty(AClient);
+    UpdateFrameExtents(AClient);
+    if Connection <> nil then
+      xcb_flush(Connection);
   end;
 
   PaintClientFrame(AClient);
@@ -2426,6 +2443,9 @@ begin
   begin
     UpdateControlsWindow(AClient);
     UpdateControlsInsetProperty(AClient);
+    UpdateFrameExtents(AClient);
+    if Connection <> nil then
+      xcb_flush(Connection);
   end;
 
   PaintClientFrame(AClient);

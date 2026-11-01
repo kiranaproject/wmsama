@@ -15,6 +15,11 @@
     <unitPaths>
       <path>src/main/pascal</path>
     </unitPaths>
+    <compilerOptions>
+      <option>-g</option>
+      <option>-gl</option>
+      <option>-O-</option>
+    </compilerOptions>
   </build>
 
   <test>
