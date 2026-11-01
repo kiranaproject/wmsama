@@ -1933,7 +1933,7 @@ begin
   // (see UpdateHoverCursor). A resize zone that cannot show a resize cursor is
   // worse than no resize zone at all, so resizing is purely the outer margin - the
   // one place where the cursor actually changes.
-  if (ARootY >= wy) and (ARootY < wy + FTitlebarHeight) then
+  if (ARootX >= wx) and (ARootX < wx + ww) and (ARootY >= wy) and (ARootY < wy + FTitlebarHeight) then
     Exit(dmNone);
 
   // Check if point is within outer margin surrounding the window
@@ -3180,9 +3180,9 @@ begin
 
         if targetCli = nil then
         begin
-          for i := Clients.Count - 1 downto 0 do
+          for i := 0 to MruClients.Count - 1 do
           begin
-            candidateCli := TXCBWMClient(Clients[i]);
+            candidateCli := TXCBWMClient(MruClients[i]);
             if candidateCli.IsReparented and not (wsMinimized in candidateCli.State) then
             begin
               resizeMode := GetResizeModeForPoint(candidateCli, motionEv^.root_x, motionEv^.root_y);
@@ -3343,9 +3343,9 @@ begin
 
         if targetCli = nil then
         begin
-          for i := Clients.Count - 1 downto 0 do
+          for i := 0 to MruClients.Count - 1 do
           begin
-            candidateCli := TXCBWMClient(Clients[i]);
+            candidateCli := TXCBWMClient(MruClients[i]);
             if candidateCli.IsReparented and not (wsMinimized in candidateCli.State) then
             begin
               resizeMode := GetResizeModeForPoint(candidateCli, btnEv^.root_x, btnEv^.root_y);
@@ -3372,6 +3372,18 @@ begin
         // 0. Direct clicks on outer resize frame window (InputOnly window)
         if (cli.ResizeWindow <> 0) and (btnEv^.event = cli.ResizeWindow) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
         begin
+          // Check if this click falls in the outer resize zone of an overlapping window in front (e.g. ActiveClient)
+          if (ActiveClient <> nil) and (ActiveClient <> cli) and
+             not (wsMinimized in ActiveClient.State) then
+          begin
+            resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
+            if resizeMode <> dmNone then
+            begin
+              BeginDrag(ActiveClient, resizeMode, btnEv^.root_x, btnEv^.root_y);
+              Exit(True);
+            end;
+          end;
+
           resizeMode := GetResizeModeForPoint(cli, btnEv^.root_x, btnEv^.root_y);
           if resizeMode <> dmNone then
           begin
@@ -3435,6 +3447,18 @@ begin
           th := FTitlebarHeight;
           bw := FrameMetrics.BorderWidth;
 
+          // Check if cursor is in outer resize zone of an active window on top
+          if (ActiveClient <> nil) and (ActiveClient <> cli) and
+             not (wsMinimized in ActiveClient.State) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+          begin
+            resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
+            if resizeMode <> dmNone then
+            begin
+              BeginDrag(ActiveClient, resizeMode, btnEv^.root_x, btnEv^.root_y);
+              Exit(True);
+            end;
+          end;
+
           cli.Activate();
           if Connection <> nil then
             xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
@@ -3459,19 +3483,7 @@ begin
             Exit(True);
           end;
 
-          // C. Handle perimeter resizing if cursor is in outer resize zone of an active window on top
-          if (ActiveClient <> nil) and (ActiveClient <> cli) and
-             not (wsMinimized in ActiveClient.State) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
-          begin
-            resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
-            if resizeMode <> dmNone then
-            begin
-              BeginDrag(ActiveClient, resizeMode, btnEv^.root_x, btnEv^.root_y);
-              Exit(True);
-            end;
-          end;
-
-          // D. Handle titlebar top edge and top corners resizing
+          // C. Handle titlebar top edge and top corners resizing
           if (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             resizeMode := GetResizeModeForPoint(cli, btnEv^.root_x, btnEv^.root_y);

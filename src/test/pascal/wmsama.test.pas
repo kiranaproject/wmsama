@@ -54,6 +54,7 @@ type
     procedure TestNonResizableAndButtonFiltering();
     procedure TestTransientDialogStackingAndICCCMPlacement();
     procedure TestDesktopWindowCompositingAndAltTabExclusion();
+    procedure TestMultipleWindowsOverlappingResize();
   end;
 
 implementation
@@ -965,6 +966,7 @@ begin
     AssertEquals('Bottom edge (height only, outer)', Integer(dmResizeBottom), Integer(wm.GetResizeModeForPoint(cli, 250, 404)));
     AssertEquals('Left edge (width only, outer)', Integer(dmResizeLeft), Integer(wm.GetResizeModeForPoint(cli, 96, 200)));
     AssertEquals('Right edge (width only, outer)', Integer(dmResizeRight), Integer(wm.GetResizeModeForPoint(cli, 504, 200)));
+    AssertEquals('Right edge outer margin alongside titlebar', Integer(dmResizeRight), Integer(wm.GetResizeModeForPoint(cli, 504, 120)));
 
     // 3. Floating Window: Client application interior and edges MUST return dmNone
     // This ensures selecting text inside xterm from column 0 or any edge never triggers resize!
@@ -1982,6 +1984,101 @@ begin
   finally
     if Obs <> nil then xcb_disconnect(Obs);
     xcb_disconnect(Conn);
+  end;
+end;
+
+procedure TWMSamaTest.TestMultipleWindowsOverlappingResize();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2: TXCBWMClient;
+  btnEv: xcb_button_press_event_t;
+  motionEv: xcb_motion_notify_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli1 := wm.ManageWindow(1111);
+    cli1.CurrentRect := TXCBRect.Create(100, 100, 400, 300);
+    cli1.RestoredRect := cli1.CurrentRect;
+    cli1.FrameWindow := 1112;
+    cli1.ResizeWindow := 1113;
+    cli1.IsReparented := True;
+
+    cli2 := wm.ManageWindow(2222);
+    cli2.CurrentRect := TXCBRect.Create(200, 150, 400, 300);
+    cli2.RestoredRect := cli2.CurrentRect;
+    cli2.FrameWindow := 2223;
+    cli2.ResizeWindow := 2224;
+    cli2.IsReparented := True;
+
+    // Window 1 is in front (active)
+    wm.ActiveClient := cli1;
+
+    // 1. Click on Window 1 right outer resize margin (504, 250), which falls inside Window 2 frame
+    FillChar(btnEv, SizeOf(btnEv), 0);
+    btnEv.response_type := XCB_BUTTON_PRESS;
+    btnEv.detail := XCB_BUTTON_INDEX_1;
+    btnEv.root_x := 504;
+    btnEv.root_y := 250;
+    btnEv.event := cli2.FrameWindow;
+
+    AssertTrue('Frame click on overlapping background window starts drag',
+               wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    AssertEquals('Resize Right started for active foreground window',
+                 Integer(dmResizeRight), Integer(wm.DragMode));
+    AssertTrue('Active foreground window is dragged',
+               wm.DragClient = cli1);
+    wm.EndDrag();
+
+    // 2. Click on Window 1 bottom outer resize margin (250, 404), which falls inside Window 2 frame
+    btnEv.root_x := 250;
+    btnEv.root_y := 404;
+    btnEv.event := cli2.FrameWindow;
+
+    AssertTrue('Frame click on bottom margin starts drag',
+               wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    AssertEquals('Resize Bottom started for active foreground window',
+                 Integer(dmResizeBottom), Integer(wm.DragMode));
+    AssertTrue('Active foreground window is dragged',
+               wm.DragClient = cli1);
+    wm.EndDrag();
+
+    // 3. Click on Window 1 bottom-right corner (504, 404), which falls inside Window 2 frame
+    btnEv.root_x := 504;
+    btnEv.root_y := 404;
+    btnEv.event := cli2.FrameWindow;
+
+    AssertTrue('Frame click on bottom-right corner starts drag',
+               wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    AssertEquals('Resize Bottom-Right started for active foreground window',
+                 Integer(dmResizeBottomRight), Integer(wm.DragMode));
+    AssertTrue('Active foreground window is dragged',
+               wm.DragClient = cli1);
+    wm.EndDrag();
+
+    // 4. Click on Window 1 right margin when delivered to Window 2 resize window
+    btnEv.root_x := 504;
+    btnEv.root_y := 250;
+    btnEv.event := cli2.ResizeWindow;
+
+    AssertTrue('Resize window click on background window starts drag',
+               wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    AssertEquals('Resize Right started for active foreground window',
+                 Integer(dmResizeRight), Integer(wm.DragMode));
+    AssertTrue('Active foreground window is dragged',
+               wm.DragClient = cli1);
+    wm.EndDrag();
+
+    // 5. Motion over overlapping region selects foreground window
+    FillChar(motionEv, SizeOf(motionEv), 0);
+    motionEv.response_type := XCB_MOTION_NOTIFY;
+    motionEv.root_x := 504;
+    motionEv.root_y := 250;
+    motionEv.event := cli2.FrameWindow;
+
+    AssertTrue('Motion notify processed',
+               wm.ProcessEvent(Pxcb_generic_event_t(@motionEv)));
+  finally
+    wm.Free();
   end;
 end;
 
