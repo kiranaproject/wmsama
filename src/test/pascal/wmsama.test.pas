@@ -55,6 +55,7 @@ type
     procedure TestTransientDialogStackingAndICCCMPlacement();
     procedure TestDesktopWindowCompositingAndAltTabExclusion();
     procedure TestMultipleWindowsOverlappingResize();
+    procedure TestExtendedClientAreaControls();
   end;
 
 implementation
@@ -2077,6 +2078,68 @@ begin
 
     AssertTrue('Motion notify processed',
                wm.ProcessEvent(Pxcb_generic_event_t(@motionEv)));
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestExtendedClientAreaControls();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  insets: TXCBFrameInsets;
+  pressEv: xcb_button_press_event_t;
+  releaseEv: xcb_button_release_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(8001);
+    cli.IsReparented := True;
+    cli.FrameWindow := 8002;
+    cli.ControlsWindow := 8003;
+    cli.ExtendedClientArea := True;
+    cli.SetGeometry(100, 100, 600, 400);
+
+    // 1. Inset calculation with default Left buttons
+    insets := wm.CalculateControlsInset(cli, 600);
+    AssertTrue('ECA Left inset > 0', insets.Left > 0);
+    AssertEquals('ECA Right inset = 0 for left-aligned', 0, insets.Right);
+    AssertEquals('ECA Top inset matches titlebar height', wm.TitlebarHeight, insets.Top);
+    AssertEquals('ECA Bottom inset = 0', 0, insets.Bottom);
+
+    // 2. Inset calculation with Right buttons
+    wm.ButtonAlignment := baRight;
+    insets := wm.CalculateControlsInset(cli, 600);
+    AssertEquals('ECA Left inset = 0 for right-aligned', 0, insets.Left);
+    AssertTrue('ECA Right inset > 0', insets.Right > 0);
+    AssertEquals('ECA Top inset matches titlebar height', wm.TitlebarHeight, insets.Top);
+
+    // Reset to left
+    wm.ButtonAlignment := baLeft;
+
+    // 3. Mouse Button 1 Down on Maximize Button inside ControlsWindow
+    FillChar(pressEv, SizeOf(pressEv), 0);
+    pressEv.response_type := XCB_BUTTON_PRESS;
+    pressEv.detail := XCB_BUTTON_INDEX_1;
+    pressEv.event := cli.ControlsWindow;
+    pressEv.event_x := 64;
+    pressEv.event_y := 17;
+    wm.ProcessEvent(Pxcb_generic_event_t(@pressEv));
+
+    AssertEquals('PressedButton recorded on ControlsWindow', 2, wm.PressedButton);
+    AssertEquals('PressedWindow recorded as ControlsWindow', cli.ControlsWindow, wm.PressedWindow);
+
+    // 4. Mouse Button 1 Up inside Maximize Button on ControlsWindow
+    FillChar(releaseEv, SizeOf(releaseEv), 0);
+    releaseEv.response_type := XCB_BUTTON_RELEASE;
+    releaseEv.detail := XCB_BUTTON_INDEX_1;
+    releaseEv.event := cli.ControlsWindow;
+    releaseEv.event_x := 64;
+    releaseEv.event_y := 17;
+    wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
+
+    AssertEquals('PressedButton cleared', -1, wm.PressedButton);
+    AssertTrue('Client maximized via ControlsWindow click', wsMaximizedHorz in cli.State);
   finally
     wm.Free();
   end;

@@ -16,6 +16,7 @@ interface
 uses
   Classes, SysUtils, Contnrs, Math,
   Floria.XCB,
+  Floria.XCB.Shape,
   Floria.XCB.WM,
   Floria.XCB.WM.Compositor,
   Floria.XCB.Damage,
@@ -188,6 +189,7 @@ type
     procedure SetButtonLayout(const AValue: AnsiString);
 
     procedure DoOnCompositorAfterRender(ASender: TObject; ACanvas: TFloriaCanvasAgg; const ASceneRect: TXCBRect);
+    procedure DoOnWindowOverlayRender(ASender: TObject; AWindow: TXCBCompositedWindow; ACanvas: TFloriaCanvasAgg; const ARect: TXCBRect);
   protected
     procedure DoOnClientMapped(const AClient: TXCBWMClient); override;
     procedure DoOnClientUnmapped(const AClient: TXCBWMClient); override;
@@ -229,6 +231,9 @@ type
     function GetButtonAt(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer = 0): Integer; overload;
     function IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean; overload;
     function IsTitlebarDraggable(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer = 0): Boolean; overload;
+    function CalculateControlsInset(const AClient: TXCBWMClient; const AWidth: Integer = 0): TXCBFrameInsets;
+    procedure UpdateControlsInsetProperty(const AClient: TXCBWMClient);
+    procedure UpdateControlsWindow(const AClient: TXCBWMClient);
     function GetResizeModeForPoint(const AClient: TXCBWMClient; const ARootX, ARootY: Integer): TXCBDragMode;
 
     // Additional Window Controls (Shade, Keep on Top, Window Menu)
@@ -580,6 +585,7 @@ begin
   // Default modern dark slate background (#1E1E2E)
   FCompositor.SetBackgroundColor(30, 30, 46, 255);
   FCompositor.OnAfterRender := @DoOnCompositorAfterRender;
+  FCompositor.OnWindowOverlayRender := @DoOnWindowOverlayRender;
 end;
 
 destructor TWMSamaCompositingWM.Destroy();
@@ -1399,6 +1405,12 @@ begin
     ApplyClientCornerRadius(AClient, compWin);
   end;
 
+  if AClient.ExtendedClientArea then
+  begin
+    UpdateControlsWindow(AClient);
+    UpdateControlsInsetProperty(AClient);
+  end;
+
   PaintClientFrame(AClient);
   RequestComposite();
 end;
@@ -1510,6 +1522,12 @@ begin
   end
   else
     DoOnClientMapped(AClient);
+
+  if AClient.ExtendedClientArea then
+  begin
+    UpdateControlsWindow(AClient);
+    UpdateControlsInsetProperty(AClient);
+  end;
 
   PaintClientFrame(AClient);
   RequestComposite();
@@ -1658,6 +1676,12 @@ begin
     ApplyClientShadow(AClient, compWin);
     ApplyClientCornerRadius(AClient, compWin);
     compWin.MarkDamaged();
+  end;
+
+  if AClient.ExtendedClientArea then
+  begin
+    UpdateControlsWindow(AClient);
+    UpdateControlsInsetProperty(AClient);
   end;
 
   PaintClientFrame(AClient);
@@ -1875,6 +1899,234 @@ begin
   Result := (AX >= leftEnd) and (AX <= rightStart);
 end;
 
+function TWMSamaCompositingWM.CalculateControlsInset(const AClient: TXCBWMClient; const AWidth: Integer): TXCBFrameInsets;
+var
+  btns: TWMSamaButtonArray;
+  tX, tW, i, w: Integer;
+  leftCount, rightCount: Integer;
+  btnSize, gap, mRight, totalRightWidth: Double;
+begin
+  Result.Left := 0;
+  Result.Right := 0;
+  Result.Top := FTitlebarHeight;
+  Result.Bottom := 0;
+
+  w := AWidth;
+  if (w <= 0) and (AClient <> nil) then
+    w := AClient.CurrentRect.Width;
+  if w <= 0 then w := 820;
+
+  CalculateButtons(AClient, w, btns, tX, tW);
+
+  leftCount := 0;
+  rightCount := 0;
+  for i := 0 to High(btns) do
+  begin
+    if btns[i].Placement = bpLeft then
+      Inc(leftCount)
+    else
+      Inc(rightCount);
+  end;
+
+  btnSize := Max(10.0, Round(FTitlebarHeight * 0.44));
+  gap := Max(5.0, Round(btnSize * 0.50));
+  mRight := Max(8.0, Round(btnSize * 0.75));
+
+  if leftCount > 0 then
+    Result.Left := tX;
+
+  if rightCount > 0 then
+  begin
+    totalRightWidth := (rightCount * btnSize) + ((rightCount - 1) * gap);
+    Result.Right := Round(totalRightWidth + (2 * mRight));
+  end;
+end;
+
+procedure TWMSamaCompositingWM.UpdateControlsInsetProperty(const AClient: TXCBWMClient);
+var
+  insets: TXCBFrameInsets;
+  values: array[0..3] of Cardinal;
+begin
+  if (Connection = nil) or (AClient = nil) or (AClient.ClientWindow = 0) then Exit;
+  if AtomNetWmWindowControlsInset = 0 then Exit;
+
+  insets := CalculateControlsInset(AClient, AClient.CurrentRect.Width);
+  values[0] := insets.Left;
+  values[1] := insets.Right;
+  values[2] := insets.Top;
+  values[3] := insets.Bottom;
+
+  xcb_change_property(
+    Connection,
+    XCB_PROP_MODE_REPLACE,
+    AClient.ClientWindow,
+    AtomNetWmWindowControlsInset,
+    XCB_ATOM_CARDINAL,
+    32,
+    4,
+    @values[0]
+  );
+end;
+
+procedure TWMSamaCompositingWM.UpdateControlsWindow(const AClient: TXCBWMClient);
+var
+  mask: Cardinal;
+  values: array[0..3] of Cardinal;
+  insets: TXCBFrameInsets;
+  rects: array[0..1] of xcb_rectangle_t;
+  rectCount: Integer;
+  w: Integer;
+begin
+  if (Connection = nil) or (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) then Exit;
+
+  if not AClient.ExtendedClientArea then
+  begin
+    if AClient.ControlsWindow <> 0 then
+    begin
+      xcb_destroy_window(Connection, AClient.ControlsWindow);
+      AClient.ControlsWindow := 0;
+    end;
+    Exit;
+  end;
+
+  w := AClient.CurrentRect.Width;
+  if w <= 0 then w := 100;
+
+  insets := CalculateControlsInset(AClient, w);
+
+  if (insets.Left = 0) and (insets.Right = 0) then
+  begin
+    if AClient.ControlsWindow <> 0 then
+    begin
+      xcb_destroy_window(Connection, AClient.ControlsWindow);
+      AClient.ControlsWindow := 0;
+    end;
+    Exit;
+  end;
+
+  if AClient.ControlsWindow = 0 then
+  begin
+    mask := XCB_CW_EVENT_MASK;
+    values[0] := XCB_EVENT_MASK_BUTTON_PRESS or
+                 XCB_EVENT_MASK_BUTTON_RELEASE or
+                 XCB_EVENT_MASK_POINTER_MOTION or
+                 XCB_EVENT_MASK_ENTER_WINDOW or
+                 XCB_EVENT_MASK_LEAVE_WINDOW;
+
+    AClient.ControlsWindow := xcb_generate_id(Connection);
+    xcb_create_window(
+      Connection,
+      0,
+      AClient.ControlsWindow,
+      AClient.FrameWindow,
+      0, 0,
+      w,
+      FTitlebarHeight,
+      0,
+      XCB_WINDOW_CLASS_INPUT_ONLY,
+      XCB_COPY_FROM_PARENT,
+      mask,
+      @values[0]
+    );
+    xcb_map_window(Connection, AClient.ControlsWindow);
+  end;
+
+  values[0] := 0;
+  values[1] := 0;
+  values[2] := w;
+  values[3] := FTitlebarHeight;
+  xcb_configure_window(
+    Connection,
+    AClient.ControlsWindow,
+    XCB_CONFIG_WINDOW_X or XCB_CONFIG_WINDOW_Y or
+    XCB_CONFIG_WINDOW_WIDTH or XCB_CONFIG_WINDOW_HEIGHT,
+    @values[0]
+  );
+
+  if AClient.ClientWindow <> 0 then
+  begin
+    values[0] := AClient.ClientWindow;
+    values[1] := XCB_STACK_MODE_ABOVE;
+    xcb_configure_window(
+      Connection,
+      AClient.ControlsWindow,
+      XCB_CONFIG_WINDOW_SIBLING or XCB_CONFIG_WINDOW_STACK_MODE,
+      @values[0]
+    );
+  end;
+
+  rectCount := 0;
+  if insets.Left > 0 then
+  begin
+    rects[rectCount].x := 0;
+    rects[rectCount].y := 0;
+    rects[rectCount].width := insets.Left;
+    rects[rectCount].height := insets.Top;
+    Inc(rectCount);
+  end;
+  if insets.Right > 0 then
+  begin
+    rects[rectCount].x := Max(0, w - insets.Right);
+    rects[rectCount].y := 0;
+    rects[rectCount].width := insets.Right;
+    rects[rectCount].height := insets.Top;
+    Inc(rectCount);
+  end;
+
+  if rectCount > 0 then
+    xcb_shape_rectangles(Connection, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_INPUT,
+                         XCB_SHAPE_SO_SET, AClient.ControlsWindow, 0, 0, rectCount, @rects[0]);
+end;
+
+procedure TWMSamaCompositingWM.DoOnWindowOverlayRender(ASender: TObject; AWindow: TXCBCompositedWindow; ACanvas: TFloriaCanvasAgg; const ARect: TXCBRect);
+var
+  cli: TXCBWMClient;
+  btns: TWMSamaButtonArray;
+  titleX, titleW, i: Integer;
+  kindVal, btnState: Integer;
+  isHoveredWin: Boolean;
+begin
+  if (AWindow = nil) or (ACanvas = nil) then Exit;
+  cli := FindClient(AWindow.Window);
+  if (cli = nil) or not cli.ExtendedClientArea or (wsMinimized in cli.State) then Exit;
+
+  CalculateButtons(cli, cli.CurrentRect.Width, btns, titleX, titleW);
+  for i := 0 to High(btns) do
+  begin
+    isHoveredWin := (FHoveredWindow <> 0) and
+                    ((FHoveredWindow = cli.FrameWindow) or (FHoveredWindow = cli.ControlsWindow));
+    if ((FPressedWindow = cli.FrameWindow) or (FPressedWindow = cli.ControlsWindow)) and
+       (FPressedButton = i) and (FHoveredButton = i) then
+      btnState := FT_BUTTON_STATE_PRESSED
+    else if (FPressedButton = -1) and isHoveredWin and (FHoveredButton = i) then
+      btnState := FT_BUTTON_STATE_HOVERED
+    else if (btns[i].Kind = sbkPin) and (wsAbove in cli.State) then
+      btnState := FT_BUTTON_STATE_PRESSED
+    else if (btns[i].Kind = sbkShade) and IsClientShaded(cli.ClientWindow) then
+      btnState := FT_BUTTON_STATE_PRESSED
+    else
+      btnState := FT_BUTTON_STATE_NORMAL;
+
+    case btns[i].Kind of
+      sbkClose:    kindVal := FT_WINDOW_BUTTON_CLOSE;
+      sbkMinimize: kindVal := FT_WINDOW_BUTTON_MINIMIZE;
+      sbkMaximize:
+      begin
+        if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
+          kindVal := FT_WINDOW_BUTTON_RESTORE
+        else
+          kindVal := FT_WINDOW_BUTTON_MAXIMIZE;
+      end;
+      sbkShade:    kindVal := FT_WINDOW_BUTTON_SHADE;
+      sbkPin:      kindVal := FT_WINDOW_BUTTON_PIN;
+      sbkMenu:     kindVal := FT_WINDOW_BUTTON_MENU;
+    end;
+
+    FtDrawWindowButton(ACanvas, ARect.X + btns[i].X, ARect.Y + btns[i].Y, btns[i].Size, btns[i].Size,
+                       kindVal, FWindowButtonStyle, btnState, FThemeDarkMode);
+  end;
+end;
+
 function TWMSamaCompositingWM.GetResizeModeForPoint(const AClient: TXCBWMClient; const ARootX, ARootY: Integer): TXCBDragMode;
 var
   wx, wy, ww, wh: Integer;
@@ -2009,6 +2261,12 @@ begin
     xcb_flush(Connection);
   end;
 
+  if AClient.ExtendedClientArea then
+  begin
+    UpdateControlsWindow(AClient);
+    UpdateControlsInsetProperty(AClient);
+  end;
+
   PaintClientFrame(AClient);
   RequestComposite();
 end;
@@ -2092,6 +2350,12 @@ begin
     end;
   end;
 
+  if AClient.ExtendedClientArea then
+  begin
+    UpdateControlsWindow(AClient);
+    UpdateControlsInsetProperty(AClient);
+  end;
+
   PaintClientFrame(AClient);
   RequestComposite();
 end;
@@ -2154,6 +2418,12 @@ begin
     xcb_flush(Connection);
   end;
 
+  if AClient.ExtendedClientArea then
+  begin
+    UpdateControlsWindow(AClient);
+    UpdateControlsInsetProperty(AClient);
+  end;
+
   PaintClientFrame(AClient);
   RequestComposite();
 end;
@@ -2195,6 +2465,13 @@ var
   titleX, titleW: Integer;
 begin
   if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) or (wsMinimized in AClient.State) then Exit;
+
+  if AClient.ExtendedClientArea then
+  begin
+    Inc(FFramePaintCount);
+    RequestComposite();
+    Exit;
+  end;
 
   w := AClient.CurrentRect.Width;
   h := AClient.CurrentRect.Height;
@@ -2701,6 +2978,11 @@ begin
   inherited DoOnClientPropertiesChanged(AClient);
   if AClient <> nil then
   begin
+    if AClient.ExtendedClientArea then
+    begin
+      UpdateControlsWindow(AClient);
+      UpdateControlsInsetProperty(AClient);
+    end;
     PaintClientFrame(AClient);
     RequestComposite();
   end;
@@ -3143,16 +3425,16 @@ begin
       if DragMode = dmNone then
       begin
         cli := FindClient(motionEv^.event);
-        if (cli <> nil) and (motionEv^.event = cli.FrameWindow) then
+        if (cli <> nil) and ((motionEv^.event = cli.FrameWindow) or ((cli.ControlsWindow <> 0) and (motionEv^.event = cli.ControlsWindow))) then
         begin
           localX := motionEv^.event_x;
           localY := motionEv^.event_y;
           newBtn := GetButtonAt(localX, localY, cli, cli.CurrentRect.Width);
 
-          if (newBtn <> FHoveredButton) or (cli.FrameWindow <> FHoveredWindow) then
+          if (newBtn <> FHoveredButton) or (motionEv^.event <> FHoveredWindow) then
           begin
             FHoveredButton := newBtn;
-            FHoveredWindow := cli.FrameWindow;
+            FHoveredWindow := motionEv^.event;
             PaintClientFrame(cli);
             RequestComposite();
           end;
@@ -3242,14 +3524,14 @@ begin
         FPressedWindow := 0;
 
         cli := FindClient(btnEv^.event);
-        if (cli <> nil) and (cli.FrameWindow = pressedWin) then
+        if (cli <> nil) and ((cli.FrameWindow = pressedWin) or ((cli.ControlsWindow <> 0) and (cli.ControlsWindow = pressedWin))) then
         begin
           localX := btnEv^.event_x;
           localY := btnEv^.event_y;
           releasedBtn := GetButtonAt(localX, localY, cli, cli.CurrentRect.Width);
 
           FHoveredButton := releasedBtn;
-          FHoveredWindow := cli.FrameWindow;
+          FHoveredWindow := btnEv^.event;
           PaintClientFrame(cli);
           RequestComposite();
 
@@ -3439,8 +3721,8 @@ begin
           Exit(True);
         end;
 
-        // 2. Clicks on frame window decorations
-        if btnEv^.event = cli.FrameWindow then
+        // 2. Clicks on frame window decorations or overlay controls window
+        if (btnEv^.event = cli.FrameWindow) or ((cli.ControlsWindow <> 0) and (btnEv^.event = cli.ControlsWindow)) then
         begin
           localX := btnEv^.event_x;
           localY := btnEv^.event_y;
@@ -3468,9 +3750,9 @@ begin
           if (btnIdx >= 0) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
           begin
             FPressedButton := btnIdx;
-            FPressedWindow := cli.FrameWindow;
+            FPressedWindow := btnEv^.event;
             FHoveredButton := btnIdx;
-            FHoveredWindow := cli.FrameWindow;
+            FHoveredWindow := btnEv^.event;
             PaintClientFrame(cli);
             RequestComposite();
             Exit(True);
