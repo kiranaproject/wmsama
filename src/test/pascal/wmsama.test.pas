@@ -60,6 +60,12 @@ type
     procedure TestExtendedClientAreaFrameHasNoTitlebar();
     procedure TestExtendedClientAreaDisabledWithoutProperty();
     procedure TestExtendedClientAreaPublishesInsetProperty();
+    procedure TestDragStopsWithTitlebarAtWorkareaBottom();
+    procedure TestDragBottomDetentNeedsExtraTravel();
+    procedure TestDragCannotPushTitlebarAboveWorkarea();
+    procedure TestDragBoundsIgnoreTallWindows();
+    procedure TestDragClampDoesNotBecomeRestoreTarget();
+    procedure TestDragBoundsSameForExtendedClientArea();
   end;
 
 implementation
@@ -2480,6 +2486,222 @@ begin
   finally
     if Obs <> nil then xcb_disconnect(Obs);
     xcb_disconnect(Conn);
+  end;
+end;
+
+// Dragging is bounded by the work area, not the screen. On a desktop with panels
+// the work area is the screen minus the struts, which is why the limits follow
+// the panels rather than the physical edges: before this, a window could be
+// dragged until its titlebar was behind the bottom panel or above the top one,
+// leaving no bar to grab.
+//
+// These run offline with a synthetic work area, so the arithmetic is checked
+// without needing shellsama or an X server.
+procedure TWMSamaTest.TestDragStopsWithTitlebarAtWorkareaBottom();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  limitY: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 34, 1280, 728);   // top and bottom panels
+    cli := wm.ManageWindow(9001);
+    cli.SetGeometry(100, 100, 800, 500);
+
+    // The titlebar must stay inside the work area: 34 + 728 - 34 = 728.
+    limitY := wm.Workarea.Y + wm.Workarea.Height - wm.TitlebarHeight;
+    wm.BeginDrag(cli, dmMove, 500, 200);
+    AssertEquals('limit Y is titlebar at the work-area bottom', limitY, wm.DragLimitY);
+
+    // Drag far past the limit. The window stops with its titlebar on the bottom
+    // edge; it must not follow the pointer to 2000.
+    wm.UpdateDrag(500, 200 + 2000);
+    AssertEquals('window stops at the limit', limitY, cli.CurrentRect.Y);
+    AssertEquals('titlebar bottom is exactly the work-area bottom',
+                 wm.Workarea.Bottom(), cli.CurrentRect.Y + wm.TitlebarHeight);
+    AssertTrue('drag reports it is clamped', wm.DragDetentPassed);
+    wm.EndDrag();
+
+    // The window is still reachable: its titlebar is inside the work area, so a
+    // click there starts another drag rather than hitting a panel.
+    AssertTrue('titlebar is above the work-area bottom',
+               cli.CurrentRect.Y + wm.TitlebarHeight <= wm.Workarea.Bottom());
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestDragBottomDetentNeedsExtraTravel();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  detentY, detentBottom: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 34, 1280, 728);
+    cli := wm.ManageWindow(9002);
+    cli.SetGeometry(100, 100, 800, 500);
+
+    // Fully visible: bottom edge flush with the bottom of the work area.
+    detentY := wm.Workarea.Bottom() - cli.CurrentRect.Height;
+    detentBottom := wm.Workarea.Bottom();
+
+    // The limits are measured against the window being dragged, so they exist
+    // only once a drag has started.
+    wm.BeginDrag(cli, dmMove, 500, 200);
+    AssertEquals('detent Y is the fully-visible bottom edge', detentY, wm.DragDetentY);
+
+    // A slow drag that reaches the detent is held there, not passed through.
+    wm.UpdateDrag(500, 200 + (detentY - 100) + 2);
+    AssertEquals('held at the detent on arrival', detentY, cli.CurrentRect.Y);
+    AssertFalse('detent not yet passed', wm.DragDetentPassed);
+
+    // A few more pixels still do not get through: that is the resistance.
+    wm.UpdateDrag(500, 200 + (detentY - 100) + 4);
+    AssertEquals('still held part way through the detent', detentY, cli.CurrentRect.Y);
+    AssertFalse('detent still not passed', wm.DragDetentPassed);
+
+    // Enough travel and it gives way.
+    wm.UpdateDrag(500, 200 + (detentY - 100) + DragDetentPixels + 1);
+    AssertTrue('detent gives way after the extra travel', wm.DragDetentPassed);
+    AssertTrue('window moved past the detent', cli.CurrentRect.Y > detentY);
+    AssertEquals('detent no longer applies on the way down',
+                 wm.Workarea.Bottom() - cli.CurrentRect.Height, detentBottom - cli.CurrentRect.Height);
+    wm.EndDrag();
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestDragCannotPushTitlebarAboveWorkarea();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // A 34px top panel means the work area starts at Y = 34. Marco stops the
+    // titlebar at the top panel and so does this.
+    wm.Workarea := TXCBRect.Create(0, 34, 1280, 728);
+    cli := wm.ManageWindow(9003);
+    cli.SetGeometry(100, 300, 800, 300);
+
+    wm.BeginDrag(cli, dmMove, 500, 320);
+    // Try to drag the window 400px above the top of the work area.
+    wm.UpdateDrag(500, -80);
+    AssertEquals('titlebar stops at the top of the work area',
+                 wm.Workarea.Y, cli.CurrentRect.Y);
+    wm.EndDrag();
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestDragBoundsIgnoreTallWindows();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 34, 1280, 300);
+    cli := wm.ManageWindow(9004);
+    // Taller than the work area: no Y puts the bottom inside it, so clamping
+    // would pin the window. The drag must be left alone instead.
+    cli.SetGeometry(100, 40, 400, 500);
+
+    wm.BeginDrag(cli, dmMove, 200, 60);
+    AssertEquals('no bottom detent for an oversized window', High(Integer), wm.DragDetentY);
+    wm.UpdateDrag(200, 120);
+    AssertEquals('oversized window follows the pointer', 100, cli.CurrentRect.Y);
+    wm.EndDrag();
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestDragClampDoesNotBecomeRestoreTarget();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 34, 1280, 728);
+    cli := wm.ManageWindow(9005);
+    cli.SetGeometry(100, 100, 800, 400);
+    cli.RestoredRect := TXCBRect.Create(100, 100, 800, 400);
+
+    // Drag to the bottom limit, then back up to a normal position, then release.
+    // The restore target must be the position it was dropped at, not the clamped
+    // one it passed through: Move() writes RestoredRect, and a limit that leaked
+    // into the restore target would make "unmaximize" jump the window to the
+    // bottom edge.
+    wm.BeginDrag(cli, dmMove, 500, 120);
+    wm.UpdateDrag(500, 5000);
+    AssertEquals('clamped at the limit', wm.DragLimitY, cli.CurrentRect.Y);
+
+    wm.UpdateDrag(500, 320);
+    wm.EndDrag();
+
+    AssertEquals('window dropped where the drag left it', 300, cli.CurrentRect.Y);
+    AssertEquals('restore target follows the drop, not the clamp',
+                 300, cli.RestoredRect.Y);
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+// An extended-client-area window draws its own titlebar, but the reserved strip is
+// the same height as the frame titlebar (it is what becomes the `top` inset), so
+// the drag limits are the same for both decoration models. Pinned down because the
+// obvious "no exterior titlebar, so no reserved height" reading would let the whole
+// window slide off the bottom of the screen.
+procedure TWMSamaTest.TestDragBoundsSameForExtendedClientArea();
+var
+  wm: TWMSamaCompositingWM;
+  plain, extended: TXCBWMClient;
+  insets: TXCBFrameInsets;
+  plainLimit, extendedLimit: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 38, 1280, 724);
+
+    plain := wm.ManageWindow(9006);
+    plain.SetGeometry(100, 100, 800, 400);
+    wm.BeginDrag(plain, dmMove, 500, 120);
+    plainLimit := wm.DragLimitY;
+    wm.EndDrag();
+
+    extended := wm.ManageWindow(9007);
+    extended.ExtendedClientArea := True;
+    extended.SetGeometry(100, 100, 800, 400);
+    insets := wm.CalculateControlsInset(extended, 800);
+    wm.BeginDrag(extended, dmMove, 500, 120);
+    extendedLimit := wm.DragLimitY;
+
+    AssertTrue('extended client reserves a top strip', insets.Top > 0);
+    AssertEquals('limit is the same for both decoration models',
+                 plainLimit, extendedLimit);
+    AssertEquals('limit is the work-area bottom minus the reserved strip',
+                 wm.Workarea.Bottom() - insets.Top, extendedLimit);
+
+    wm.UpdateDrag(500, 5000);
+    AssertEquals('extended client stops with the strip at the panel',
+                 extendedLimit, extended.CurrentRect.Y);
+    wm.EndDrag();
+  finally
+    plain := nil;
+    extended := nil;
+    wm.Free();
   end;
 end;
 

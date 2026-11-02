@@ -74,6 +74,14 @@ type
   Pxcb_map_notify_event_t = ^xcb_map_notify_event_t;
   Pxcb_unmap_notify_event_t = ^xcb_unmap_notify_event_t;
 
+const
+  // How far a move drag must travel past the point where the window's bottom edge
+  // meets the bottom of the work area before it carries on. This is the "a few
+  // pixels of resistance" at the bottom edge, and it is deliberately small: it
+  // should be noticed, not fought.
+  DragDetentPixels = 8;
+
+type
   TWMSamaCompositingWM = class(TXCBWindowManager)
   private
     FCompositor         : TXCBCompositor;
@@ -153,6 +161,26 @@ type
     FLastDragX          : Integer;
     FLastDragY          : Integer;
 
+    // Drag bounds: keep the titlebar inside the work area.
+    //
+    // Without this, a drag can push the titlebar above the top panel or below the
+    // bottom one, leaving a window with no grabbable bar. Marco clamps the same
+    // way, and `shellsama`'s panels are part of the work area, so the limits follow
+    // the struts rather than the screen edges.
+    //
+    // Two limits and one detent:
+    //
+    //   top limit     frame Y >= workarea.Y                  titlebar at the top edge
+    //   bottom limit  frame Y + titlebar <= workarea.Bottom  titlebar at the bottom edge
+    //   detent        frame bottom at workarea.Bottom        the whole window is
+    //                                                        visible; a few pixels
+    //                                                        of extra drag are
+    //                                                        needed to pass it
+    //
+    // The detent is what makes the bottom edge feel like it resists rather than
+    // sliding straight past the fully-visible position.
+    FDragDetentPassed   : Boolean;
+    FDragFrameHeight    : Integer;   // height the limits were computed against
     // The floating geometry to return to, captured when a drag starts.
     //
     // Un-maximizing mid-drag is implemented as Restore() followed by Move(), and
@@ -169,6 +197,22 @@ type
     FPreDragRestoredValid: Boolean;
 
     function AcquireKeyboardGrab(): Boolean;
+
+    // Lowest Y a move-drag may place a window at: the point where its titlebar
+    // would leave the bottom of the work area. Returns High(Integer) when the
+    // window is taller than the work area and no position satisfies both limits.
+    function GetDragLimitY(): Integer;
+    // How much of the top of the frame is the titlebar the user grabs: the frame
+    // titlebar, or nothing for a client that draws its own.
+    function DragTitlebarExtent(): Integer;
+    // The Y at which the window's bottom edge meets the bottom of the work area.
+    // A drag has to travel DragDetentPixels past this before it continues.
+    function GetDragDetentY(): Integer;
+
+    // One step of a move drag, separated from UpdateDrag so the limit and detent
+    // arithmetic can be tested without a display. Returns the Y the window should
+    // be placed at.
+    function ResolveDragY(const ARawY: Integer; out ADetentPassed: Boolean): Integer;
 
     procedure SetCompositorEnabled(const AValue: Boolean);
     procedure SetBlurEnabled(const AValue: Boolean);
@@ -291,6 +335,13 @@ type
     property WindowMenuRect     : TXCBRect               read FWindowMenuRect;
     property ActiveSnap         : TWMSnapTarget  read FActiveSnap;
     property SnapPreviewRect    : TXCBRect       read FSnapPreviewRect;
+
+    // Drag bounds, exposed for tests: DragLimitY is the lowest Y a drag may place
+    // the window at, DragDetentY where its bottom edge meets the work area, and
+    // DragDetentPassed whether the current drag has been pushed past that edge.
+    property DragLimitY         : Integer        read GetDragLimitY;
+    property DragDetentY        : Integer        read GetDragDetentY;
+    property DragDetentPassed   : Boolean        read FDragDetentPassed;
     property AltTabActive       : Boolean        read FAltTabActive;
     property AltTabIndex        : Integer        read FAltTabIndex;
     property KeyboardGrabHeld   : Boolean        read FKeyboardGrabHeld;
@@ -557,6 +608,9 @@ begin
   FActiveSnap := snapNone;
   FSnapPreviewRect := TXCBRect.Create(0, 0, 0, 0);
   FPreSnapRect := TXCBRect.Create(0, 0, 0, 0);
+
+  FDragDetentPassed := False;
+  FDragFrameHeight := 0;
 
   FAltTabActive := False;
   FAltTabIndex := 0;
@@ -2745,6 +2799,13 @@ begin
   FLastDragX := ARootX;
   FLastDragY := ARootY;
 
+  // A fresh drag starts with the detent armed and the limits measured against the
+  // window being dragged.
+  FDragDetentPassed := False;
+  FDragFrameHeight := 0;
+  if (AClient <> nil) and (AMode = dmMove) then
+    FDragFrameHeight := AClient.CurrentRect.Height;
+
   // Remember where this window came from, before the drag can overwrite it. See
   // FPreDragRestoredRect for why this cannot be recovered later.
   FPreDragRestoredValid := False;
@@ -2758,6 +2819,105 @@ begin
   inherited BeginDrag(AClient, AMode, ARootX, ARootY);
 end;
 
+function TWMSamaCompositingWM.DragTitlebarExtent(): Integer;
+begin
+  // One number for both decoration models. An extended-client-area window draws
+  // its own titlebar inside the canvas, but it is the same FTitlebarHeight row:
+  // CalculateControlsInset reports that height as its `top` inset, which is the
+  // strip the client is told to keep clear. So the reachable titlebar is the same
+  // size either way, and there is nothing to branch on.
+  Result := FTitlebarHeight;
+end;
+
+function TWMSamaCompositingWM.GetDragLimitY(): Integer;
+var
+  wa: TXCBRect;
+  th: Integer;
+begin
+  Result := High(Integer);
+  if FDragFrameHeight <= 0 then Exit;
+
+  wa := Workarea;
+  if (wa.Width <= 0) or (wa.Height <= 0) then Exit;
+
+  th := DragTitlebarExtent();
+  if (th < 0) or (th > wa.Height) then Exit;
+
+  // The titlebar, not the frame, is what has to stay reachable. Keeping the whole
+  // frame inside would be stricter than Marco and would stop the window dead on
+  // the detent, leaving no way to push it any further down.
+  Result := wa.Y + wa.Height - th;
+
+  // A work area shorter than the titlebar is nonsense; do not enforce a limit
+  // that would invert the range.
+  if Result < wa.Y then
+    Result := High(Integer);
+end;
+
+function TWMSamaCompositingWM.GetDragDetentY(): Integer;
+var
+  wa: TXCBRect;
+  h: Integer;
+begin
+  Result := High(Integer);
+  if FDragFrameHeight <= 0 then Exit;
+
+  wa := Workarea;
+  if (wa.Width <= 0) or (wa.Height <= 0) then Exit;
+
+  h := FDragFrameHeight;
+  if h <= 0 then Exit;
+
+  // Where the window is exactly flush with the bottom of the work area: nothing
+  // is hidden yet, and any further drag starts to push the titlebar down.
+  Result := wa.Y + wa.Height - h;
+
+  // A window that already overflows the work area has no meaningful detent.
+  if Result < wa.Y then
+    Result := High(Integer);
+end;
+
+function TWMSamaCompositingWM.ResolveDragY(const ARawY: Integer; out ADetentPassed: Boolean): Integer;
+var
+  topY, limitY, detentY: Integer;
+begin
+  ADetentPassed := False;
+
+  topY := Workarea.Y;
+  limitY := GetDragLimitY();
+  detentY := GetDragDetentY();
+
+  // Above the top of the work area: the titlebar would be behind the top panel.
+  // This end of the range is a plain stop, with no detent.
+  if ARawY < topY then
+    Exit(topY);
+
+  // Tall window, or no work area: no lower edges to enforce.
+  if (limitY = High(Integer)) or (detentY = High(Integer)) then
+    Exit(ARawY);
+
+  // Past the point where the titlebar would leave the work area. The window
+  // stops here; the drag stays clamped until the pointer comes back up.
+  if ARawY >= limitY then
+  begin
+    ADetentPassed := True;
+    Exit(limitY);
+  end;
+
+  // Between "fully visible" and "titlebar at the bottom edge": hold at the
+  // detent until the pointer has travelled DragDetentPixels past it. Re-entering
+  // this range from below does not re-arm the detent, so dragging back up is not
+  // sticky as well.
+  if (not FDragDetentPassed) and (ARawY >= detentY) and
+     (ARawY < detentY + DragDetentPixels) then
+    Exit(detentY);
+
+  if ARawY >= detentY then
+    ADetentPassed := True;
+
+  Result := ARawY;
+end;
+
 procedure TWMSamaCompositingWM.UpdateDrag(const ARootX, ARootY: Integer);
 var
   sw, sh, threshold, deltaDist: Integer;
@@ -2765,13 +2925,16 @@ var
   wa: TXCBRect;
   targetMon: TXCBMonitor;
   hasLeftNeighbor, hasRightNeighbor, hasTopNeighbor: Boolean;
+  wasRestoring, detentNow: Boolean;
 begin
   deltaDist := Sqr(ARootX - FLastDragX) + Sqr(ARootY - FLastDragY);
   FLastDragX := ARootX;
   FLastDragY := ARootY;
 
-  if (DragClient <> nil) and (DragMode = dmMove) and
-     ((wsMaximizedHorz in DragClient.State) or (wsTiledLeft in DragClient.State) or (wsTiledRight in DragClient.State)) then
+  wasRestoring := (DragClient <> nil) and (DragMode = dmMove) and
+     ((wsMaximizedHorz in DragClient.State) or (wsTiledLeft in DragClient.State) or (wsTiledRight in DragClient.State));
+
+  if wasRestoring then
   begin
     DragClient.Restore();
     // Center title bar horizontally under cursor
@@ -2784,10 +2947,30 @@ begin
       newY := Max(Workarea.Y, ARootY - (FTitlebarHeight div 2));
 
     DragClient.Move(newX, newY);
+    // Re-anchor the drag at the restored geometry: from here the window is
+    // floating, so it follows the pointer like any other move.
     UpdateDragOrigin(ARootX, ARootY, TXCBRect.Create(newX, newY, DragClient.CurrentRect.Width, DragClient.CurrentRect.Height));
-  end;
+    FDragDetentPassed := False;
+  end
+  else
+  begin
+    inherited UpdateDrag(ARootX, ARootY);
 
-  inherited UpdateDrag(ARootX, ARootY);
+    // The base class derives the position from the drag origin, so its result
+    // already accounts for the grab offset: taking the titlebar mid-bar does not
+    // jump the window. Clamp that result rather than recomputing from the pointer.
+    if (DragClient <> nil) and (DragMode = dmMove) then
+    begin
+      newY := ResolveDragY(DragClient.CurrentRect.Y, detentNow);
+      FDragDetentPassed := detentNow;
+      // Move() also writes RestoredRect, which is correct here: the clamped Y is
+      // where the window really is, so it is the right thing to restore to. A drag
+      // that continues is recomputed from the original drag origin, not from this
+      // position, so passing through the limit on the way down leaves no trace.
+      if newY <> DragClient.CurrentRect.Y then
+        DragClient.Move(DragClient.CurrentRect.X, newY);
+    end;
+  end;
 
   if (DragClient = nil) or (DragMode <> dmMove) or (FCompositor = nil) then Exit;
 

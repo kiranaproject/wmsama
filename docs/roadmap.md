@@ -1565,7 +1565,87 @@ client was managed" for that reason.
 
 ---
 
-## 5. Deliberate Non-Goals
+## 5. Drag Bounds
+
+### The defect
+
+**Found by:** user report — *"I can drag it way far to the top and the bottom bypassing the
+shellsama panels"*.
+
+Move-drags were bounded by nothing. The window followed the pointer anywhere, including above the
+top panel and behind the bottom one, and at the bottom it did not stop even when its titlebar had
+left the work area. A window parked there has no reachable titlebar, so it cannot be dragged back
+except by another means.
+
+Marco clamps this, and the request was to match it, including a "few pixels of resistance" when the
+window's bottom edge reaches the bottom of the work area.
+
+### Rules
+
+The bound is the **work area**, not the screen: `_NET_WORKAREA` minus `shellsama`'s panel struts. The
+work area was already computed correctly (`RecomputeWorkareas` applies every client's
+`_NET_WM_STRUT_PARTIAL`), so the drag path is the only thing that had to change.
+
+A move drag is resolved against three lines:
+
+| Line | Position | Behaviour |
+| :--- | :--- | :--- |
+| top stop | `workarea.Y` | hard stop; the titlebar cannot go above the top panel |
+| detent | `workarea.Bottom() - frameHeight` | held for `DragDetentPixels` past it |
+| bottom stop | `workarea.Bottom() - titlebarHeight` | hard stop; titlebar flush with the bottom panel |
+
+The detent is the soft edge: at the detent the window is exactly flush with the bottom of the work
+area and nothing is hidden yet, and the drag has to travel 8 more pixels before it carries on. It
+arms once per drag, so dragging back up is not sticky. A window taller than the work area has no
+meaningful detent and no satisfiable limit, so neither is enforced rather than pinning it.
+
+Both decoration models use the same 34px strip. An extended-client-area window draws its own
+titlebar, but `CalculateControlsInset` reports that same height as its `top` inset, so the reachable
+strip is identical. Assuming "no exterior titlebar, therefore no reserved height" would let the whole
+window slide off the bottom.
+
+### Acceptance checks
+
+Offline, with a synthetic 1280x728 work area at `Y = 34` (two 38px panels on a 1280x800 screen):
+
+1. Dragging 2000px past the bottom stops the window with `Y + titlebarHeight = workarea.Bottom()`.
+   `TestDragStopsWithTitlebarAtWorkareaBottom`.
+2. A slow drag onto the detent is held there and only continues after 8px of extra travel.
+   `TestDragBottomDetentNeedsExtraTravel`.
+3. Dragging above the work area stops at `workarea.Y`. `TestDragCannotPushTitlebarAboveWorkarea`.
+4. A window taller than the work area is left alone.
+   `TestDragBoundsIgnoreTallWindows`.
+5. Both decoration models produce the same limit.
+   `TestDragBoundsSameForExtendedClientArea`.
+
+Live, with real pointer motion through the WM's grab and motion handling, and two `DOCK` windows
+carrying struts the way `shellsama`'s panels do:
+
+| Measurement | Result |
+| :--- | :--- |
+| work area with 38px panels top and bottom | `0,38 1280x724` |
+| drag down to pointer `Y = 900` | frame stops at `728`, titlebar flush with the bottom panel |
+| drag up to pointer `Y = -100` | frame stops at `38`, titlebar flush with the top panel |
+| drag through the detent, 2px steps | frame holds at `466` for 6px of pointer travel, then gives way |
+
+Sabotage-verified four ways: removing the bottom stop lets the window reach `2100`, removing the
+detent slides straight through, removing the top stop lets it reach `-100`, and treating extended
+clients as having no strip lets them reach `762` instead of `728`.
+
+### Notes
+
+- **The clamp does not leak into the restore target.** `Move()` writes `RestoredRect`, but a drag
+  that continues is recomputed from the original drag origin, not from the clamped position, so
+  passing through the limit leaves nothing behind. A drag *released* at the limit restores to the
+  limit, which is where the window actually is.
+- **Multi-monitor is only partly covered.** The limits are computed against the primary work area,
+  which is what `Workarea` reports. Dragging across monitors is not clamped per monitor yet.
+- **The 8px detent is a constant**, `DragDetentPixels`, not configurable. It is small enough that
+  making it a flag seemed premature.
+
+---
+
+## 6. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
 accident.
@@ -1589,7 +1669,7 @@ accident.
 
 ---
 
-## 6. Definition of Done (per item)
+## 7. Definition of Done (per item)
 
 An item may be marked `☑` only when all of the following hold:
 
@@ -1605,7 +1685,7 @@ An item may be marked `☑` only when all of the following hold:
 
 ---
 
-## 7. Progress Log
+## 8. Progress Log
 
 Append-only. One row per landed item (or per significant investigation that changed the plan).
 
@@ -1646,4 +1726,5 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-28 | WM-17 | done | `f6a1584` | **New finding.** Clients were destroyed with the WM. Now unparented + round-tripped before disconnect; xterm survives 3/3 (was 3/3 dead); WM restart preserves the session. Flush alone proven insufficient |
 | 2026-11-01 | ECA | done | `867128c` + `72a36d4` + `ab8611c` | **Feature, not an audit item.** Extended client area: `_NET_WM_EXTENDED_CLIENT_AREA` in, `_NET_WM_WINDOW_CONTROLS_INSET` out, framed with no exterior titlebar, buttons overlaid in an `InputOnly` window shaped to the reserved rect. `72a36d4` added the missing geometry update on dynamic property change and `ab8611c` the flush/extent sync on map |
 | 2026-11-02 | ECA | done | working tree | **Acceptance and harness pass.** Insets now checked against the buttons actually drawn, width-independence, non-extended clients reserving nothing, and the published property read back off the wire with `format=32` and four elements. Tests 38 -> 42, sabotage-verified three ways. Also stopped three live tests from silently passing when they could not take the display: they raise `EIgnoredTest` now, so a skip is visible instead of reporting a pass for a body that never ran |
+| 2026-11-02 | Drag bounds | done | working tree | **Found by user report:** windows could be dragged past the top and bottom panels, leaving an unreachable titlebar. Move-drags are now bounded by `_NET_WORKAREA` (so the panels are respected via their struts) with a hard stop at each end and an 8px detent where the window's bottom edge meets the work area. Verified with a real pointer under Xephyr plus two strut-carrying DOCK windows: stops at 728 and 38 on a 1280x800 screen with 38px panels. Tests 42 -> 48, sabotage-verified four ways |
 | | | | | |
