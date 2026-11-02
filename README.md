@@ -30,6 +30,10 @@ client-area interference, edge snap tiling, divider resizing, and cursor-centred
   compositor and stacked above managed windows.
 - **Vector titlebar controls.** Close, Maximize/Restore, Minimize, Shade (rollup), Pin (sticky) and
   Window Menu buttons, drawn through `floria-toolkit`.
+- **Panels stay on top.** `shellsama`'s panels are dock windows and are composited above ordinary
+  windows, so a window dragged to the bottom cannot cover the taskbar. Fullscreen windows cover the
+  panels; popup menus open above them. The same rule applies to X stacking, so clicks on an overlap
+  reach the panel, and it holds with `--no-compositor` too.
 
 ### Resize from the outer margin only
 

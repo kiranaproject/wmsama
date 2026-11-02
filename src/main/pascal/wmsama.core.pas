@@ -246,6 +246,19 @@ type
     procedure DoOnTick(const AElapsedMs: Integer); override;
   public
     function IsWindowMenu(const AWindow: xcb_window_t): Boolean;
+    // Compositor paint order is list order, lowest first. Everything that is not a
+    // panel sits between the desktop and the panels, so a window can never be drawn
+    // over a shell panel.
+    function CompositorStackRank(const AClient: TXCBWMClient): Integer;
+    // Move a managed window to the top of its own band, leaving desktop windows
+    // below it and panels above it.
+    procedure RaiseInCompositor(const AClient: TXCBWMClient);
+    // The same banding rule for the server's stacking order, so it also holds with
+    // --no-compositor and so clicks land on the panel where they overlap a window.
+    procedure RaiseInStacking(const AClient: TXCBWMClient);
+    // Server stacking order for clients, lowest first. Only the X attributes are
+    // read, so this is cheap enough to run when raising.
+    procedure GetStackOrder(out AOrder: array of xcb_window_t; out ACount: Integer);
     procedure ApplyClientCornerRadius(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
     procedure ApplyClientShadow(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
     procedure UpdateAllWindowShadows();
@@ -873,6 +886,10 @@ begin
                       compWin.BottomCornerRadius := 0;
                       compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
                     end;
+                    // An override-redirect popup belongs to no client, so it has
+                    // no band of its own and goes above everything, panels included.
+                    // A context menu the panel covers is unusable; a panel covered
+                    // by a menu is only briefly not visible.
                     FCompositor.Windows.Extract(compWin);
                     FCompositor.Windows.Add(compWin);
                     compWin.MarkDamaged();
@@ -1031,6 +1048,171 @@ begin
   metrics := TXCBFrameMetrics.Create(FTitlebarHeight, FrameMetrics.BorderWidth);
   FrameMetrics := metrics;
   PaintAllFrames();
+end;
+
+const
+  // Compositor stacking bands, low to high. Paint order is list order, so a higher
+  // band always covers a lower one.
+  //
+  // Panels are deliberately above ordinary windows. Marco and Mutter both keep
+  // docks on top: a window parked over the bottom panel otherwise hides the
+  // taskbar, and since the drag now stops with the titlebar at the panel's edge,
+  // the window body legitimately overlaps it. Two panels overlapping each other is
+  // not the compositor's problem to arbitrate -- their struts keep them apart.
+  csrDesktop      = 0;
+  csrNormal       = 1;
+  csrPanel        = 2;
+  // Fullscreen windows cover the panels, as they do everywhere else. A panel drawn
+  // over a fullscreen video is worse than the panel being hidden for a while.
+  csrFullscreen   = 3;
+
+function TWMSamaCompositingWM.CompositorStackRank(const AClient: TXCBWMClient): Integer;
+begin
+  Result := csrNormal;
+  if AClient = nil then Exit;
+
+  if AClient.WindowType = wtDesktop then
+    Result := csrDesktop
+  else if AClient.WindowType = wtDock then
+    Result := csrPanel
+  else if wsFullscreen in AClient.State then
+    Result := csrFullscreen;
+end;
+
+procedure TWMSamaCompositingWM.RaiseInCompositor(const AClient: TXCBWMClient);
+var
+  compWin: TXCBCompositedWindow;
+  targetWin: xcb_window_t;
+  myRank: Integer;
+  i: Integer;
+  other: TXCBWMClient;
+begin
+  if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+    targetWin := AClient.FrameWindow
+  else
+    targetWin := AClient.ClientWindow;
+
+  compWin := FCompositor.FindWindow(targetWin);
+  if compWin = nil then Exit;
+
+  myRank := CompositorStackRank(AClient);
+
+  // Remove first, then scan. Scanning before the removal gives an index that is one
+  // too high once the window itself is gone: with a single window in the list the
+  // scan lands on that window, and the resulting Insert(1) is past the end of the
+  // now-empty list.
+  FCompositor.Windows.Extract(compWin);
+
+  // Insert directly above the last window in this band, so the order inside a band
+  // is still "whoever was raised last". A plain Add() would put the window above
+  // the panels.
+  i := FCompositor.Windows.Count - 1;
+  while i >= 0 do
+  begin
+    // Which managed client owns that composited window, if any. Override-redirect
+    // popups belong to no client, so they rank as ordinary windows and a normal
+    // window is allowed to rise above a stale popup entry.
+    other := FindClient(TXCBCompositedWindow(FCompositor.Windows[i]).Window);
+    if other = nil then
+      other := FindClient(TXCBCompositedWindow(FCompositor.Windows[i]).ClientWindow);
+
+    if (other <> nil) and (CompositorStackRank(other) > myRank) then
+      Dec(i)
+    else
+      Break;
+  end;
+
+  FCompositor.Windows.Insert(i + 1, compWin);
+end;
+
+procedure TWMSamaCompositingWM.GetStackOrder(out AOrder: array of xcb_window_t; out ACount: Integer);
+var
+  cookie: xcb_query_tree_cookie_t;
+  reply: Pxcb_query_tree_reply_t;
+  children: Pxcb_window_t;
+  n, i: Integer;
+begin
+  ACount := 0;
+  if Connection = nil then Exit;
+
+  cookie := xcb_query_tree(Connection, RootWindow);
+  reply := xcb_query_tree_reply(Connection, cookie, nil);
+  if reply = nil then Exit;
+
+  try
+    n := xcb_query_tree_children_length(reply);
+    children := xcb_query_tree_children(reply);
+    for i := 0 to n - 1 do
+    begin
+      if ACount >= Length(AOrder) then Break;
+      AOrder[ACount] := children[i];
+      Inc(ACount);
+    end;
+  finally
+    xcb_free(reply);
+  end;
+end;
+
+procedure TWMSamaCompositingWM.RaiseInStacking(const AClient: TXCBWMClient);
+var
+  targetWin: xcb_window_t;
+  myRank, otherRank: Integer;
+  order: array of xcb_window_t;
+  count, i, belowWin: Integer;
+  other: TXCBWMClient;
+  values: array[0..1] of Cardinal;
+begin
+  if (AClient = nil) or (Connection = nil) or (RootWindow = 0) then Exit;
+
+  if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+    targetWin := AClient.FrameWindow
+  else
+    targetWin := AClient.ClientWindow;
+  if targetWin = 0 then Exit;
+
+  myRank := CompositorStackRank(AClient);
+
+  SetLength(order, 512);
+  GetStackOrder(order, count);
+  if count = 0 then Exit;
+
+  // QueryTree returns children bottom-to-top. Find the lowest one that ranks above
+  // this window and stack directly beneath it. If none ranks above, this window's
+  // band is the top one, so it goes to the top.
+  belowWin := 0;
+  for i := 0 to count - 1 do
+  begin
+    if order[i] = targetWin then Continue;
+    other := FindClient(order[i]);
+    if other = nil then
+      otherRank := csrNormal
+    else
+      otherRank := CompositorStackRank(other);
+    if otherRank > myRank then
+    begin
+      belowWin := order[i];
+      Break;
+    end;
+  end;
+
+  if belowWin <> 0 then
+  begin
+    // SIBLING and STACK_MODE share one request: values[0] is the sibling,
+    // values[1] the mode relative to it.
+    values[0] := belowWin;
+    values[1] := XCB_STACK_MODE_BELOW;
+    xcb_configure_window(Connection, targetWin,
+      XCB_CONFIG_WINDOW_SIBLING or XCB_CONFIG_WINDOW_STACK_MODE, @values[0]);
+  end
+  else
+  begin
+    values[0] := XCB_STACK_MODE_ABOVE;
+    xcb_configure_window(Connection, targetWin, XCB_CONFIG_WINDOW_STACK_MODE, @values[0]);
+  end;
+
+  xcb_flush(Connection);
 end;
 
 function TWMSamaCompositingWM.IsWindowMenu(const AWindow: xcb_window_t): Boolean;
@@ -1443,11 +1625,17 @@ begin
   compWin := FCompositor.RegisterWindow(targetWin, AClient.CurrentRect, frameWin);
   if compWin <> nil then
   begin
-    if AClient.WindowType = wtDesktop then
+    // RegisterWindow appends, which would put a new window above the panels. Put it
+    // in its own band instead: desktops stay at the bottom, panels stay at the top.
+    if not (AClient.WindowType in [wtDock, wtDesktop]) then
+      RaiseInCompositor(AClient)
+    else
     begin
-      // Desktop windows must be pinned to the absolute bottom of compositor stack
       FCompositor.Windows.Extract(compWin);
-      FCompositor.Windows.Insert(0, compWin);
+      if AClient.WindowType = wtDesktop then
+        FCompositor.Windows.Insert(0, compWin)
+      else
+        FCompositor.Windows.Add(compWin);
     end;
 
     ApplyClientShadow(AClient, compWin);
@@ -1617,18 +1805,10 @@ begin
     begin
       if cli = AClient then
       begin
-        if cli.WindowType = wtDesktop then
-        begin
-          // Desktop background stays at absolute bottom
-          FCompositor.Windows.Extract(compWin);
-          FCompositor.Windows.Insert(0, compWin);
-        end
-        else
-        begin
-          // Move active window to top of stacking order in compositor
-          FCompositor.Windows.Extract(compWin);
-          FCompositor.Windows.Add(compWin);
-        end;
+        // Raise to the top of its own band. A plain Add() would put an ordinary
+        // window above the panels, which is the bug this replaces.
+        RaiseInCompositor(cli);
+        RaiseInStacking(cli);
       end;
 
       ApplyClientShadow(cli, compWin);
@@ -1648,10 +1828,7 @@ begin
         targetWin := cli.ClientWindow;
       compWin := FCompositor.FindWindow(targetWin);
       if compWin <> nil then
-      begin
-        FCompositor.Windows.Extract(compWin);
-        FCompositor.Windows.Add(compWin);
-      end;
+        RaiseInCompositor(cli);
     end;
   end;
 
@@ -1667,10 +1844,7 @@ begin
         targetWin := cli.ClientWindow;
       compWin := FCompositor.FindWindow(targetWin);
       if compWin <> nil then
-      begin
-        FCompositor.Windows.Extract(compWin);
-        FCompositor.Windows.Add(compWin);
-      end;
+        RaiseInCompositor(cli);
     end;
   end;
 
@@ -2311,16 +2485,16 @@ begin
   else
     targetWin := AClient.ClientWindow;
 
-  // Elevate in compositor stacking order
+  // Elevate within its own band. "Always on top" is relative to other windows, not
+  // to the panels.
   if FCompositor <> nil then
   begin
     compWin := FCompositor.FindWindow(targetWin);
     if (compWin <> nil) and (wsAbove in AClient.State) then
-    begin
-      FCompositor.Windows.Extract(compWin);
-      FCompositor.Windows.Add(compWin);
-    end;
+      RaiseInCompositor(AClient);
   end;
+  if wsAbove in AClient.State then
+    RaiseInStacking(AClient);
 
   // Elevate in X11
   if (Connection <> nil) and (wsAbove in AClient.State) then
@@ -4053,7 +4227,8 @@ begin
                     compWin.BottomCornerRadius := 0;
                     compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
                   end;
-                  // Float popup menu to top of compositor stacking order
+                  // Float the popup above everything, panels included (see the
+                  // note in CompositorStackRank).
                   FCompositor.Windows.Extract(compWin);
                   FCompositor.Windows.Add(compWin);
                   compWin.MarkDamaged();

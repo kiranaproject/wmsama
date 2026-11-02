@@ -66,6 +66,10 @@ type
     procedure TestDragBoundsIgnoreTallWindows();
     procedure TestDragClampDoesNotBecomeRestoreTarget();
     procedure TestDragBoundsSameForExtendedClientArea();
+    procedure TestDockPanelsStayAboveWindows();
+    procedure TestPanelOrderUnaffectedByActivation();
+    procedure TestFullscreenCoversPanels();
+    procedure TestStackingOrderKeepsPanelAbove();
   end;
 
 implementation
@@ -1845,9 +1849,16 @@ begin
     deskCli.Activate();
     AssertSame('Desktop window remains at bottom-most after activation', compDesk, wm.Compositor.Windows.First);
 
-    // 3. Normal client activation elevates parent, keeps desktop at bottom
+    // 3. Normal client activation elevates the parent within its own band, keeps the
+    // desktop at the bottom and the dock panel at the top.
+    //
+    // The panel is not registered in the compositor here, so "top-most" is asserted
+    // against the windows that are: the parent must be above the desktop, and below
+    // the panel. Ordering against a registered panel is covered by
+    // TestDockPanelsStayAboveWindows.
     parentCli.Activate();
-    AssertSame('Parent is top-most window in compositor', compParent, wm.Compositor.Windows.Last);
+    AssertTrue('Parent is above the desktop in compositor',
+               wm.Compositor.Windows.IndexOf(compParent) > wm.Compositor.Windows.IndexOf(compDesk));
     AssertSame('Desktop is still bottom-most window in compositor', compDesk, wm.Compositor.Windows.First);
 
     // 4. Desktop window styling: no drop shadows, 0 corner radius
@@ -2702,6 +2713,267 @@ begin
     plain := nil;
     extended := nil;
     wm.Free();
+  end;
+end;
+
+// Panels sit above ordinary windows. Reported against shellsama: dragging a window
+// to the bottom used to draw it over the bottom panel, hiding the taskbar.
+//
+// The compositor paints in list order, lowest first, so "above" is a higher index.
+// Every path that raises a window has to place it in its own band rather than at
+// the end of the list.
+procedure TWMSamaTest.TestDockPanelsStayAboveWindows();
+var
+  wm: TWMSamaCompositingWM;
+  normal, dock: TXCBWMClient;
+  compNormal, compDock: TXCBCompositedWindow;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 38, 1280, 724);
+
+    dock := wm.ManageWindow(9101);
+    dock.WindowType := wtDock;
+    dock.SetGeometry(0, 724, 1280, 38);
+    compDock := wm.Compositor.RegisterWindow(dock.ClientWindow, dock.CurrentRect, 0);
+
+    normal := wm.ManageWindow(9102);
+    normal.WindowType := wtNormal;
+    normal.SetGeometry(100, 100, 800, 600);
+    compNormal := wm.Compositor.RegisterWindow(normal.ClientWindow, normal.CurrentRect, 0);
+
+    // RegisterWindow appends, which would leave the window above the panel. The
+    // activation path is what a real session takes, so go through it.
+    normal.Activate();
+
+    AssertTrue('panel is above the window',
+               wm.Compositor.Windows.IndexOf(compDock) >
+               wm.Compositor.Windows.IndexOf(compNormal));
+
+    // Activating the panel itself must not put it below the window.
+    dock.Activate();
+    AssertTrue('panel is still above the window after the panel is activated',
+               wm.Compositor.Windows.IndexOf(compDock) >
+               wm.Compositor.Windows.IndexOf(compNormal));
+
+    // The dock is above even when the window is explicitly kept on top: "always on
+    // top" is relative to other windows, not to the shell.
+    wm.ToggleKeepOnTop(normal);
+    AssertTrue('kept-on-top window is still below the panel',
+               wm.Compositor.Windows.IndexOf(compDock) >
+               wm.Compositor.Windows.IndexOf(compNormal));
+  finally
+    normal := nil;
+    dock := nil;
+    wm.Free();
+  end;
+end;
+
+// Two panels and three windows: the bands must stay separated no matter what order
+// things are activated in. Panels overlapping each other is out of scope; their
+// struts keep them apart.
+procedure TWMSamaTest.TestPanelOrderUnaffectedByActivation();
+var
+  wm: TWMSamaCompositingWM;
+  a, b, topDock, bottomDock: TXCBWMClient;
+  i: Integer;
+  topIdx, bottomIdx, aIdx, bIdx: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 38, 1280, 724);
+
+    topDock := wm.ManageWindow(9201);
+    topDock.WindowType := wtDock;
+    topDock.SetGeometry(0, 0, 1280, 38);
+    wm.Compositor.RegisterWindow(topDock.ClientWindow, topDock.CurrentRect, 0);
+
+    a := wm.ManageWindow(9202);
+    a.WindowType := wtNormal;
+    a.SetGeometry(100, 100, 500, 400);
+    wm.Compositor.RegisterWindow(a.ClientWindow, a.CurrentRect, 0);
+
+    b := wm.ManageWindow(9203);
+    b.WindowType := wtNormal;
+    b.SetGeometry(200, 200, 500, 400);
+    wm.Compositor.RegisterWindow(b.ClientWindow, b.CurrentRect, 0);
+
+    bottomDock := wm.ManageWindow(9204);
+    bottomDock.WindowType := wtDock;
+    bottomDock.SetGeometry(0, 724, 1280, 38);
+    wm.Compositor.RegisterWindow(bottomDock.ClientWindow, bottomDock.CurrentRect, 0);
+
+    for i := 1 to 4 do
+    begin
+      case i of
+        1: a.Activate();
+        2: b.Activate();
+        3: topDock.Activate();
+        4: bottomDock.Activate();
+      end;
+
+      topIdx := wm.Compositor.Windows.IndexOf(
+        wm.Compositor.FindWindow(topDock.ClientWindow));
+      bottomIdx := wm.Compositor.Windows.IndexOf(
+        wm.Compositor.FindWindow(bottomDock.ClientWindow));
+      aIdx := wm.Compositor.Windows.IndexOf(
+        wm.Compositor.FindWindow(a.ClientWindow));
+      bIdx := wm.Compositor.Windows.IndexOf(
+        wm.Compositor.FindWindow(b.ClientWindow));
+
+      // Panels sit above every window: a lower index is painted first, so both
+      // windows must be below both panels.
+      AssertTrue(Format('step %d: both windows below the top panel', [i]),
+                 (aIdx < topIdx) and (bIdx < topIdx));
+      AssertTrue(Format('step %d: both windows below the bottom panel', [i]),
+                 (aIdx < bottomIdx) and (bIdx < bottomIdx));
+    end;
+  finally
+    a := nil;
+    b := nil;
+    topDock := nil;
+    bottomDock := nil;
+    wm.Free();
+  end;
+end;
+
+// A fullscreen window is the one exception: it covers the panels, as it does in
+// every other desktop. A panel drawn over a fullscreen video is worse than the
+// panel being temporarily hidden.
+procedure TWMSamaTest.TestFullscreenCoversPanels();
+var
+  wm: TWMSamaCompositingWM;
+  normal, dock: TXCBWMClient;
+  compNormal, compDock: TXCBCompositedWindow;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 38, 1280, 724);
+
+    dock := wm.ManageWindow(9301);
+    dock.WindowType := wtDock;
+    dock.SetGeometry(0, 724, 1280, 38);
+    compDock := wm.Compositor.RegisterWindow(dock.ClientWindow, dock.CurrentRect, 0);
+
+    normal := wm.ManageWindow(9302);
+    normal.WindowType := wtNormal;
+    normal.SetGeometry(100, 100, 800, 600);
+    compNormal := wm.Compositor.RegisterWindow(normal.ClientWindow, normal.CurrentRect, 0);
+
+    // Fullscreen outranks a panel.
+    normal.State := normal.State + [wsFullscreen];
+    wm.RaiseInCompositor(normal);
+    AssertTrue('fullscreen window is above the panel',
+               wm.Compositor.Windows.IndexOf(compNormal) >
+               wm.Compositor.Windows.IndexOf(compDock));
+
+    // Leaving fullscreen puts it back under the panel.
+    normal.State := normal.State - [wsFullscreen];
+    wm.RaiseInCompositor(normal);
+    AssertTrue('window returns below the panel when fullscreen ends',
+               wm.Compositor.Windows.IndexOf(compDock) >
+               wm.Compositor.Windows.IndexOf(compNormal));
+  finally
+    normal := nil;
+    dock := nil;
+    wm.Free();
+  end;
+end;
+
+// Same rule in the server's stacking order, which is what applies with
+// --no-compositor and what decides where a click lands. Unlike the compositor path
+// this one can be checked against the live server: QueryTree reports the order the
+// server will use, for both the composited and the unredirected case.
+procedure TWMSamaTest.TestStackingOrderKeepsPanelAbove();
+var
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  wm: TWMSamaCompositingWM;
+  cli, dockCli: TXCBWMClient;
+  Root, Win, Panel: xcb_window_t;
+  order: array of xcb_window_t;
+  count, i, winIdx, panelIdx: Integer;
+  frameW, frameP: xcb_window_t;
+begin
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then
+    SkipIfNoServer('no X server');
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
+      Root := wm.RootWindow;
+
+      Panel := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Panel, Root, 0, 700, 1280, 60, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, Panel);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+      dockCli := wm.ManageWindow(Panel);
+      AssertNotNull('panel managed', dockCli);
+      // Type detection needs _NET_WM_WINDOW_TYPE, which this window does not carry.
+      // The band is what is under test here, not the detection, so set it directly.
+      dockCli.WindowType := wtDock;
+
+      Win := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win, Root, 100, 100, 500, 400, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, Win);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+      cli := wm.ManageWindow(Win);
+      AssertNotNull('window managed', cli);
+
+      cli.Activate();
+      SyncConnection(Conn);
+      frameW := cli.FrameWindow;
+      frameP := dockCli.FrameWindow;
+
+      SetLength(order, 512);
+      wm.GetStackOrder(order, count);
+      AssertTrue('stack order was read', count > 0);
+
+      // Only ordinary windows are reparented into a frame; a dock keeps the root as
+      // its parent, so its own id is what appears in the stack. Accept either for
+      // each window rather than assuming one.
+      winIdx := -1;
+      panelIdx := -1;
+      for i := 0 to count - 1 do
+      begin
+        if (order[i] = Panel) or ((frameP <> 0) and (order[i] = frameP)) then
+          panelIdx := i;
+        if (order[i] = Win) or ((frameW <> 0) and (order[i] = frameW)) then
+          winIdx := i;
+      end;
+      AssertTrue('panel is in the stack', panelIdx >= 0);
+      AssertTrue('window is in the stack', winIdx >= 0);
+      AssertTrue('panel is above the window in X stacking order', panelIdx > winIdx);
+
+      // The window's own body overlaps the panel after this drag (the clamp stops
+      // the titlebar at the panel, not the frame). The panel must still be clickable
+      // where they overlap, which follows from the order asserted above.
+      wm.BeginDrag(cli, dmMove, 200, 120);
+      wm.UpdateDrag(200, 5000);
+      wm.EndDrag();
+      AssertTrue('window body now overlaps the panel band',
+                 cli.CurrentRect.Y + cli.CurrentRect.Height > 700);
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
   end;
 end;
 

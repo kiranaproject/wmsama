@@ -1645,7 +1645,81 @@ clients as having no strip lets them reach `762` instead of `728`.
 
 ---
 
-## 6. Deliberate Non-Goals
+## 6. Panel Stacking
+
+### The defect
+
+**Found by:** user report — *"The Marco make the panel always on top of window but Wmsama, when I
+drag the window to the bottom, the panel is bellow the window."*
+
+Every raise path moved a window to the **end** of the compositor's list (`Windows.Add`), and the
+compositor paints in list order, lowest first. So any activation put that window above the panels.
+It became obvious once drags were clamped at the panels: the titlebar now stops at the bottom panel's
+edge, which means the body legitimately overlaps it — and then covered it.
+
+`--no-compositor` had the same defect in the server's own stacking order, which also decides where
+a **click** lands. A click on the overlapping region went to the window instead of the panel.
+
+### Rules
+
+Compositor list order and X stacking order are independent, so both are banded:
+
+| Band | Members | Rank |
+| :--- | :--- | ---: |
+| desktop | `wtDesktop` | 0 |
+| normal | everything else, including `wsAbove` | 1 |
+| panel | `wtDock` | 2 |
+| fullscreen | `wsFullscreen` | 3 |
+
+A raise puts a window at the **top of its own band**, not at the end of the list. "Always on top"
+(`wsAbove`) is relative to other windows, not to the shell. Two panels overlapping each other is out
+of scope: their struts keep them apart.
+
+Fullscreen outranks a panel deliberately. A panel drawn over a fullscreen video is worse than the
+panel being temporarily hidden, and every other desktop does the same.
+
+Override-redirect popups belong to no managed client, so they keep going to the end of the list —
+above the panels. A context menu the panel covers cannot be used; a panel briefly covered by a menu
+is just briefly not visible.
+
+### Acceptance checks
+
+1. A dock panel stays above an ordinary window after that window is activated.
+   `TestDockPanelsStayAboveWindows`.
+2. Activating the panel itself does not move it below the window, and "keep on top" does not lift a
+   window over the panel. Same test.
+3. With two panels and two windows, repeated activation in any order keeps both windows below both
+   panels. `TestPanelOrderUnaffectedByActivation`.
+4. A fullscreen window goes above the panel and returns below it when fullscreen ends.
+   `TestFullscreenCoversPanels`.
+5. The live X stacking order matches, and the window body overlaps the panel band after the drag
+   clamp. `TestStackingOrderKeepsPanelAbove`.
+
+Live pixel checks, sampling the composited root where a dragged window overlaps a dock:
+
+| Mode | Pixel in the panel band | Verdict |
+| :--- | :--- | :--- |
+| composited | `0x00FF00` (panel colour) | panel on top |
+| `--no-compositor` | `0x00FF00` | panel on top |
+
+Both probes were checked against a sabotaged build (raise reverted to a plain `Add`/`ABOVE`), which
+returns the window colour `0xFF0000` — so the probes are sensitive to the bug.
+
+Tests: 48 -> 52.
+
+### Notes
+
+- **Ordering is per raise, not a sort.** The list is only rearranged when something is raised, so
+  the result is the same as a stable sort by band with "last raised wins" inside a band.
+- **`RaiseInCompositor` extracts before scanning.** Scanning first gives an index one too high once
+  the window is removed; with a single window in the list that Insert is past the end. That was a
+  crash on the first version of this change.
+- **Docks are not reparented.** A `wtDock` keeps the root as its parent, so it has no frame and its
+  own window id is what appears in the X stacking order. Ordinary windows appear as their frames.
+
+---
+
+## 7. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
 accident.
@@ -1669,7 +1743,7 @@ accident.
 
 ---
 
-## 7. Definition of Done (per item)
+## 8. Definition of Done (per item)
 
 An item may be marked `☑` only when all of the following hold:
 
@@ -1685,7 +1759,7 @@ An item may be marked `☑` only when all of the following hold:
 
 ---
 
-## 8. Progress Log
+## 9. Progress Log
 
 Append-only. One row per landed item (or per significant investigation that changed the plan).
 
@@ -1727,4 +1801,5 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-11-01 | ECA | done | `867128c` + `72a36d4` + `ab8611c` | **Feature, not an audit item.** Extended client area: `_NET_WM_EXTENDED_CLIENT_AREA` in, `_NET_WM_WINDOW_CONTROLS_INSET` out, framed with no exterior titlebar, buttons overlaid in an `InputOnly` window shaped to the reserved rect. `72a36d4` added the missing geometry update on dynamic property change and `ab8611c` the flush/extent sync on map |
 | 2026-11-02 | ECA | done | working tree | **Acceptance and harness pass.** Insets now checked against the buttons actually drawn, width-independence, non-extended clients reserving nothing, and the published property read back off the wire with `format=32` and four elements. Tests 38 -> 42, sabotage-verified three ways. Also stopped three live tests from silently passing when they could not take the display: they raise `EIgnoredTest` now, so a skip is visible instead of reporting a pass for a body that never ran |
 | 2026-11-02 | Drag bounds | done | working tree | **Found by user report:** windows could be dragged past the top and bottom panels, leaving an unreachable titlebar. Move-drags are now bounded by `_NET_WORKAREA` (so the panels are respected via their struts) with a hard stop at each end and an 8px detent where the window's bottom edge meets the work area. Verified with a real pointer under Xephyr plus two strut-carrying DOCK windows: stops at 728 and 38 on a 1280x800 screen with 38px panels. Tests 42 -> 48, sabotage-verified four ways |
+| 2026-11-02 | Panel stacking | done | working tree | **Found by user report:** a window dragged to the bottom was drawn over the shellsama panel. Every raise path used a plain `Add`/`ABOVE`, and the compositor paints in list order, so activation put a window above the panels. Both compositor order and X stacking order are now banded (desktop < normal < panel < fullscreen) and a raise stops at the top of its own band. `--no-compositor` had the same defect in X stacking, which also decides where a click lands. Verified by sampling the composited root where a dragged window overlaps a dock, in both modes; the probe returns the window colour under a sabotaged build. Tests 48 -> 52 |
 | | | | | |
