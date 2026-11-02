@@ -56,6 +56,10 @@ type
     procedure TestDesktopWindowCompositingAndAltTabExclusion();
     procedure TestMultipleWindowsOverlappingResize();
     procedure TestExtendedClientAreaControls();
+    procedure TestExtendedClientAreaInsetMatchesButtons();
+    procedure TestExtendedClientAreaFrameHasNoTitlebar();
+    procedure TestExtendedClientAreaDisabledWithoutProperty();
+    procedure TestExtendedClientAreaPublishesInsetProperty();
   end;
 
 implementation
@@ -75,6 +79,28 @@ begin
       Exit(True);
     Sleep(10);
   end;
+end;
+
+// Tests that need a real X server used to return quietly when there was none,
+// which reported a pass for a body that never ran. WM-23 lost time to exactly
+// that: its cursor test looked insensitive because it was silently skipping on a
+// display another WM already owned. Ignoring instead of exiting keeps the test
+// runnable without X while making the skip visible in the summary.
+procedure SkipIfNoServer(const AWhy: AnsiString);
+begin
+  raise EIgnoredTest.Create(AWhy);
+end;
+
+// Force the server to process everything queued on this connection. Needed
+// whenever a window or property set through one connection is then read through
+// another: X guarantees ordering per connection, not across connections.
+procedure SyncConnection(const AConn: Pxcb_connection_t);
+var
+  Reply: Pxcb_get_input_focus_reply_t;
+begin
+  Reply := xcb_get_input_focus_reply(AConn, xcb_get_input_focus(AConn), nil);
+  if Reply <> nil then
+    xcb_free(Reply);
 end;
 
 procedure TWMSamaTest.TestWMCreation();
@@ -623,21 +649,26 @@ var
 begin
   ScreenNum := 0;
   Conn := xcb_connect(nil, @ScreenNum);
-  if Conn = nil then Exit;
+  if Conn = nil then
+    SkipIfNoServer('no X server');
 
   Obs := nil;
   try
-    if xcb_connection_has_error(Conn) <> 0 then Exit;
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
     Obs := xcb_connect(nil, @ScreenNum);
-    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then Exit;
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
 
     wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
     try
       // Needs exclusive display ownership; on a developer desktop another WM
       // would reparent these windows and invalidate every assertion.
-      if not TryClaimOwnership(wm) then Exit;
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
       Root := wm.RootWindow;
-      if Root = 0 then Exit;
+      if Root = 0 then
+        SkipIfNoServer('no root window');
 
       // ---- WM-07: cursors never touch a client window -------------------
       cli := MakeClient(TXCBRect.Create(40, 40, 300, 200));
@@ -1936,19 +1967,24 @@ var
 begin
   ScreenNum := 0;
   Conn := xcb_connect(nil, @ScreenNum);
-  if Conn = nil then Exit;
+  if Conn = nil then
+    SkipIfNoServer('no X server');
 
   Obs := nil;
   try
-    if xcb_connection_has_error(Conn) <> 0 then Exit;
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
     Obs := xcb_connect(nil, @ScreenNum);
-    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then Exit;
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
 
     wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
     try
-      if not TryClaimOwnership(wm) then Exit;
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
       Root := wm.RootWindow;
-      if Root = 0 then Exit;
+      if Root = 0 then
+        SkipIfNoServer('no root window');
 
       Win := xcb_generate_id(Obs);
       xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win, Root, 100, 100, 300, 220, 0,
@@ -2142,6 +2178,308 @@ begin
     AssertTrue('Client maximized via ControlsWindow click', wsMaximizedHorz in cli.State);
   finally
     wm.Free();
+  end;
+end;
+
+// The extended client area reserves space in the client canvas for the window
+// controls. The inset must describe exactly the buttons that are actually
+// drawn, or the client leaves the wrong region empty: too small and its own
+// content sits under the overlaid buttons, too large and it wastes a strip.
+procedure TWMSamaTest.TestExtendedClientAreaInsetMatchesButtons();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  insets: TXCBFrameInsets;
+  btns: TWMSamaButtonArray;
+  titleX, titleW, i: Integer;
+  firstX, lastRight, widest: Double;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(8101);
+    cli.ExtendedClientArea := True;
+    cli.SetGeometry(100, 100, 600, 400);
+
+    // Left alignment: every button sits inside the left inset.
+    insets := wm.CalculateControlsInset(cli, 600);
+    wm.CalculateButtons(cli, 600, btns, titleX, titleW);
+    widest := 0;
+    for i := 0 to High(btns) do
+      if btns[i].Placement = bpLeft then
+      begin
+        AssertTrue('left button starts at or after 0', btns[i].X >= 0);
+        if btns[i].X + btns[i].Size > widest then
+          widest := btns[i].X + btns[i].Size;
+      end;
+    AssertTrue('left inset covers every left button (inset >= %f)'.Format([widest]),
+               insets.Left >= widest);
+
+    // Right alignment: the mirror image. The right inset is measured from the
+    // right edge, so the leftmost right-hand button must be at least that far in.
+    wm.ButtonAlignment := baRight;
+    insets := wm.CalculateControlsInset(cli, 600);
+    wm.CalculateButtons(cli, 600, btns, titleX, titleW);
+    firstX := 600;
+    for i := 0 to High(btns) do
+      if btns[i].Placement = bpRight then
+        if btns[i].X < firstX then
+          firstX := btns[i].X;
+    AssertEquals('right alignment leaves the left inset empty', 0, insets.Left);
+    AssertTrue('right inset covers every right button',
+               (600 - firstX) <= insets.Right + 1);
+
+    // Top inset is the titlebar row the overlay draws into; bottom is unused.
+    AssertEquals('top inset is the titlebar height', wm.TitlebarHeight, insets.Top);
+    AssertEquals('bottom inset is unused', 0, insets.Bottom);
+
+    // The inset scales with the window: a wider window keeps the same button
+    // cluster on the right, so the right inset is width-independent.
+    wm.ButtonAlignment := baLeft;
+    insets := wm.CalculateControlsInset(cli, 300);
+    lastRight := insets.Right;
+    insets := wm.CalculateControlsInset(cli, 1600);
+    AssertEquals('left inset does not depend on window width',
+                 wm.CalculateControlsInset(cli, 300).Left, insets.Left);
+    AssertEquals('right inset does not depend on window width',
+                 Round(lastRight), Round(insets.Right));
+
+    // A split layout puts a button cluster on each side, and both insets must be
+    // reported. A client told only about one side would draw its own content
+    // under the other cluster.
+    wm.ButtonLayout := 'menu:shade,pin,minimize,maximize,close';
+    insets := wm.CalculateControlsInset(cli, 600);
+    AssertTrue('split layout reports a left inset', insets.Left > 0);
+    AssertTrue('split layout reports a right inset', insets.Right > 0);
+    wm.CalculateButtons(cli, 600, btns, titleX, titleW);
+    firstX := 600;
+    widest := 0;
+    for i := 0 to High(btns) do
+    begin
+      if btns[i].Placement = bpLeft then
+      begin
+        if btns[i].X + btns[i].Size > widest then
+          widest := btns[i].X + btns[i].Size;
+      end
+      else if btns[i].X < firstX then
+        firstX := btns[i].X;
+    end;
+    AssertTrue('split layout: left inset covers the left cluster',
+               insets.Left >= widest);
+    AssertTrue('split layout: right inset covers the right cluster',
+               (600 - firstX) <= insets.Right + 1);
+
+    wm.ButtonLayout := 'close,minimize,maximize:';
+
+    // A window that is not extended has no reserved area at all. This is the
+    // guard that keeps ordinary SSD clients out of the inset path.
+    cli.ExtendedClientArea := False;
+    insets := wm.CalculateControlsInset(cli, 600);
+    AssertEquals('non-extended client: left', 0, insets.Left);
+    AssertEquals('non-extended client: right', 0, insets.Right);
+    AssertEquals('non-extended client: top', 0, insets.Top);
+    AssertEquals('non-extended client: bottom', 0, insets.Bottom);
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+// A client that opts into the extended area gets no exterior titlebar, and the
+// whole client canvas survives as the draggable region. Without this the client
+// loses one titlebar height of canvas and gains an empty strip at the top.
+procedure TWMSamaTest.TestExtendedClientAreaFrameHasNoTitlebar();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  plain: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // Offline: no connection, so ManageWindow records geometry without X calls.
+    plain := wm.ManageWindow(8201);
+    plain.SetGeometry(100, 100, 600, 400);
+
+    cli := wm.ManageWindow(8202);
+    cli.ExtendedClientArea := True;
+    cli.SetGeometry(100, 100, 600, 400);
+
+    AssertTrue('extended client is managed', cli <> nil);
+    AssertTrue('extended client is flagged', cli.ExtendedClientArea);
+
+    // The frame reserves no titlebar row, so the client is not pushed down.
+    AssertEquals('extended client keeps its top edge', 0,
+                 wm.FrameMetrics.Insets.Top - wm.TitlebarHeight);
+
+    // In the extended layout every pixel of the titlebar row is a drag zone
+    // except where a button is drawn: the whole bar moves the window.
+    AssertTrue('empty titlebar area is draggable',
+               wm.IsTitlebarDraggable(300, 17, cli, 600));
+    AssertFalse('a button is not a drag zone',
+                wm.IsTitlebarDraggable(64, 17, cli, 600));
+  finally
+    cli := nil;
+    plain := nil;
+    wm.Free();
+  end;
+end;
+
+// Clearing the extended-client-area property must take the overlay away again.
+// The property can arrive late or be withdrawn, and a stale input window on top
+// of a normal client would swallow clicks meant for the application.
+procedure TWMSamaTest.TestExtendedClientAreaDisabledWithoutProperty();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  insets: TXCBFrameInsets;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(8301);
+    cli.IsReparented := True;
+    cli.FrameWindow := 8302;
+    cli.ExtendedClientArea := True;
+    cli.SetGeometry(100, 100, 600, 400);
+
+    // With the flag on, an inset is reported and the overlay is wanted.
+    insets := wm.CalculateControlsInset(cli, 600);
+    AssertTrue('flag on: inset reserved', insets.Left > 0);
+
+    // A client that never set the property is not extended at all. ManageWindow
+    // reads the property, so this is the default state for an ordinary client.
+    cli := wm.ManageWindow(8303);
+    AssertFalse('no property: client is not extended', cli.ExtendedClientArea);
+
+    cli.IsReparented := True;
+    cli.FrameWindow := 8304;
+    insets := wm.CalculateControlsInset(cli, 600);
+    AssertEquals('no property: no left inset', 0, insets.Left);
+    AssertEquals('no property: no right inset', 0, insets.Right);
+    AssertEquals('no property: no top inset', 0, insets.Top);
+
+    // A non-extended client still has titlebar buttons — the overlay is
+    // additive, not a replacement for SSD. What must not happen is an inset
+    // being reserved on the client's behalf.
+    cli.ExtendedClientArea := False;
+    AssertEquals('no property: ordinary titlebar button is still hit-testable',
+                 2, wm.GetButtonAt(64, 17, cli, 600));
+    insets := wm.CalculateControlsInset(cli, 600);
+    AssertEquals('no property: no inset reserved in the client canvas',
+                 0, insets.Left + insets.Right + insets.Top);
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+// Live server: the property the WM publishes has to reach the client window
+// with the right type, count and values. Offline tests can only check the
+// arithmetic; this checks the wire.
+procedure TWMSamaTest.TestExtendedClientAreaPublishesInsetProperty();
+var
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  Win, Root, Atom: xcb_window_t;
+  Cookie: xcb_get_property_cookie_t;
+  Reply: Pxcb_get_property_reply_t;
+  Values: PCardinal;
+  Expected: TXCBFrameInsets;
+  Plain: Cardinal;
+begin
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then
+    SkipIfNoServer('no X server: cannot test the published property');
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
+      wm.InitEWMH();
+      Root := wm.RootWindow;
+      if Root = 0 then
+        SkipIfNoServer('no root window');
+
+      // The client asks for the extended area before it is managed, which is
+      // how a real application does it: the property is set prior to mapping.
+      Win := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win, Root, 100, 100, 600, 400, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      Atom := wm.AtomNetWmExtendedClientArea;
+      AssertTrue('client request atom is interned', Atom <> 0);
+      Plain := 1;
+      xcb_change_property(Obs, XCB_PROP_MODE_REPLACE, Win, Atom,
+                          XCB_ATOM_CARDINAL, 32, 1, @Plain);
+      xcb_map_window(Obs, Win);
+      xcb_flush(Obs);
+      // Properties are server-side, but ManageWindow reads them immediately, so
+      // the set must have been processed by the server before it is managed.
+      SyncConnection(Obs);
+
+      cli := wm.ManageWindow(Win);
+      AssertNotNull('extended client was managed', cli);
+      AssertTrue('client read the extended flag from its property',
+                 cli.ExtendedClientArea);
+
+      // The WM publishes the inset on the client window.
+      Cookie := xcb_get_property(Conn, 0, Win, wm.AtomNetWmWindowControlsInset,
+                                 XCB_ATOM_CARDINAL, 0, 4);
+      Reply := xcb_get_property_reply(Conn, Cookie, nil);
+      AssertNotNull('controls-inset property is set', Reply);
+      try
+        AssertEquals('controls-inset format is 32-bit', 32, Reply^.format);
+        AssertEquals('controls-inset has four elements', 4,
+                     xcb_get_property_value_length(Reply) div 4);
+        Values := PCardinal(xcb_get_property_value(Reply));
+        Expected := wm.CalculateControlsInset(cli, cli.CurrentRect.Width);
+        AssertEquals('published left inset matches the calculation',
+                     Expected.Left, Integer(Values[0]));
+        AssertEquals('published right inset matches the calculation',
+                     Expected.Right, Integer(Values[1]));
+        AssertEquals('published top inset matches the calculation',
+                     Expected.Top, Integer(Values[2]));
+        AssertEquals('published bottom inset matches the calculation',
+                     Expected.Bottom, Integer(Values[3]));
+        AssertTrue('top inset is the titlebar row', Values[2] = Cardinal(wm.TitlebarHeight));
+      finally
+        xcb_free(Reply);
+      end;
+
+      // And an ordinary client must not get the property at all.
+      Win := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win, Root, 100, 100, 400, 300, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, Win);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+      cli := wm.ManageWindow(Win);
+      AssertNotNull('plain client was managed', cli);
+      AssertFalse('plain client is not extended', cli.ExtendedClientArea);
+
+      Cookie := xcb_get_property(Conn, 0, Win, wm.AtomNetWmWindowControlsInset,
+                                 XCB_ATOM_CARDINAL, 0, 4);
+      Reply := xcb_get_property_reply(Conn, Cookie, nil);
+      try
+        AssertTrue('plain client has no controls-inset property',
+                   (Reply = nil) or (Reply^.type_ = XCB_ATOM_NONE));
+      finally
+        if Reply <> nil then xcb_free(Reply);
+      end;
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
   end;
 end;
 
