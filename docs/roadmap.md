@@ -97,9 +97,30 @@ Severity is about *user-visible damage*, not code smell.
 | WM-15 | P2 | Structure | Two render paths; `RenderComposite` is dead code | `☑` |
 | WM-16 | P2 | Present | Per-paint GC create/free churn | `☑` |
 | WM-17 | P1 | Lifetime | WM exit destroys every reparented client | `☑` |
+| WM-18 | P2 | Present | Drop shadow re-rasterized every frame | `☑` |
+| WM-19 | P2 | Present | Compose covered the whole screen every frame | `☑` |
+| WM-20 | P1 | Compositor | Window renders black after another window is dragged across it | `⊘` |
+| WM-21 | P1 | Tiling | Window position forgotten after maximize + tile | `☑` |
+| WM-22 | P1 | Tiling | Some applications lose their size after tiling | `☑` |
+| WM-23 | P1 | Cursors | Resize cursors appear in the wrong place | `☑` |
+| WM-24 | P1 | Cursors | Resize cursor sticks over the client after leaving the margin | `☑` |
+| WM-25 | P1 | Loop | The WM spins at full CPU after the X server exits | `☑` |
+| WM-26 | P2 | Shell | shellsama burns CPU at idle | `☑` |
+| WM-27 | P1 | Loop | The tick throttle halved the frame rate of uncapped apps | `☑` |
+| WM-28 | P2 | Loop | Update rate decoupled from the frame rate (`ft_set_timer`) | `☑` |
+| WM-29 | P1 | Compositor | An EGL window goes blank after a popup menu is destroyed | `☑` |
 
-**Totals:** 4 × P0 (all done), 8 × P1 (7 done), 4 × P2 (all done), 1 withdrawn.
-Plus **WM-18** and **WM-19** (found by profiling after the audit items closed).
+**Totals:** 4 × P0, 15 × P1, 9 × P2. Of the 29 items: 27 done, 1 rejected with the limitation
+documented (WM-20), 1 withdrawn (WM-09).
+
+WM-18 and WM-19 were found by profiling once the audit items closed, and WM-20 while investigating
+them — it was already there before those two fixes landed. WM-21 through WM-24 and WM-29 came from
+user reports during normal use. WM-25 to WM-28 came from following the idle-CPU and frame-pacing
+trail. The original audit produced 16 findings, one of which (WM-09) was a false positive.
+
+WM-20 is `⊘`, not `☑`: the two-surface refactor landed and every remediation option was measured,
+but none is shippable, so the item is rejected and the limitation is documented instead. Read its
+section before treating the artifact as new.
 
 > **Audit correction (2026-10-28):** WM-09 was a false positive. The expose branch
 > never painted anything — it marked the compositor window damaged and fell through
@@ -705,11 +726,11 @@ frame, regardless of what had changed — O(screen) work per frame.
 
 ---
 
-### ☐ WM-20 — Window renders black after another window is dragged across it
+### ⊘ WM-20 — Window renders black after another window is dragged across it
 
 **Severity:** P1 (cosmetic but highly visible)
 **Status:** two-surface refactor **done** (`florialib@d476226`); remediation options **tested
-empirically** and none is acceptable. Closing as a documented limitation.
+empirically** and none is acceptable. **Rejected** — documented as a limitation, not fixed.
 
 The client loses its offscreen content and is never told to repaint. No mechanism available to a
 window manager restores it except a substantial resize, which is too disruptive to ship.
@@ -809,10 +830,10 @@ The only method that works is a substantial shrink-and-grow, and it is not accep
 Making it opt-in behind a flag was considered and rejected: a flag that makes windows visibly jump
 is not a feature, and nobody would leave it on.
 
-**WM-20 stays open as a documented limitation.** It is cosmetic, it is recoverable by any real
-interaction (a keystroke restores the window), and the remaining cause is inside xterm's handling of
-being uncovered under a reparenting compositor — which the WM cannot influence through any
-mechanism available to it.
+**WM-20 is rejected as a shippable fix and closed as a documented limitation.** It is cosmetic, it
+is recoverable by any real interaction (a keystroke restores the window), and the remaining cause is
+inside xterm's handling of being uncovered under a reparenting compositor — which the WM cannot
+influence through any mechanism available to it.
 
 ### A bug in the probe itself, worth recording
 
@@ -1457,6 +1478,93 @@ further.
 
 ---
 
+## 4. Extended Client Area
+
+### Scope
+
+Not an audit item: this is the feature shipped in `867128c`, `72a36d4` and `ab8611c`. It is recorded
+here because it added a protocol with a client-visible contract, and a contract needs the same
+acceptance checks as a bug fix.
+
+An application that draws its own titlebar can ask for no exterior frame, and for the window
+controls to be overlaid inside its canvas:
+
+| Direction | Atom | Type | Meaning |
+| :--- | :--- | :--- | :--- |
+| client -> WM | `_NET_WM_EXTENDED_CLIENT_AREA` | `CARDINAL[1]` | `1` requests the extended area |
+| client -> WM | `_NET_WM_STATE_EXTENDED_CLIENT_AREA` | state atom | the same request via `_NET_WM_STATE` |
+| WM -> client | `_NET_WM_WINDOW_CONTROLS_INSET` | `CARDINAL[4]` | `[left, right, top, bottom]` reserved |
+
+The client leaves the reported region empty and draws its own content around it. `wmsama` keeps an
+`InputOnly` window shaped to the reserved rectangle, so the overlaid buttons receive clicks and the
+rest of the titlebar row stays draggable.
+
+Specified in `desktop-design-philosophy/08-extended-client-area-protocol.md`. Bound in
+`floria-toolkit` as `ft_window_on_controls_inset_changed`.
+
+### What the inset means, and what it does not
+
+The inset reports *where the controls are*, not *how much of the client is unusable*. `top` is the
+full titlebar row height, because the overlay is drawn over the whole row; `left` and `right`
+describe the button clusters only, and the space between them is the client's to use. A client that
+treats `top` as "everything below this is mine" is correct; one that avoids the full row wastes a
+strip, which is the client's choice to make.
+
+### Acceptance checks
+
+1. `CalculateControlsInset` reserves exactly the buttons that are drawn — every left-aligned button
+   falls inside `left`, every right-aligned button inside `right`, `top` is the titlebar height, and
+   `bottom` is unused. Offline: `TestExtendedClientAreaInsetMatchesButtons`.
+2. A non-extended client reserves nothing: all four values are `0`. Same test, and
+   `TestExtendedClientAreaDisabledWithoutProperty`.
+3. The inset is width-independent for a fixed button cluster. Same test.
+4. The published property reaches the client window with `format=32`, four elements, and values
+   matching the calculation; an ordinary client gets no property at all. Live:
+   `TestExtendedClientAreaPublishesInsetProperty`. Verified on Xephyr `:56`: no WM, so the test
+   actually runs rather than skipping.
+5. Overlay buttons keep the release-within-bounds lifecycle and work on the controls window rather
+   than the frame. `TestExtendedClientAreaControls`.
+6. The titlebar row is a drag zone except where a button is drawn.
+   `TestExtendedClientAreaFrameHasNoTitlebar`.
+
+Tests: 38 -> 42. Four new, all of them checked against a sabotaged build:
+
+| Sabotage | Caught by |
+| :--- | :--- |
+| publish `left = 0` | `expected <85> but was <0>` |
+| drop the top inset to `0` | `expected <34> but was <0>` (three tests) |
+| ignore button placement, force left | `expected <0> but was <14>` |
+
+### Test-harness note: silent skips
+
+Every live test here used to `Exit` when it could not take the display, which reported a **pass for a
+body that never ran**. Three of them did exactly that on a developer desktop where another WM owns
+the display, and it had already cost time once: WM-23's cursor test appeared insensitive because it
+was skipping, not because the property was untestable.
+
+They now raise `EIgnoredTest` through `SkipIfNoServer`, so a skip appears in the summary as
+`Ignored test: another window manager owns this display`. `pasbuild test` stays green; the line is
+what tells you the suite did not cover that path on this machine.
+
+A second harness trap, found while writing the property test: a window created and mapped on one
+connection and managed through another needs a **round-trip on the creating connection** first
+(`SyncConnection`). X guarantees ordering only within a connection, so `ManageWindow` could read a
+property that had not been processed yet — the first version of the test failed with "extended
+client was managed" for that reason.
+
+### Not done
+
+- **The `_NET_WM_STATE` form is read but never echoed back.** `florialib` accepts
+  `_NET_WM_STATE_EXTENDED_CLIENT_AREA` on input and `TXCBWMClient.UpdateEWMHState` re-publishes it,
+  but there is no test that a state-atom request is honoured end to end the way the property form
+  is.
+- **Clearing the property at runtime.** `DoOnClientPropertiesChanged` re-runs the controls update,
+  so a property set to `0` does take the overlay away, but only the offline path is covered.
+- **No live client exercises it.** `floria-toolkit` has `examples/c/eca_browser_mockup.c`; it has
+  not been run against a live `wmsama` as part of this work.
+
+---
+
 ## 5. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
@@ -1536,4 +1644,6 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-10-29 | WM-12 | done | `9dd22fe` | Partial present via scene snapshot. Measured 960 KB vs 4 MB per content frame. **Ghost-overlay defect introduced and fixed** — caught by screenshot, not tests |
 | 2026-10-29 | WM-11 | done | `9dd22fe` | 64-event batch cap. Two earlier test versions were insensitive; the working one counts processed events with redirect unclaimed |
 | 2026-10-28 | WM-17 | done | `f6a1584` | **New finding.** Clients were destroyed with the WM. Now unparented + round-tripped before disconnect; xterm survives 3/3 (was 3/3 dead); WM restart preserves the session. Flush alone proven insufficient |
+| 2026-11-01 | ECA | done | `867128c` + `72a36d4` + `ab8611c` | **Feature, not an audit item.** Extended client area: `_NET_WM_EXTENDED_CLIENT_AREA` in, `_NET_WM_WINDOW_CONTROLS_INSET` out, framed with no exterior titlebar, buttons overlaid in an `InputOnly` window shaped to the reserved rect. `72a36d4` added the missing geometry update on dynamic property change and `ab8611c` the flush/extent sync on map |
+| 2026-11-02 | ECA | done | working tree | **Acceptance and harness pass.** Insets now checked against the buttons actually drawn, width-independence, non-extended clients reserving nothing, and the published property read back off the wire with `format=32` and four elements. Tests 38 -> 42, sabotage-verified three ways. Also stopped three live tests from silently passing when they could not take the display: they raise `EIgnoredTest` now, so a skip is visible instead of reporting a pass for a body that never ran |
 | | | | | |

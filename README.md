@@ -1,6 +1,7 @@
 # wmsama
 
-> A modern, elegant X11 reparenting compositing window manager written in Free Pascal for the **Samarinda Desktop Environment**, powered by **florialib**, **AggPas**, and **floria-toolkit**.
+> An X11 reparenting compositing window manager written in Free Pascal, for the **Samarinda
+> Desktop Environment**. Built on **florialib**, **AggPas** and **floria-toolkit**.
 
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-blue.svg)](https://opensource.org/licenses/MPL-2.0)
 [![Language: Free Pascal](https://img.shields.io/badge/Language-Free%20Pascal-orange.svg)](https://www.freepascal.org/)
@@ -12,90 +13,118 @@
 
 ![wmsama Live Showcase](assets/showcase.gif)
 
-*Demonstrating vector window decorations, dynamic directional cursor feedback, outer perimeter resize protection with zero client text selection interference, edge snap tiling, divider resizing, and automatic cursor-centered titlebar un-tiling.*
+*Recording of vector window decorations, directional cursor feedback, outer-margin resize with no
+client-area interference, edge snap tiling, divider resizing, and cursor-centred untile.*
 
 ---
 
-## Highlights & Features
+## Features
 
-### 🎨 High-Fidelity Vector Decorations & Compositing
-- **Sub-pixel Anti-Aliased Corners**: Rounded window borders with customizable top and bottom corner radii (default: 12px) rendered via AggPas 2D vector graphics engine.
-- **Built-in Software Compositor**: Real-time soft drop shadows with configurable blur radius and opacity, client damage tracking, and optional frosted glass backdrop blur.
-- **Override-Redirect Compositing**: Seamlessly composites menus, popups, dropdowns, and tooltips alongside managed windows.
-- **Vector Titlebar Controls**: Close, Maximize/Restore, Minimize, Shade (rollup), Pin (sticky), and Window Menu buttons rendered dynamically with hover halo glows and vector icon glyphs via `floria-toolkit`.
+### Decorations and compositing
 
-### 🎯 8-Directional Perimeter Resizing (Zero Client Interference)
-- **Outer Margin Hit Testing**: Resize triggers are situated exclusively in the outer frame margin padding (Top, Bottom, Left, Right, and 4 Corners).
-- **Uninterrupted Client Selection**: 100% of the client window area is preserved for the application. Terminal users can drag-select text from column 0 or interact with native application scrollbars without triggering accidental window resizing.
-- **Context-Sensitive Resize Feedback**: Automatically updates system cursors to matching directional shapes (`top_side`, `bottom_left_corner`, etc.) when hovering over outer resize margins and during active drag operations.
+- **Antialiased corners.** Top and bottom corner radii are configurable, default 12px, drawn with
+  AggPas rather than pre-rendered bitmaps.
+- **Built-in compositor.** Drop shadows with configurable blur radius and opacity, client damage
+  tracking, and optional backdrop blur. No external compositor is needed.
+- **Override-redirect windows.** Menus, popups, dropdowns and tooltips are registered with the
+  compositor and stacked above managed windows.
+- **Vector titlebar controls.** Close, Maximize/Restore, Minimize, Shade (rollup), Pin (sticky) and
+  Window Menu buttons, drawn through `floria-toolkit`.
 
-### 🪟 Interactive Edge Snapping & Smart Tiling
-- **Screen Edge Snapping**: Drag windows to the left or right screen boundary to snap into a clean 50% split tile.
-- **Divider Resizing**: Tiled windows constrain resizing to the dividing edge (e.g., right-tiled windows only allow width adjustments on their left divider border).
-- **Cursor-Centered Un-Tiling & Un-Maximizing**: Dragging the titlebar of a tiled or maximized window instantly restores its floating dimensions while smoothly centering the titlebar under the pointer.
+### Resize from the outer margin only
 
-### 🖱️ Dynamic Cursor State Engine
-- **Desktop & Titlebar**: Normal pointer cursor (`left_ptr`).
-- **Interactive Margins**: Directional hover and active resize cursors (`top_side`, `bottom_side`, `left_side`, `right_side`, `top_left_corner`, `top_right_corner`, `bottom_left_corner`, `bottom_right_corner`).
-- **Window Movement**: Omnidirectional move cursor (`fleur`) during drag-move actions.
+- **Hit testing.** Resize is triggered only by the outer frame margin: four edges and four corners.
+  The client area is never a resize target.
+- **Client area intact.** The whole client surface belongs to the application. Terminal text
+  selection from column 0, editor gutter clicks and native scrollbars do not start a resize.
+- **Cursor feedback.** The pointer changes to the matching directional cursor
+  (`top_side`, `bottom_left_corner`, ...) over a resize margin, and to `fleur` during a move.
+  Resize cursors are applied to the resize window only, never to the frame or the client, so a
+  client that defines no cursor of its own cannot inherit a stale one (WM-24).
 
-### 🎛️ Configurable Controls & Theming
-- **Button Styles**: Circle (macOS style), Squircle, or Square.
-- **Button Alignment**: Left (macOS style) or Right (Windows / GNOME / KDE style).
-- **Custom Button Layouts**: Syntax like `menu:shade,pin,minimize,maximize,close`.
-- **Themes**: Built-in Dark and Light color schemes.
-- **Alt+Tab Switcher HUD**: Built-in visual window switcher HUD.
+### Edge snapping and tiling
+
+- **Snap.** Dragging a window to the left or right screen edge tiles it to a 50% split.
+- **Divider resize.** A tiled window constrains resizing to its dividing edge.
+- **Untile and unmaximize.** Dragging the titlebar of a tiled or maximized window restores its
+  floating size and centres the titlebar under the pointer. The pre-drag position is what gets
+  restored, not the drag position (WM-21).
+
+### Configuration
+
+- **Button style:** `circle`, `squircle` or `square`.
+- **Button alignment:** left or right.
+- **Button layout:** for example `menu:shade,pin,minimize,maximize,close`.
+- **Themes:** dark and light.
+- **Alt+Tab:** a window switcher HUD, ordered most-recently-used.
+
+### Extended client area (titlebarless windows)
+
+Applications that draw their own titlebar can ask the window manager to drop the exterior frame and
+reserve space for the buttons inside the client canvas. The client sets
+`_NET_WM_EXTENDED_CLIENT_AREA = 1`; `wmsama` then frames the window with no titlebar, publishes
+`_NET_WM_WINDOW_CONTROLS_INSET = [left, right, top, bottom]`, and overlays the window controls in the
+reserved region. Button presses still go through `wmsama`, so they keep working when the client hangs.
+
+`floria-toolkit` exposes this to applications as `ft_window_on_controls_inset_changed`. The protocol
+is specified in
+[`desktop-design-philosophy/08-extended-client-area-protocol.md`](../desktop-design-philosophy/08-extended-client-area-protocol.md).
 
 ---
 
-## Project Architecture
+## Project layout
 
 ```
 wmsama/
 ├── project.xml                # PasBuild project descriptor
 ├── assets/
 │   └── showcase.gif           # Live feature recording
+├── docs/
+│   └── roadmap.md             # Audit findings, fixes, evidence, progress log
 ├── src/
 │   ├── main/pascal/
-│   │   ├── wmsama.pas         # CLI entry point, signal handlers, and config parser
-│   │   ├── wmsama.core.pas    # Window manager engine, input routing, tiling, resizing & compositor
-│   │   └── wmsama.ft.pas      # Floria Toolkit vector button integration & styling
+│   │   ├── wmsama.pas         # CLI entry point, signal handlers, config parser
+│   │   ├── wmsama.core.pas    # Window manager engine, input routing, tiling, compositor
+│   │   └── wmsama.ft.pas      # floria-toolkit vector button integration & styling
 │   └── test/pascal/
-│       ├── TestRunner.pas     # FPCUnit automated test harness
-│       └── TWMSamaTest.pas    # Unit & integration test cases
+│       ├── TestRunner.pas     # FPCUnit runner
+│       └── wmsama.test.pas    # Unit and integration tests
+├── scripts/
+│   └── audit-docs.py          # Docs/code consistency gate (see below)
+└── build.sh                   # FPC / Blaise / test wrapper
 ```
 
 ---
 
-## Dependencies & Requirements
+## Dependencies
 
-- **Free Pascal Compiler (`fpc`)**: Version 3.2.2 or later
-- **PasBuild**: Pascal project build tool
-- **florialib**: Core library (`Floria.XCB`, `Floria.XCB.WM`, `Floria.XCB.WM.Compositor`, `AggPas`)
-- **floria-toolkit (`libft.so`)**: Vector widget and window button rendering
-- **X11 / XCB Development Libraries**:
-  - `libxcb`, `libxcb-render`, `libxcb-shape`, `libxcb-composite`
-  - `libxcb-damage`, `libxcb-cursor`, `libxcb-keysyms`, `libxcb-icccm`, `libxcb-ewmh`
+- **Free Pascal Compiler (`fpc`)**, 3.2.2 or later
+- **PasBuild**
+- **florialib**: `Floria.XCB`, `Floria.XCB.WM`, `Floria.XCB.WM.Compositor`, `AggPas`
+- **floria-toolkit (`libft.so`)**: vector widgets and window button rendering
+- **X11 / XCB development libraries**: `libxcb`, `libxcb-render`, `libxcb-shape`,
+  `libxcb-composite`, `libxcb-damage`, `libxcb-cursor`, `libxcb-keysyms`, `libxcb-icccm`,
+  `libxcb-ewmh`
 
 ---
 
-## Building & Testing
+## Building and testing
 
-### 1. Compile `wmsama`
 ```bash
-pasbuild compile
+./build.sh            # compile to target/wmsama  (pasbuild compile)
+./build.sh test       # build and run the test suite (pasbuild test)
+./build.sh clean      # remove target/
 ```
-The compiled executable will be placed in `target/wmsama`.
 
-### 2. Run Automated Test Suite
-```bash
-pasbuild test
-```
-Executes all unit tests in `src/test/pascal/TWMSamaTest.pas` covering window creation, frame metrics, snapping, resizing, button placement, override-redirect compositing, and cursor states.
+The suite in `src/test/pascal/wmsama.test.pas` covers window creation, frame metrics, snapping,
+resizing, button placement, override-redirect compositing, cursor targets, the extended client area,
+and the minimise/restore/maximise state machine.
+
+Some tests need a live X server and skip themselves when one is not reachable.
 
 ---
 
-## Usage & Command-Line Options
+## Usage
 
 ```bash
 ./target/wmsama [options]
@@ -104,38 +133,45 @@ Executes all unit tests in `src/test/pascal/TWMSamaTest.pas` covering window cre
 | Option | Description | Default |
 |---|---|---|
 | `--display <name>` | Target X11 display (e.g. `:2`) | `$DISPLAY` |
-| `--no-compositor` | Run as pure reparenting WM without compositing | `false` |
-| `--blur` | Enable real-time frosted glass backdrop blur | `false` |
+| `--no-compositor` | Run as a plain reparenting WM without compositing | `false` |
+| `--blur` | Enable backdrop blur | `false` |
 | `--blur-radius <int>` | Backdrop blur radius | `15` |
-| `--shadow-radius <int>` | Drop shadow radius in pixels | `14` |
-| `--shadow-opacity <flt>` | Drop shadow opacity (0.0 – 1.0) | `0.35` |
-| `--corner-radius <int>` | Top corner radius in pixels | `12` |
-| `--bottom-radius <int>` | Bottom corner radius in pixels | `12` |
-| `--button-style <style>` | Window button shape: `circle`, `squircle`, `square` | `circle` |
-| `--buttons-left` | Align buttons to the left (macOS style) | (Default) |
-| `--buttons-right` | Align buttons to the right (Windows/KDE style) | `false` |
-| `--button-layout <lay>` | Custom button order (e.g. `menu:shade,pin,minimize,maximize,close`) | Auto |
-| `--theme <theme>` | Color theme: `dark`, `light` | `dark` |
-| `--libft <path>` | Custom path to `libft.so` | Auto |
-| `--help`, `-h` | Display usage instructions | — |
-| `--version`, `-v` | Show version information | — |
+| `--shadow-radius <int>` | Drop shadow radius, in pixels | `14` |
+| `--shadow-opacity <flt>` | Drop shadow opacity, 0.0 – 1.0 | `0.35` |
+| `--corner-radius <int>` | Top corner radius, in pixels | `12` |
+| `--bottom-radius <int>` | Bottom corner radius, in pixels | `12` |
+| `--button-style <style>` | Button shape: `circle`, `squircle`, `square` | `circle` |
+| `--button-alignment <align>` | Button alignment: `left`, `right` | `left` |
+| `--buttons-left` | Shorthand for `--button-alignment left` | (default) |
+| `--buttons-right` | Shorthand for `--button-alignment right` | `false` |
+| `--button-layout <lay>` | Custom button order, e.g. `menu:shade,pin,minimize,maximize,close` | auto |
+| `--theme <theme>` | Colour theme: `dark`, `light` | `dark` |
+| `--libft <path>` | Path to `libft.so` | auto |
+| `--help`, `-h` | Usage | — |
+| `--version`, `-v` | Version | — |
 
 ---
 
 ## Diagnostics
 
-Press **`Super+Shift+D`** while running to dump the current composited scene and every window's
-client image to disk. Useful for investigating rendering artifacts without guessing from
-screenshots.
+`Super+Shift+D` dumps the composited scene and each window's surfaces to disk. Useful for
+investigating a rendering artifact from pixels instead of a screenshot.
 
 | Variable | Effect |
 |---|---|
 | `WMSAMA_DEBUG=1` | Log X errors and state transitions to stderr |
 | `WMSAMA_DUMP_DIR=<path>` | Where `Super+Shift+D` writes (default `/tmp/wmsama-dump`) |
 
-The dump contains `scene.raw` (BGRA32, `w*h*4`), `scene.txt` (window list, geometry, compose and
-present rects) and one `win-<id>.raw` per window. No image writer is registered in `florialib`, so
-convert outside:
+The dump contains:
+
+- `scene.raw`: the composited scene, BGRA32, `width * height * 4` bytes
+- `scene.txt`: window list, geometry, compose and present rects
+- `frame-<id>.raw`: a window's frame decorations, on their own
+- `client-<id>.raw`: the same window's client content
+
+The frame and client surfaces are dumped separately because the compositor captures them
+separately (see WM-20 in the roadmap). No image writer is registered in `florialib`, so convert
+outside:
 
 ```bash
 magick -size 1280x800 -depth 8 BGRA:scene.raw scene.png
@@ -143,18 +179,39 @@ magick -size 1280x800 -depth 8 BGRA:scene.raw scene.png
 
 ---
 
-## Running in a Nested X Server (Xephyr)
+## Docs gate
 
-To test or develop `wmsama` without disrupting your primary desktop session, run it inside a nested Xephyr server:
+`scripts/audit-docs.py` checks the documentation against the code and exits non-zero on a
+mismatch. It catches the failures that are invisible in review:
+
+- a CLI flag documented in the README that `--help` does not accept
+- a CLI flag in `--help` that the README does not document
+- a roadmap item whose heading status contradicts its progress-log rows
+- a roadmap item missing from the findings summary table
+- a test name or `.pas` file cited in the docs that does not exist
 
 ```bash
-# 1. Launch Xephyr on display :2
+python3 scripts/audit-docs.py           # check
+python3 scripts/audit-docs.py --list    # also list every citation it resolved
+```
+
+Run it after editing the README, the roadmap, or the CLI. It needs no X server and no build.
+
+---
+
+## Running in a nested X server
+
+X11 allows only one window manager to hold `SubstructureRedirect` per display, so do not run
+`wmsama` on your primary session. Use Xephyr:
+
+```bash
+# 1. Nested server
 Xephyr :2 -screen 1024x768 -ac &
 
-# 2. Launch wmsama on display :2
+# 2. wmsama inside it
 ./target/wmsama --display :2 &
 
-# 3. Launch client applications inside the nested session
+# 3. Clients
 DISPLAY=:2 xterm &
 DISPLAY=:2 xcalc &
 ```
@@ -163,10 +220,10 @@ DISPLAY=:2 xcalc &
 
 ## License
 
-This project is licensed under the **Mozilla Public License 2.0 (MPL-2.0)**. See the project descriptor in [project.xml](project.xml) for licensing details.
+Mozilla Public License 2.0 (MPL-2.0). See [project.xml](project.xml).
 
 ---
 
 ## Author
 
-**Dio Affriza** — *Samarinda Desktop Environment Project*
+**Dio Affriza** — Samarinda Desktop Environment Project
