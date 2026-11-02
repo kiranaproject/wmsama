@@ -51,7 +51,8 @@ client-area interference, edge snap tiling, divider resizing, and cursor-centred
 - **Bounded dragging.** A move drag cannot put the titlebar above the top panel or below the bottom
   one: the limit is the work area, so the panels' struts are respected. When the window's bottom edge
   reaches the bottom of the work area there is a small detent — a few pixels of travel before the
-  drag carries on.
+  drag carries on. On a multi-monitor desktop the limit is the monitor the window is over, so a
+  shorter screen stops it at its own edge.
 - **Snap.** Dragging a window to the left or right screen edge tiles it to a 50% split.
 - **Divider resize.** A tiled window constrains resizing to its dividing edge.
 - **Untile and unmaximize.** Dragging the titlebar of a tiled or maximized window restores its

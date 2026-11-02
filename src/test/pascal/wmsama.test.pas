@@ -70,6 +70,9 @@ type
     procedure TestPanelOrderUnaffectedByActivation();
     procedure TestFullscreenCoversPanels();
     procedure TestStackingOrderKeepsPanelAbove();
+    procedure TestDragClampsToMonitorUnderThePointer();
+    procedure TestDragMonitorSelectionIgnoresAggregateMonitor();
+    procedure TestDragAcrossMonitorsUsesTargetMonitor();
   end;
 
 implementation
@@ -2974,6 +2977,132 @@ begin
   finally
     if Obs <> nil then xcb_disconnect(Obs);
     xcb_disconnect(Conn);
+  end;
+end;
+
+// With more than one monitor, the drag limit belongs to the monitor the window is
+// over, not the primary. A short screen must stop the window at its own bottom edge.
+//
+// Built offline, with the same monitor list shape the server reports for
+// `xrandr --setmonitor`: two real screens of different heights side by side.
+procedure TWMSamaTest.TestDragClampsToMonitorUnderThePointer();
+var
+  wm: TWMSamaCompositingWM;
+  laptop, external: TXCBMonitor;
+  cli: TXCBWMClient;
+  limit: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Monitors.Clear();
+    laptop := TXCBMonitor.Create('LAPTOP', TXCBRect.Create(0, 0, 1280, 900), True, 0);
+    external := TXCBMonitor.Create('EXTERNAL', TXCBRect.Create(1280, 0, 1280, 700), False, 1);
+    wm.Monitors.Add(laptop);
+    wm.Monitors.Add(external);
+    wm.RecomputeWorkareas();
+
+    // Drag a window on the short monitor downwards. The limit is its bottom (700)
+    // minus the titlebar, not the laptop's bottom (900).
+    cli := wm.ManageWindow(9401);
+    cli.SetGeometry(1400, 100, 500, 300);
+    wm.BeginDrag(cli, dmMove, 1600, 120);
+    wm.UpdateDrag(1600, 3000);
+
+    limit := 700 - wm.TitlebarHeight;
+    AssertEquals('clamped to the short monitor, not the primary',
+                 limit, cli.CurrentRect.Y);
+    AssertTrue('titlebar bottom is the short monitor bottom',
+                 cli.CurrentRect.Y + wm.TitlebarHeight = 700);
+
+    // The same drag over the tall monitor uses the tall monitor's edge.
+    wm.EndDrag();
+    cli.SetGeometry(200, 100, 500, 300);
+    wm.BeginDrag(cli, dmMove, 400, 120);
+    wm.UpdateDrag(400, 3000);
+    AssertEquals('clamped to the tall monitor', 900 - wm.TitlebarHeight, cli.CurrentRect.Y);
+    wm.EndDrag();
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+// A software-defined monitor layout keeps an automatic aggregate monitor (named
+// "default") that spans the whole framebuffer, listed before the real ones. Taking
+// the first monitor that contains the point would pick the aggregate and make the
+// layout behave like one screen again.
+procedure TWMSamaTest.TestDragMonitorSelectionIgnoresAggregateMonitor();
+var
+  wm: TWMSamaCompositingWM;
+  laptop, external, aggregate: TXCBMonitor;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Monitors.Clear();
+    // Order matters: the aggregate is listed first, exactly as xrandr reports it.
+    aggregate := TXCBMonitor.Create('default', TXCBRect.Create(0, 0, 2560, 900), False, 0);
+    laptop := TXCBMonitor.Create('LAPTOP', TXCBRect.Create(0, 0, 1280, 900), True, 1);
+    external := TXCBMonitor.Create('EXTERNAL', TXCBRect.Create(1280, 0, 1280, 700), False, 2);
+    wm.Monitors.Add(aggregate);
+    wm.Monitors.Add(laptop);
+    wm.Monitors.Add(external);
+    wm.RecomputeWorkareas();
+
+    cli := wm.ManageWindow(9402);
+    cli.SetGeometry(1400, 100, 500, 300);
+    wm.BeginDrag(cli, dmMove, 1600, 120);
+
+    // Inside the aggregate but on the short screen: the specific monitor must win.
+    AssertSame('the smallest containing monitor is chosen, not the aggregate',
+               external, wm.MonitorAt(1600, 300));
+    AssertSame('the tall screen is chosen on its own side',
+               laptop, wm.MonitorAt(400, 300));
+
+    wm.UpdateDrag(1600, 3000);
+    AssertEquals('aggregate monitor did not override the short screen',
+                 700 - wm.TitlebarHeight, cli.CurrentRect.Y);
+    wm.EndDrag();
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+// Dragging from one screen to the other must switch which monitor's edge applies
+// partway through, and the clamp must follow.
+procedure TWMSamaTest.TestDragAcrossMonitorsUsesTargetMonitor();
+var
+  wm: TWMSamaCompositingWM;
+  laptop, external: TXCBMonitor;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Monitors.Clear();
+    laptop := TXCBMonitor.Create('LAPTOP', TXCBRect.Create(0, 0, 1280, 900), True, 0);
+    external := TXCBMonitor.Create('EXTERNAL', TXCBRect.Create(1280, 0, 1280, 700), False, 1);
+    wm.Monitors.Add(laptop);
+    wm.Monitors.Add(external);
+    wm.RecomputeWorkareas();
+
+    cli := wm.ManageWindow(9403);
+    cli.SetGeometry(300, 100, 500, 300);
+    wm.BeginDrag(cli, dmMove, 500, 120);
+
+    // Drag right onto the short screen while still high up: the wide range is the
+    // tall screen's, so nothing clamps yet.
+    wm.UpdateDrag(1500, 300);
+    AssertEquals('not clamped while still on the tall screen', 280, cli.CurrentRect.Y);
+
+    // Now drag down. The window is over the short screen, so it stops at 666.
+    wm.UpdateDrag(1500, 2000);
+    AssertEquals('clamped to the short screen after crossing over',
+                 700 - wm.TitlebarHeight, cli.CurrentRect.Y);
+    wm.EndDrag();
+  finally
+    cli := nil;
+    wm.Free();
   end;
 end;
 

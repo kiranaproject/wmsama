@@ -1719,7 +1719,86 @@ Tests: 48 -> 52.
 
 ---
 
-## 7. Deliberate Non-Goals
+## 7. Multi-Monitor Drag Bounds
+
+### The defect
+
+The drag clamp used `Workarea`, which is the **primary** monitor's work area. A window dragged on a
+second monitor was therefore clamped to the primary's edges: on a 1280x900 laptop next to a
+1280x700 external, dragging down on the external let the titlebar reach `y=866` when that screen ends
+at `700`. The window left its own screen by 200px.
+
+Only reachable with more than one monitor, which is why it was left open when the clamp landed.
+
+### Reproducing it without a second monitor
+
+RanR lets monitors be **defined in software** over a single framebuffer:
+
+```bash
+Xephyr :91 -screen 2560x900 -ac -noreset &
+xrandr --setmonitor LAPTOP   1280/300x900/200+0+0    none
+xrandr --setmonitor EXTERNAL 1280/300x700/150+1280+0 none
+```
+
+`xcb_randr_get_monitors` reports exactly this list, so wmsama sees the same monitor geometry it
+would on real hardware. Xinerama reports the same heads. No VM, no second output, and the screens
+can differ in size — which is the case that exposes the bug. The probe drives a real pointer drag
+via XTEST and reports where the frame stopped.
+
+Before the fix, on the short screen:
+
+```
+correct stop for this monitor : y=666
+what the primary work area gives: y=866
+RESULT BUG: clamped to the primary work area, not this monitor
+```
+
+### Rules
+
+- The limit comes from the monitor the window is **over**, via `DragWorkarea`.
+- The point tested is the frame's **centre**, not a corner, so a window straddling two screens does
+  not flip monitor as its edge crosses a boundary. The clamp is vertical, and the horizontal centre
+  is stable during a vertical drag.
+- `MonitorAt` picks the **smallest** monitor containing the point. A software-defined layout keeps an
+  automatic `default` monitor spanning the whole framebuffer, listed alongside the real ones; taking
+  the first match would collapse the layout back to one screen.
+- If no monitor contains the point — the normal case while asking about a position below every
+  screen — it falls back to monitors whose **horizontal span** contains the centre. That is what
+  makes the clamp resolve correctly when the candidate Y is outside all of them.
+- The monitor's work area is intersected with the monitor rect, because a strut is expressed against
+  the whole screen and a panel on one screen must not shrink another.
+
+### Acceptance checks
+
+1. A window dragged down on a 1280x700 screen stops at `666`, while the same drag on a 1280x900
+   screen stops at `866`. `TestDragClampsToMonitorUnderThePointer`.
+2. An aggregate `default` monitor listed first does not win over the specific screen.
+   `TestDragMonitorSelectionIgnoresAggregateMonitor`.
+3. Dragging from the tall screen onto the short one switches which edge applies mid-drag.
+   `TestDragAcrossMonitorsUsesTargetMonitor`.
+
+Live, on the Xephyr layout above: `EXTERNAL` stops at 666, `LAPTOP` at 866, dragging up on the short
+screen stops at 0, and a drag from the laptop onto the external clamps at the external's bottom.
+
+Sabotage-verified: reverting to `Workarea` fails all three tests, taking the first containing monitor
+fails the aggregate test, and removing the horizontal-overlap fallback fails all three.
+
+Tests: 52 -> 55.
+
+### Notes
+
+- **A bug found by the old test.** Making the top stop monitor-aware dropped the `topY` assignment,
+  leaving it uninitialised. `TestDragCannotPushTitlebarAboveWorkarea` caught it immediately
+  (`expected <34> but was <-100`). The existing single-monitor tests are what stopped this shipping.
+- **Not covered:** dragging a window so it straddles two screens with different heights *and* leaving
+  it there mid-gap. The limits are per-monitor, so a window spanning a seam is subject to whichever
+  monitor its centre is on.
+- **Not covered:** per-monitor `_NET_WORKAREA`. EWMH publishes a single work area per screen, so the
+  published property remains the primary's even with several monitors.
+
+---
+
+## 8. Deliberate Non-Goals
 
 Recorded so they are not re-litigated, and so a future contributor does not "fix" them by
 accident.
@@ -1743,7 +1822,7 @@ accident.
 
 ---
 
-## 8. Definition of Done (per item)
+## 9. Definition of Done (per item)
 
 An item may be marked `☑` only when all of the following hold:
 
@@ -1759,7 +1838,7 @@ An item may be marked `☑` only when all of the following hold:
 
 ---
 
-## 9. Progress Log
+## 10. Progress Log
 
 Append-only. One row per landed item (or per significant investigation that changed the plan).
 
@@ -1802,4 +1881,5 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-11-02 | ECA | done | working tree | **Acceptance and harness pass.** Insets now checked against the buttons actually drawn, width-independence, non-extended clients reserving nothing, and the published property read back off the wire with `format=32` and four elements. Tests 38 -> 42, sabotage-verified three ways. Also stopped three live tests from silently passing when they could not take the display: they raise `EIgnoredTest` now, so a skip is visible instead of reporting a pass for a body that never ran |
 | 2026-11-02 | Drag bounds | done | working tree | **Found by user report:** windows could be dragged past the top and bottom panels, leaving an unreachable titlebar. Move-drags are now bounded by `_NET_WORKAREA` (so the panels are respected via their struts) with a hard stop at each end and an 8px detent where the window's bottom edge meets the work area. Verified with a real pointer under Xephyr plus two strut-carrying DOCK windows: stops at 728 and 38 on a 1280x800 screen with 38px panels. Tests 42 -> 48, sabotage-verified four ways |
 | 2026-11-02 | Panel stacking | done | working tree | **Found by user report:** a window dragged to the bottom was drawn over the shellsama panel. Every raise path used a plain `Add`/`ABOVE`, and the compositor paints in list order, so activation put a window above the panels. Both compositor order and X stacking order are now banded (desktop < normal < panel < fullscreen) and a raise stops at the top of its own band. `--no-compositor` had the same defect in X stacking, which also decides where a click lands. Verified by sampling the composited root where a dragged window overlaps a dock, in both modes; the probe returns the window colour under a sabotaged build. Tests 48 -> 52 |
+| 2026-11-02 | MM drag | done | working tree | **Closes the gap left by drag bounds.** The clamp used the primary work area, so a window on a second screen was stopped at the wrong edge (200px past the short screen's bottom in the test layout). Limits now come from the monitor under the drag, chosen as the smallest monitor containing the frame centre, with a horizontal-overlap fallback because the candidate Y is usually below every screen. Reproduced and verified with software-defined monitors (`xrandr --setmonitor`) over one Xephyr framebuffer, two screens of different heights; real pointer drags via XTEST. Tests 52 -> 55, sabotage-verified three ways |
 | | | | | |

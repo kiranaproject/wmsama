@@ -208,6 +208,11 @@ type
     // The Y at which the window's bottom edge meets the bottom of the work area.
     // A drag has to travel DragDetentPixels past this before it continues.
     function GetDragDetentY(): Integer;
+    // Visible area of the monitor the drag is over, struts included. Falls back to
+    // Workarea when there is only one monitor.
+    function DragWorkarea(const ACentreX, ACentreY: Integer): TXCBRect;
+    function DragCentreX(): Integer;
+    function DragClientCentreY(): Integer;
 
     // One step of a move drag, separated from UpdateDrag so the limit and detent
     // arithmetic can be tested without a display. Returns the Y the window should
@@ -246,6 +251,10 @@ type
     procedure DoOnTick(const AElapsedMs: Integer); override;
   public
     function IsWindowMenu(const AWindow: xcb_window_t): Boolean;
+    // Smallest monitor containing the point, preferring a specific screen over an
+    // aggregate one. Exposed because multi-monitor behaviour cannot be reproduced
+    // without it; see the comment on the body.
+    function MonitorAt(const AX, AY: Integer): TXCBMonitor;
     // Compositor paint order is list order, lowest first. Everything that is not a
     // panel sits between the desktop and the panels, so a window can never be drawn
     // over a shell panel.
@@ -3003,6 +3012,105 @@ begin
   Result := FTitlebarHeight;
 end;
 
+function TWMSamaCompositingWM.MonitorAt(const AX, AY: Integer): TXCBMonitor;
+var
+  i, area, bestArea: Integer;
+  mon: TXCBMonitor;
+
+  procedure Consider(const AMon: TXCBMonitor);
+  var
+    a: Integer;
+  begin
+    if AMon = nil then Exit;
+    a := AMon.Rect.Width * AMon.Rect.Height;
+    if (a > 0) and (a < bestArea) then
+    begin
+      bestArea := a;
+      Result := AMon;
+    end;
+  end;
+
+begin
+  // The smallest monitor containing the point, not the first. A software-defined
+  // monitor layout (xrandr --setmonitor) keeps an automatic "default" monitor that
+  // spans the whole framebuffer and is listed alongside the real ones, so taking the
+  // first match would collapse the layout back to one screen.
+  Result := nil;
+  bestArea := High(Integer);
+
+  for i := 0 to MonitorCount - 1 do
+  begin
+    mon := GetMonitor(i);
+    if (mon <> nil) and mon.Contains(AX, AY) then
+      Consider(mon);
+  end;
+  if Result <> nil then Exit;
+
+  // Nothing contains the point. This is the normal case while dragging a window
+  // downwards: the clamp is being asked about a position below every screen, so the
+  // frame centre is outside all of them. Fall back to monitors that overlap the
+  // window horizontally -- the drag is vertical, so the column is what identifies the
+  // screen the user is working on.
+  for i := 0 to MonitorCount - 1 do
+  begin
+    mon := GetMonitor(i);
+    if (mon <> nil) and (AX >= mon.Rect.X) and (AX < mon.Rect.Right()) then
+      Consider(mon);
+  end;
+  if Result <> nil then Exit;
+
+  Result := MonitorForPoint(AX, AY);
+end;
+
+function TWMSamaCompositingWM.DragWorkarea(const ACentreX, ACentreY: Integer): TXCBRect;
+var
+  mon: TXCBMonitor;
+  full: TXCBRect;
+begin
+  // The visible area of the monitor the window is being dragged over. On a single
+  // monitor this is exactly Workarea; with several it is the one under the drag, so
+  // a short screen stops the window at its own bottom edge instead of the primary's.
+  Result := Workarea;
+
+  // The point tested is the frame's centre, not its corner: a window straddling two
+  // screens then keeps the same monitor for the whole vertical travel instead of
+  // flipping as its corner crosses the boundary.
+  mon := MonitorAt(ACentreX, ACentreY);
+  if mon = nil then Exit;
+  if (mon.Rect.Width <= 0) or (mon.Rect.Height <= 0) then Exit;
+  if (mon.Workarea.Width <= 0) or (mon.Workarea.Height <= 0) then Exit;
+
+  // The monitor's work area already has the struts applied, but a strut is
+  // expressed against the whole screen. Intersect with the monitor rect so a panel
+  // on one screen cannot shrink the visible area of another.
+  full := mon.Rect;
+  Result := mon.Workarea;
+  if Result.X < full.X then
+    Result.X := full.X;
+  if Result.Y < full.Y then
+    Result.Y := full.Y;
+  if Result.Right() > full.Right() then
+    Result.Width := full.Right() - Result.X;
+  if Result.Bottom() > full.Bottom() then
+    Result.Height := full.Bottom() - Result.Y;
+  if (Result.Width <= 0) or (Result.Height <= 0) then
+    Result := full;
+end;
+
+function TWMSamaCompositingWM.DragCentreX(): Integer;
+begin
+  Result := 0;
+  if DragClient = nil then Exit;
+  Result := DragClient.CurrentRect.X + (DragClient.CurrentRect.Width div 2);
+end;
+
+function TWMSamaCompositingWM.DragClientCentreY(): Integer;
+begin
+  Result := 0;
+  if DragClient = nil then Exit;
+  Result := DragClient.CurrentRect.Y + (DragClient.CurrentRect.Height div 2);
+end;
+
 function TWMSamaCompositingWM.GetDragLimitY(): Integer;
 var
   wa: TXCBRect;
@@ -3011,7 +3119,7 @@ begin
   Result := High(Integer);
   if FDragFrameHeight <= 0 then Exit;
 
-  wa := Workarea;
+  wa := DragWorkarea(DragCentreX(), DragClientCentreY());
   if (wa.Width <= 0) or (wa.Height <= 0) then Exit;
 
   th := DragTitlebarExtent();
@@ -3036,7 +3144,7 @@ begin
   Result := High(Integer);
   if FDragFrameHeight <= 0 then Exit;
 
-  wa := Workarea;
+  wa := DragWorkarea(DragCentreX(), DragClientCentreY());
   if (wa.Width <= 0) or (wa.Height <= 0) then Exit;
 
   h := FDragFrameHeight;
@@ -3054,10 +3162,14 @@ end;
 function TWMSamaCompositingWM.ResolveDragY(const ARawY: Integer; out ADetentPassed: Boolean): Integer;
 var
   topY, limitY, detentY: Integer;
+  wa: TXCBRect;
 begin
   ADetentPassed := False;
 
-  topY := Workarea.Y;
+  // The top stop is the top of the monitor the window is heading for, so a window
+  // dragged up on a screen that starts below another's top is not stopped early.
+  wa := DragWorkarea(DragCentreX(), ARawY + (FDragFrameHeight div 2));
+  topY := wa.Y;
   limitY := GetDragLimitY();
   detentY := GetDragDetentY();
 
