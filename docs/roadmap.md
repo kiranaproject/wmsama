@@ -109,8 +109,9 @@ Severity is about *user-visible damage*, not code smell.
 | WM-27 | P1 | Loop | The tick throttle halved the frame rate of uncapped apps | `☑` |
 | WM-28 | P2 | Loop | Update rate decoupled from the frame rate (`ft_set_timer`) | `☑` |
 | WM-29 | P1 | Compositor | An EGL window goes blank after a popup menu is destroyed | `☑` |
+| WM-30 | P1 | Input | `UpdateHoverCursor` dereferences a freed client | `☑` |
 
-**Totals:** 4 × P0, 15 × P1, 9 × P2. Of the 29 items: 27 done, 1 rejected with the limitation
+**Totals:** 4 × P0, 16 × P1, 9 × P2. Of the 30 items: 28 done, 1 rejected with the limitation
 documented (WM-20), 1 withdrawn (WM-09).
 
 WM-18 and WM-19 were found by profiling once the audit items closed, and WM-20 while investigating
@@ -1478,6 +1479,79 @@ further.
 
 ---
 
+### ☑ WM-30 — `UpdateHoverCursor` dereferences a freed client
+
+**Severity:** P1 (Access Violation; takes the WM and every reparented client with it)
+**Found by:** user report — an intermittent AV with a two-frame stack:
+
+```
+$0000000000492431  UpdateHoverCursor,  line 3452 of src/main/pascal/wmsama.core.pas
+$0000000000494667  ProcessEvent,       line 3973 of src/main/pascal/wmsama.core.pas
+```
+
+**Cause.** `FLastHoverClient` is assigned on every motion over a resize margin, but was
+never cleared when that client went away. `UpdateHoverCursor` reads
+`FLastHoverClient.ResizeWindow` before writing the new cursor, so once the client had
+been freed, that line dereferenced a dangling pointer.
+
+The same method already guards a sibling field, two statements above:
+
+```pascal
+// FLastActiveClient must never outlive the client it points at.
+if FLastActiveClient = AClient then
+  FLastActiveClient := nil;
+```
+
+`FLastHoverClient` was missed. `FWindowMenuClient` is handled the same way, and
+`florialib` clears its own `FActiveClient` and `FDragClient` in `UnmanageWindow`
+before `DoOnClientUnmapped` runs. A scripted audit of every `TXCBWMClient` field in
+both units found this to be the only one without a guard.
+
+What makes the pointer dangling rather than merely stale is the free order:
+`UnmanageWindow` calls `DoOnClientUnmapped` first, then `FClients.Delete`, and
+`FClients` is an owning `TObjectList`.
+
+**Why it was intermittent.** Freed memory usually still reads harmlessly, so the fault
+only appears once the allocator reuses or unmaps the block. The pointer also had to
+survive until the next motion event, and most paths overwrite `FLastHoverClient` on the
+way through — which is why it could not be reproduced on demand.
+
+**Fix.** In `DoOnClientUnmapped`, next to the existing `FLastActiveClient` guard:
+
+```pascal
+if FLastHoverClient = AClient then
+begin
+  FLastHoverClient := nil;
+  FHoverCursor := 0;
+  FHoverCursorResizeWindow := 0;
+end;
+```
+
+The two cursor fields are cleared with it: they describe a window belonging to the dying
+client, and the `LeaveNotify` restore path (`ProcessEvent`, `XCB_LEAVE_NOTIFY`) would
+otherwise write a cursor to a destroyed window id.
+
+**Test:** `TestHoverCursorClearedWhenClientUnmapped`. It asserts the pointer was
+cleared, not that the code crashes. A crash-based assertion would pass against the
+broken code, because the freed memory usually still reads fine. `HasHoverClient` was
+added read-only for exactly that reason.
+
+Sabotage-verified: removing the clearing fails it with `hover client cleared when the
+client is unmapped`. The test needs a live display, so it reports as **Ignored** rather
+than passing when another WM owns the display.
+
+Tests 55 -> 56.
+
+**Not changed, worth knowing:** `UpdateHoverCursor` commits `FLastHoverClient := AClient`
+before calling `SetWindowCursor`. If that call ever raised, the WM would believe it had
+decorated a client it never did — the same shape as WM-02. Left alone because
+`SetWindowCursor` does not raise in practice, and the change is unverifiable without a
+fault-injection harness.
+
+---
+
+---
+
 ## 4. Extended Client Area
 
 ### Scope
@@ -1882,4 +1956,5 @@ Append-only. One row per landed item (or per significant investigation that chan
 | 2026-11-02 | Drag bounds | done | working tree | **Found by user report:** windows could be dragged past the top and bottom panels, leaving an unreachable titlebar. Move-drags are now bounded by `_NET_WORKAREA` (so the panels are respected via their struts) with a hard stop at each end and an 8px detent where the window's bottom edge meets the work area. Verified with a real pointer under Xephyr plus two strut-carrying DOCK windows: stops at 728 and 38 on a 1280x800 screen with 38px panels. Tests 42 -> 48, sabotage-verified four ways |
 | 2026-11-02 | Panel stacking | done | working tree | **Found by user report:** a window dragged to the bottom was drawn over the shellsama panel. Every raise path used a plain `Add`/`ABOVE`, and the compositor paints in list order, so activation put a window above the panels. Both compositor order and X stacking order are now banded (desktop < normal < panel < fullscreen) and a raise stops at the top of its own band. `--no-compositor` had the same defect in X stacking, which also decides where a click lands. Verified by sampling the composited root where a dragged window overlaps a dock, in both modes; the probe returns the window colour under a sabotaged build. Tests 48 -> 52 |
 | 2026-11-02 | MM drag | done | working tree | **Closes the gap left by drag bounds.** The clamp used the primary work area, so a window on a second screen was stopped at the wrong edge (200px past the short screen's bottom in the test layout). Limits now come from the monitor under the drag, chosen as the smallest monitor containing the frame centre, with a horizontal-overlap fallback because the candidate Y is usually below every screen. Reproduced and verified with software-defined monitors (`xrandr --setmonitor`) over one Xephyr framebuffer, two screens of different heights; real pointer drags via XTEST. Tests 52 -> 55, sabotage-verified three ways |
+| 2026-11-03 | WM-30 | done | working tree | **Found by user report:** an intermittent Access Violation with `UpdateHoverCursor` on the stack. `FLastHoverClient` was assigned on motion over a resize margin and never cleared when the client was freed, so the next motion read `ResizeWindow` through a dangling pointer; the free order (`DoOnClientUnmapped`, then `FClients.Delete` on an owning list) is what makes it dangling. A sibling field in the same method was already guarded, which is how the omission was found, and a scripted audit of every client-pointer field in both units confirmed it was the only one. Intermittent because freed memory usually still reads harmlessly. Now cleared on unmap together with the two cursor fields, whose windows die with the client. Tests 55 -> 56, sabotage-verified; the test asserts the pointer is cleared rather than crashing, because a crash-based assertion would pass against the broken code |
 | | | | | |

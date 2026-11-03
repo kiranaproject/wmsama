@@ -37,6 +37,7 @@ type
     procedure TestRestoreAfterMaximizeThenTile();
     procedure TestNonSnappingDragUpdatesRestoreRect();
     procedure TestHoverCursorTargetsResizeWindowOnly();
+    procedure TestHoverCursorClearedWhenClientUnmapped();
     procedure TestFloriaToolkitButtonStyling();
     procedure TestButtonAlignmentAndPlacement();
     procedure TestAdditionalWindowControls();
@@ -3103,6 +3104,92 @@ begin
   finally
     cli := nil;
     wm.Free();
+  end;
+end;
+
+// The hover client is dereferenced on the next motion event, but the client object is
+// freed as soon as UnmanageWindow returns. Leaving the pointer set is the reported
+// Access Violation at UpdateHoverCursor. Asserted on the pointer being cleared rather
+// than on a crash: freed memory usually still reads harmlessly, so a crash-based test
+// would pass on the broken code.
+procedure TWMSamaTest.TestHoverCursorClearedWhenClientUnmapped();
+var
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  Win, Other, Root: xcb_window_t;
+begin
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then
+    SkipIfNoServer('no X server');
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
+      Root := wm.RootWindow;
+      if Root = 0 then
+        SkipIfNoServer('no root window');
+
+      Win := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win, Root, 100, 100, 300, 220, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, Win);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+
+      cli := wm.ManageWindow(Win);
+      AssertNotNull('client managed', cli);
+      AssertTrue('resize window created', cli.ResizeWindow <> 0);
+
+      // Hover its resize margin, which is what records the client.
+      wm.UpdateHoverCursor(wm.CursorResizeLeft, cli);
+      AssertTrue('hover client recorded', wm.HasHoverClient);
+      AssertEquals('cursor applied to the resize window',
+                   Integer(cli.ResizeWindow), Integer(wm.HoverCursorResizeWindow));
+
+      // Destroying the client must drop both the pointer and the window ids that
+      // belonged to it.
+      wm.UnmanageWindow(cli);
+      AssertFalse('hover client cleared when the client is unmapped', wm.HasHoverClient);
+      AssertEquals('stale resize-window id cleared', 0,
+                   Integer(wm.HoverCursorResizeWindow));
+
+      // The path that used to fault: a motion update after the hovered client died.
+      // Manage a second client so the call has a live target to compare against.
+      Other := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Other, Root, 500, 100, 300, 220, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, Other);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+
+      cli := wm.ManageWindow(Other);
+      AssertNotNull('second client managed', cli);
+      wm.UpdateHoverCursor(wm.CursorResizeRight, cli);
+      AssertTrue('hover moved to the second client', wm.HasHoverClient);
+      AssertEquals('cursor on the second client',
+                   Integer(cli.ResizeWindow), Integer(wm.HoverCursorResizeWindow));
+
+      // Leaving the client entirely must also not read the dead pointer.
+      wm.UpdateHoverCursor(wm.CursorNormal, nil);
+      AssertFalse('hover cleared after leaving', wm.HasHoverClient);
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
   end;
 end;
 

@@ -197,6 +197,7 @@ type
     FPreDragRestoredValid: Boolean;
 
     function AcquireKeyboardGrab(): Boolean;
+    function GetHasHoverClient(): Boolean;
 
     // Lowest Y a move-drag may place a window at: the point where its titlebar
     // would leave the bottom of the work area. Returns High(Integer) when the
@@ -379,6 +380,11 @@ type
     // left at CursorNormal because the client inherits the frame's cursor (see
     // UpdateHoverCursor for why that matters).
     property HoverCursorResizeWindow : xcb_window_t read FHoverCursorResizeWindow;
+    // Whether a client is still remembered as the hover target. It is dereferenced on
+    // the next motion event, so it must be nil once that client is gone. Exposed so a
+    // regression test can assert the pointer was cleared; a dangling pointer does not
+    // reliably fault, so a crash-based test would not be sensitive.
+    property HasHoverClient     : Boolean        read GetHasHoverClient;
     property FramePaintCount    : Integer        read FFramePaintCount;
     // Cached titlebar GC. Zero until the first paint on a live connection.
     property TitlebarGC         : xcb_gcontext_t read FTitlebarGC;
@@ -1682,6 +1688,22 @@ begin
   // FLastActiveClient must never outlive the client it points at.
   if FLastActiveClient = AClient then
     FLastActiveClient := nil;
+
+  // Same rule for the hover client, and the same hazard: UpdateHoverCursor reads
+  // FLastHoverClient.ResizeWindow on the next motion event, and this client is freed
+  // as soon as this returns. It used to be left pointing at freed memory, which is
+  // the Access Violation reported at UpdateHoverCursor line 3452 -- intermittent
+  // because freed memory usually still reads harmlessly.
+  //
+  // The two cursor fields go with it: they describe a window that belongs to this
+  // client, and the LeaveNotify restore path would otherwise write a cursor to a
+  // destroyed window id.
+  if FLastHoverClient = AClient then
+  begin
+    FLastHoverClient := nil;
+    FHoverCursor := 0;
+    FHoverCursorResizeWindow := 0;
+  end;
 
   // A window disappearing mid-switch would leave the HUD pointing at a dead
   // client; drop the switcher (and its grab) instead.
@@ -3408,6 +3430,11 @@ begin
     UpdateHoverCursor(CursorNormal, nil);
 
   RequestComposite();
+end;
+
+function TWMSamaCompositingWM.GetHasHoverClient(): Boolean;
+begin
+  Result := FLastHoverClient <> nil;
 end;
 
 // Apply a hover cursor.
