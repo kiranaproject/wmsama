@@ -71,6 +71,7 @@ type
     procedure TestPanelOrderUnaffectedByActivation();
     procedure TestFullscreenCoversPanels();
     procedure TestStackingOrderKeepsPanelAbove();
+    procedure TestBackWindowMarginIsNotOfferedUnderAFrontWindow();
     procedure TestDragClampsToMonitorUnderThePointer();
     procedure TestDragMonitorSelectionIgnoresAggregateMonitor();
     procedure TestDragAcrossMonitorsUsesTargetMonitor();
@@ -2980,6 +2981,113 @@ begin
     xcb_disconnect(Conn);
   end;
 end;
+
+// A window's resize margin must not win a hit test where a front window covers it.
+//
+// GetResizeModeForPoint is pure geometry over one client and has no idea about stacking.
+// The margin band straddles the frame edge -- [wx-8, wx) and [wx+ww, wx+ww+8) -- so it
+// extends 8px OUTSIDE the window. Where a front window overlaps that band, the band is
+// still geometrically under the pointer, and the MRU scan in the motion handler takes the
+// first client that matches. The result: a resize cursor and a resize drag on the window
+// behind, at a point the user is aiming at the front window.
+//
+// This is the calculator case. Park the terminal behind, put the calculator so its clear
+// button sits over the terminal's right edge, and clicking the button starts resizing the
+// terminal.
+//
+// The fix is not in GetResizeModeForPoint, which is correctly a per-client geometry
+// question. It is in the search: a client may only be considered if no higher window
+// covers the point.
+procedure TWMSamaTest.TestBackWindowMarginIsNotOfferedUnderAFrontWindow();
+var
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  wm: TWMSamaCompositingWM;
+  back, front: TXCBWMClient;
+  mode: TXCBDragMode;
+  hit: TXCBWMClient;
+  Root, WinA, WinB: xcb_window_t;
+  edgeX, insideY: Integer;
+begin
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then
+    SkipIfNoServer('no X server');
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
+      Root := wm.RootWindow;
+
+      WinA := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, WinA, Root, 100, 100, 400, 300, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, WinA);
+
+      WinB := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, WinB, Root, 480, 150, 300, 200, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, WinB);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+
+      back := wm.ManageWindow(WinA);
+      front := wm.ManageWindow(WinB);
+      AssertNotNull('back window managed', back);
+      AssertNotNull('front window managed', front);
+
+      // Raise the back window first, then the front one, so stacking is unambiguous.
+      back.Activate();
+      SyncConnection(Conn);
+      front.Activate();
+      SyncConnection(Conn);
+
+      // A point 4px into the back window's right margin band, inside the front window.
+      edgeX := back.CurrentRect.X + back.CurrentRect.Width + 4;
+      // Below the titlebar (which is FTitlebarHeight tall and is a drag zone, not a
+      // margin) and inside the front window's vertical extent.
+      insideY := back.CurrentRect.Y + wm.TitlebarHeight + 60;
+
+      AssertTrue('the probe point is inside the front window',
+               (edgeX >= front.CurrentRect.X) and
+               (edgeX < front.CurrentRect.X + front.CurrentRect.Width));
+
+      // Per-client geometry is correct and must stay that way.
+      mode := wm.GetResizeModeForPoint(back, edgeX, insideY);
+      AssertTrue('the band is geometrically a resize margin for the back window',
+                 mode <> dmNone);
+
+      // The stacking-aware hit test must not hand that point to the back window.
+      hit := wm.ResizeTargetAt(edgeX, insideY);
+      AssertTrue('the back window is not the resize target under a front window',
+                 hit <> back);
+
+      // And where the back window is genuinely exposed, it still is.
+      // A point in the same right-hand band, below the front window's bottom edge, so
+      // nothing covers it. The front window ends at y = 116+234 = 350; the back frame
+      // ends at 400, which leaves a 50px window of exposed margin.
+      hit := wm.ResizeTargetAt(back.CurrentRect.X + back.CurrentRect.Width + 4,
+                               front.CurrentRect.Y + front.CurrentRect.Height + 20);
+      AssertTrue('the back window still owns its margin where nothing covers it',
+                 hit = back);
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
+  end;
+end;
+
 
 // With more than one monitor, the drag limit belongs to the monitor the window is
 // over, not the primary. A short screen must stop the window at its own bottom edge.
