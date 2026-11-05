@@ -77,6 +77,7 @@ type
     procedure TestDragMonitorSelectionIgnoresAggregateMonitor();
     procedure TestDragAcrossMonitorsUsesTargetMonitor();
     procedure TestNewWindowLaunchClampedToWorkarea();
+    procedure TestScanExistingWindowsMappedBeforeStartup();
   end;
 
 implementation
@@ -3472,6 +3473,135 @@ begin
     AssertTrue('ConfigureRequest bottom within workarea', cli.CurrentRect.Bottom() <= wm.Workarea.Bottom());
   finally
     wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestScanExistingWindowsMappedBeforeStartup();
+var
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  Win, Root: xcb_window_t;
+  unmapEv: xcb_unmap_notify_event_t;
+  ev: Pxcb_generic_event_t;
+  i: Integer;
+  ConnSetup: Pxcb_setup_t;
+  ScreenIter: xcb_screen_iterator_t;
+begin
+  // 1. Offline tests: IgnoreUnmap logic and RootWindow unmap filtering
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(9001);
+    AssertNotNull('Client created offline', cli);
+    AssertTrue('Client is reparented offline', cli.IsReparented);
+
+    // UnmapNotify with event = RootWindow must be ignored for reparented client per ICCCM 4.1.4
+    FillChar(unmapEv, SizeOf(unmapEv), 0);
+    unmapEv.response_type := XCB_UNMAP_NOTIFY;
+    unmapEv.window := cli.ClientWindow;
+    unmapEv.event := wm.RootWindow;
+    wm.ProcessEvent(Pxcb_generic_event_t(@unmapEv));
+    AssertNotNull('Client remains managed after root UnmapNotify', wm.FindClientByClientWindow(9001));
+
+    // IgnoreUnmap counter absorbs UnmapNotify on the window itself
+    cli.IgnoreUnmap := 1;
+    unmapEv.event := cli.ClientWindow;
+    wm.ProcessEvent(Pxcb_generic_event_t(@unmapEv));
+    AssertEquals('IgnoreUnmap counter decremented', 0, cli.IgnoreUnmap);
+    AssertNotNull('Client remains managed after absorbed UnmapNotify', wm.FindClientByClientWindow(9001));
+
+    // Legitimate unmap without IgnoreUnmap unmanages the client
+    wm.ProcessEvent(Pxcb_generic_event_t(@unmapEv));
+    AssertNull('Client unmanaged on genuine unmap', wm.FindClientByClientWindow(9001));
+  finally
+    wm.Free();
+  end;
+
+  // 2. Live X11 Server test: window mapped BEFORE WM starts
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then
+    SkipIfNoServer('no X server available');
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
+
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
+
+    ConnSetup := xcb_get_setup(Obs);
+    if ConnSetup = nil then SkipIfNoServer('no setup');
+    ScreenIter := xcb_setup_roots_iterator(ConnSetup);
+    if ScreenIter.data = nil then SkipIfNoServer('no screen');
+    Root := ScreenIter.data^.root;
+
+    // Client application maps window BEFORE WM starts or claims ownership
+    Win := xcb_generate_id(Obs);
+    xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win, Root, 120, 150, 400, 300, 0,
+                      XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+    xcb_map_window(Obs, Win);
+    xcb_flush(Obs);
+    SyncConnection(Obs);
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
+
+      wm.InitEWMH();
+
+      // Scan existing windows
+      wm.ScanWindows();
+
+      cli := wm.FindClientByClientWindow(Win);
+      AssertNotNull('Existing window managed by ScanWindows', cli);
+      AssertTrue('Existing window reparented into frame', cli.IsReparented);
+      AssertTrue('Frame window created for existing window', cli.FrameWindow <> 0);
+
+      // Pump server events to ensure reparent UnmapNotify does not unmanage it
+      for i := 1 to 20 do
+      begin
+        ev := xcb_poll_for_event(Conn);
+        if ev <> nil then
+        begin
+          wm.ProcessEvent(ev);
+          xcb_free(ev);
+        end
+        else
+          Break;
+      end;
+
+      AssertNotNull('Client remains managed after processing reparent events', wm.FindClientByClientWindow(Win));
+      AssertTrue('Client still reparented', cli.IsReparented);
+
+      // Now unmap through client connection
+      xcb_unmap_window(Obs, Win);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+
+      for i := 1 to 20 do
+      begin
+        ev := xcb_poll_for_event(Conn);
+        if ev <> nil then
+        begin
+          wm.ProcessEvent(ev);
+          xcb_free(ev);
+        end
+        else
+          Break;
+      end;
+
+      AssertNull('Client unmanaged after genuine unmap from application', wm.FindClientByClientWindow(Win));
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
   end;
 end;
 

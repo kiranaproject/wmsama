@@ -279,7 +279,7 @@ type
     function ClaimOwnership(): Boolean; override;
     procedure GrabGlobalKeys();
     procedure RebindGlobalKeys(); override;
-    procedure ScanWindows();
+    procedure ScanWindows(); override;
 
     function StartCompositor(): Boolean;
     procedure StopCompositor();
