@@ -76,6 +76,7 @@ type
     procedure TestDragClampsToMonitorUnderThePointer();
     procedure TestDragMonitorSelectionIgnoresAggregateMonitor();
     procedure TestDragAcrossMonitorsUsesTargetMonitor();
+    procedure TestNewWindowLaunchClampedToWorkarea();
   end;
 
 implementation
@@ -3398,6 +3399,79 @@ begin
   finally
     if Obs <> nil then xcb_disconnect(Obs);
     xcb_disconnect(Conn);
+  end;
+end;
+
+procedure TWMSamaTest.TestNewWindowLaunchClampedToWorkarea();
+var
+  wm: TWMSamaCompositingWM;
+  dockTop: TXCBWMClient;
+  cli: TXCBWMClient;
+  s: TXCBStrutPartial;
+  constrained: TXCBRect;
+  cfgEv: xcb_configure_request_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // 1. Simulate shellsama topbar (strut Top = 38)
+    dockTop := wm.ManageWindow(7771);
+    dockTop.WindowType := wtDock;
+    s := TXCBStrutPartial.Create();
+    s.Top := 38;
+    dockTop.Strut := s;
+    wm.RecomputeWorkareas();
+
+    AssertEquals('Workarea Y is 38', 38, wm.Workarea.Y);
+
+    // 2. Direct ConstrainFrameToWorkingDisplay checks
+    // Window requested at (0, 0)
+    constrained := wm.ConstrainFrameToWorkingDisplay(TXCBRect.Create(0, 0, 800, 600));
+    AssertEquals('Y clamped to 38', 38, constrained.Y);
+    AssertEquals('X clamped to 0', 0, constrained.X);
+
+    // Window requested above topbar at Y = 10
+    constrained := wm.ConstrainFrameToWorkingDisplay(TXCBRect.Create(100, 10, 600, 400));
+    AssertEquals('Y clamped to 38', 38, constrained.Y);
+    AssertEquals('X preserved at 100', 100, constrained.X);
+
+    // Window requested off-screen to the right/bottom
+    constrained := wm.ConstrainFrameToWorkingDisplay(TXCBRect.Create(2000, 2000, 800, 600));
+    AssertEquals('Right clamped to Workarea.Right', wm.Workarea.Right(), constrained.Right());
+    AssertEquals('Bottom clamped to Workarea.Bottom', wm.Workarea.Bottom(), constrained.Bottom());
+    AssertTrue('Y remains >= 38', constrained.Y >= 38);
+    AssertTrue('X remains >= 0', constrained.X >= 0);
+
+    // Oversized window requested (3000x2000)
+    constrained := wm.ConstrainFrameToWorkingDisplay(TXCBRect.Create(0, 0, 3000, 2000));
+    AssertEquals('Width clamped to Workarea Width', wm.Workarea.Width, constrained.Width);
+    AssertEquals('Height clamped to Workarea Height', wm.Workarea.Height, constrained.Height);
+    AssertEquals('X clamped to Workarea X', wm.Workarea.X, constrained.X);
+    AssertEquals('Y clamped to Workarea Y', wm.Workarea.Y, constrained.Y);
+
+    // 3. Newly managed window placement in mock mode
+    cli := wm.ManageWindow(7772);
+    AssertNotNull('Client created', cli);
+    AssertTrue('Newly managed window Y >= 38', cli.CurrentRect.Y >= 38);
+    AssertTrue('Newly managed window X >= 0', cli.CurrentRect.X >= 0);
+    AssertTrue('Newly managed window right within workarea', cli.CurrentRect.Right() <= wm.Workarea.Right());
+    AssertTrue('Newly managed window bottom within workarea', cli.CurrentRect.Bottom() <= wm.Workarea.Bottom());
+
+    // 4. ConfigureRequest event clamping
+    FillChar(cfgEv, SizeOf(cfgEv), 0);
+    cfgEv.response_type := XCB_CONFIGURE_REQUEST;
+    cfgEv.window := cli.ClientWindow;
+    cfgEv.value_mask := XCB_CONFIG_WINDOW_X or XCB_CONFIG_WINDOW_Y or XCB_CONFIG_WINDOW_WIDTH or XCB_CONFIG_WINDOW_HEIGHT;
+    cfgEv.x := 150;
+    cfgEv.y := 0; // Attempts to move titlebar over shellsama topbar
+    cfgEv.width := 700;
+    cfgEv.height := 500;
+    wm.ProcessEvent(Pxcb_generic_event_t(@cfgEv));
+
+    AssertTrue('ConfigureRequest Y clamped to at least 38', cli.CurrentRect.Y >= 38);
+    AssertTrue('ConfigureRequest X within workarea', cli.CurrentRect.X >= wm.Workarea.X);
+    AssertTrue('ConfigureRequest bottom within workarea', cli.CurrentRect.Bottom() <= wm.Workarea.Bottom());
+  finally
+    wm.Free();
   end;
 end;
 
