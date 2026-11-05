@@ -269,18 +269,6 @@ type
     // Server stacking order for clients, lowest first. Only the X attributes are
     // read, so this is cheap enough to run when raising.
     procedure GetStackOrder(out AOrder: array of xcb_window_t; out ACount: Integer);
-    // The window whose resize margin should act at (ARootX, ARootY), or nil.
-    //
-    // GetResizeModeForPoint answers "does THIS client have a margin here", which is pure
-    // geometry and correct. Deciding whose margin wins is a stacking question, and doing
-    // it by MRU order is wrong: the band extends 8px OUTSIDE each frame, so a window
-    // behind a front window still owns the band under the pointer, and the first MRU
-    // entry to match wins regardless of what is on top. That produced resize cursors and
-    // resize drags on the window behind at points aimed at the window in front.
-    function ResizeTargetAt(const ARootX, ARootY: Integer): TXCBWMClient;
-    // True when no client is above AClient at this point. With no connection there is no
-    // stacking to consult, and this answers True.
-    function IsTopmostAt(const AClient: TXCBWMClient; const ARootX, ARootY: Integer): Boolean;
     procedure ApplyClientCornerRadius(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
     procedure ApplyClientShadow(const AClient: TXCBWMClient; const ACompWin: TXCBCompositedWindow);
     procedure UpdateAllWindowShadows();
@@ -1179,81 +1167,6 @@ begin
     end;
   finally
     xcb_free(reply);
-  end;
-end;
-
-function TWMSamaCompositingWM.IsTopmostAt(const AClient: TXCBWMClient;
-  const ARootX, ARootY: Integer): Boolean;
-var
-  order: array of xcb_window_t;
-  count, i, myIndex: Integer;
-  other: TXCBWMClient;
-  myWin: xcb_window_t;
-  r: TXCBRect;
-begin
-  Result := True;
-  if AClient = nil then Exit;
-  if Connection = nil then Exit;
-
-  if AClient.IsReparented and (AClient.FrameWindow <> 0) then
-    myWin := AClient.FrameWindow
-  else
-    myWin := AClient.ClientWindow;
-  if myWin = 0 then Exit;
-
-  SetLength(order, 512);
-  GetStackOrder(order, count);
-  if count = 0 then Exit;
-
-  myIndex := -1;
-  for i := 0 to count - 1 do
-    if order[i] = myWin then
-    begin
-      myIndex := i;
-      Break;
-    end;
-  if myIndex < 0 then Exit;
-
-  // GetStackOrder returns the tree bottom-to-top, so a higher index is above.
-  for i := myIndex + 1 to count - 1 do
-  begin
-    other := FindClient(order[i]);
-    if other = nil then Continue;
-    if (wsMinimized in other.State) or not other.IsReparented then Continue;
-
-    // Only the window's own rectangle counts: this is a hit test, not a margin test.
-    r := other.CurrentRect;
-    if (ARootX >= r.X) and (ARootX < r.X + r.Width) and
-       (ARootY >= r.Y) and (ARootY < r.Y + r.Height) then
-      Exit(False);
-  end;
-end;
-
-function TWMSamaCompositingWM.ResizeTargetAt(const ARootX, ARootY: Integer): TXCBWMClient;
-var
-  i: Integer;
-  cli: TXCBWMClient;
-begin
-  Result := nil;
-
-  // The active window first: it is the likeliest target, and this keeps the common case
-  // down to one stack query.
-  if (ActiveClient <> nil) and (ActiveClient.IsReparented) and
-     not (wsMinimized in ActiveClient.State) and
-     IsTopmostAt(ActiveClient, ARootX, ARootY) and
-     (GetResizeModeForPoint(ActiveClient, ARootX, ARootY) <> dmNone) then
-    Exit(ActiveClient);
-
-  for i := 0 to MruClients.Count - 1 do
-  begin
-    cli := TXCBWMClient(MruClients[i]);
-    if (cli = nil) or (cli = ActiveClient) then Continue;
-    if not cli.IsReparented or (wsMinimized in cli.State) then Continue;
-    if GetResizeModeForPoint(cli, ARootX, ARootY) = dmNone then Continue;
-
-    // A margin under a front window is not this window's to claim.
-    if IsTopmostAt(cli, ARootX, ARootY) then
-      Exit(cli);
   end;
 end;
 
@@ -3905,7 +3818,7 @@ var
   geomReply: Pxcb_get_geometry_reply_t;
   geomRect: TXCBRect;
   compWin: TXCBCompositedWindow;
-  cli, oldCli, menuCli, targetCli: TXCBWMClient;
+  cli, oldCli, menuCli, targetCli, candidateCli: TXCBWMClient;
   curMon, adjMon: TXCBMonitor;
   localX, localY, bw, th, newBtn: Integer;
   oldWin, pressedWin: xcb_window_t;
@@ -4056,16 +3969,32 @@ begin
           RequestComposite();
         end;
 
-        // Cursor hover detection on draggable resize margins.
-        //
-        // ResizeTargetAt does the whole search, including the stacking check. Choosing
-        // the client here by MRU order was the bug: a margin band extends 8px outside its
-        // frame, so a window behind a front window still owns the band under the pointer,
-        // and it showed a resize cursor there.
-        targetCli := ResizeTargetAt(motionEv^.root_x, motionEv^.root_y);
+        // Cursor hover detection on draggable resize margins
+        targetCli := nil;
         resizeMode := dmNone;
-        if targetCli <> nil then
-          resizeMode := GetResizeModeForPoint(targetCli, motionEv^.root_x, motionEv^.root_y);
+        if (ActiveClient <> nil) and not (wsMinimized in ActiveClient.State) then
+        begin
+          resizeMode := GetResizeModeForPoint(ActiveClient, motionEv^.root_x, motionEv^.root_y);
+          if resizeMode <> dmNone then
+            targetCli := ActiveClient;
+        end;
+
+        if targetCli = nil then
+        begin
+          for i := 0 to MruClients.Count - 1 do
+          begin
+            candidateCli := TXCBWMClient(MruClients[i]);
+            if candidateCli.IsReparented and not (wsMinimized in candidateCli.State) then
+            begin
+              resizeMode := GetResizeModeForPoint(candidateCli, motionEv^.root_x, motionEv^.root_y);
+              if resizeMode <> dmNone then
+              begin
+                targetCli := candidateCli;
+                Break;
+              end;
+            end;
+          end;
+        end;
 
         if (targetCli <> nil) and (resizeMode <> dmNone) then
           UpdateHoverCursor(CursorForDragMode(resizeMode), targetCli)
@@ -4208,13 +4137,26 @@ begin
         resizeMode := dmNone;
         if (ActiveClient <> nil) and not (wsMinimized in ActiveClient.State) then
         begin
-          // Same search, same stacking check. A press on a margin that belongs to a
-          // window behind the one under the pointer must not start a resize of that
-          // window: it is the calculator-over-terminal case.
-          targetCli := ResizeTargetAt(btnEv^.root_x, btnEv^.root_y);
-          resizeMode := dmNone;
-          if targetCli <> nil then
-            resizeMode := GetResizeModeForPoint(targetCli, btnEv^.root_x, btnEv^.root_y);
+          resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
+          if resizeMode <> dmNone then
+            targetCli := ActiveClient;
+        end;
+
+        if targetCli = nil then
+        begin
+          for i := 0 to MruClients.Count - 1 do
+          begin
+            candidateCli := TXCBWMClient(MruClients[i]);
+            if candidateCli.IsReparented and not (wsMinimized in candidateCli.State) then
+            begin
+              resizeMode := GetResizeModeForPoint(candidateCli, btnEv^.root_x, btnEv^.root_y);
+              if resizeMode <> dmNone then
+              begin
+                targetCli := candidateCli;
+                Break;
+              end;
+            end;
+          end;
         end;
 
         if (targetCli <> nil) and (resizeMode <> dmNone) then
