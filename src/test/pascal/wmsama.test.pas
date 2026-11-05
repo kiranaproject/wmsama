@@ -56,6 +56,7 @@ type
     procedure TestTransientDialogStackingAndICCCMPlacement();
     procedure TestDesktopWindowCompositingAndAltTabExclusion();
     procedure TestMultipleWindowsOverlappingResize();
+    procedure TestOverlappingWindowResizeBleedPrevention();
     procedure TestExtendedClientAreaControls();
     procedure TestExtendedClientAreaInsetMatchesButtons();
     procedure TestExtendedClientAreaFrameHasNoTitlebar();
@@ -71,6 +72,7 @@ type
     procedure TestPanelOrderUnaffectedByActivation();
     procedure TestFullscreenCoversPanels();
     procedure TestStackingOrderKeepsPanelAbove();
+    procedure TestStackingOrderTwoWindowsCouplesResizeWindow();
     procedure TestDragClampsToMonitorUnderThePointer();
     procedure TestDragMonitorSelectionIgnoresAggregateMonitor();
     procedure TestDragAcrossMonitorsUsesTargetMonitor();
@@ -2140,6 +2142,89 @@ begin
   end;
 end;
 
+procedure TWMSamaTest.TestOverlappingWindowResizeBleedPrevention();
+var
+  wm: TWMSamaCompositingWM;
+  cliFront, cliBack: TXCBWMClient;
+  btnEv: xcb_button_press_event_t;
+  motionEv: xcb_motion_notify_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // cliBack (e.g. Terminal): (100, 100, 300, 200). Frame occupies [100..400) x [100..300).
+    // Bottom-right outer margin is at [400..408) x [300..308).
+    cliBack := wm.ManageWindow(1001);
+    cliBack.CurrentRect := TXCBRect.Create(100, 100, 300, 200);
+    cliBack.RestoredRect := cliBack.CurrentRect;
+    cliBack.FrameWindow := 1002;
+    cliBack.ResizeWindow := 1003;
+    cliBack.IsReparented := True;
+
+    // cliFront (e.g. Calculator): (300, 200, 300, 400). Occupies [300..600) x [200..600).
+    // Covers cliBack's bottom-right corner and margin
+    cliFront := wm.ManageWindow(2001);
+    cliFront.CurrentRect := TXCBRect.Create(300, 200, 300, 400);
+    cliFront.RestoredRect := cliFront.CurrentRect;
+    cliFront.FrameWindow := 2002;
+    cliFront.ResizeWindow := 2003;
+    cliFront.IsReparented := True;
+
+    // Window in front is active
+    wm.ActiveClient := cliFront;
+
+    // Point (404, 304):
+    // Inside cliFront content area (300 <= 404 < 600, 200 <= 304 < 600, Y >= 200 + 34).
+    // In cliBack bottom-right outer margin (400 <= 404 < 408, 300 <= 304 < 308).
+    AssertTrue('Point (404, 304) is occluded for back window',
+               wm.IsPointOccluded(404, 304, cliBack));
+    AssertFalse('Point (404, 304) is NOT occluded for front window',
+                wm.IsPointOccluded(404, 304, cliFront));
+
+    // 1. Hover motion at (404, 304) must NOT activate resize cursor on cliBack
+    FillChar(motionEv, SizeOf(motionEv), 0);
+    motionEv.response_type := XCB_MOTION_NOTIFY;
+    motionEv.root_x := 404;
+    motionEv.root_y := 304;
+    motionEv.event := cliBack.ResizeWindow;
+
+    wm.ProcessEvent(Pxcb_generic_event_t(@motionEv));
+    AssertTrue('Resize cursor is not set on back window resize handle',
+               wm.HoverCursorResizeWindow <> cliBack.ResizeWindow);
+
+    // 2. Button press at (404, 304) on cliBack.ResizeWindow must NOT start drag or activate cliBack
+    FillChar(btnEv, SizeOf(btnEv), 0);
+    btnEv.response_type := XCB_BUTTON_PRESS;
+    btnEv.detail := XCB_BUTTON_INDEX_1;
+    btnEv.root_x := 404;
+    btnEv.root_y := 304;
+    btnEv.event := cliBack.ResizeWindow;
+
+    wm.ProcessEvent(Pxcb_generic_event_t(@btnEv));
+    AssertEquals('No drag started on occluded resize margin',
+                 Integer(dmNone), Integer(wm.DragMode));
+    AssertTrue('Active client remains front window',
+               wm.ActiveClient = cliFront);
+
+    // 3. Button press at non-occluded margin of cliBack (e.g. at (200, 304), bottom edge outside cliFront)
+    AssertFalse('Point (200, 304) outside front window is not occluded for back window',
+                wm.IsPointOccluded(200, 304, cliBack));
+
+    btnEv.root_x := 200;
+    btnEv.root_y := 304;
+    btnEv.event := cliBack.ResizeWindow;
+
+    AssertTrue('Click on visible margin of back window starts drag',
+               wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    AssertEquals('Resize Bottom started for back window on visible margin',
+                 Integer(dmResizeBottom), Integer(wm.DragMode));
+    AssertTrue('Back window is the drag client',
+               wm.DragClient = cliBack);
+    wm.EndDrag();
+  finally
+    wm.Free();
+  end;
+end;
+
 procedure TWMSamaTest.TestExtendedClientAreaControls();
 var
   wm: TWMSamaCompositingWM;
@@ -2896,7 +2981,7 @@ var
   cli, dockCli: TXCBWMClient;
   Root, Win, Panel: xcb_window_t;
   order: array of xcb_window_t;
-  count, i, winIdx, panelIdx: Integer;
+  count, i, winIdx, panelIdx, resizeIdx: Integer;
   frameW, frameP: xcb_window_t;
 begin
   ScreenNum := 0;
@@ -2964,6 +3049,19 @@ begin
       AssertTrue('window is in the stack', winIdx >= 0);
       AssertTrue('panel is above the window in X stacking order', panelIdx > winIdx);
 
+      // Window resize window must be stacked immediately below the window frame
+      if cli.ResizeWindow <> 0 then
+      begin
+        resizeIdx := -1;
+        for i := 0 to count - 1 do
+        begin
+          if order[i] = cli.ResizeWindow then
+            resizeIdx := i;
+        end;
+        AssertTrue('resize window is in the stack', resizeIdx >= 0);
+        AssertEquals('resize window is immediately below frame window', winIdx - 1, resizeIdx);
+      end;
+
       // The window's own body overlaps the panel after this drag (the clamp stops
       // the titlebar at the panel, not the frame). The panel must still be clickable
       // where they overlap, which follows from the order asserted above.
@@ -2972,6 +3070,116 @@ begin
       wm.EndDrag();
       AssertTrue('window body now overlaps the panel band',
                  cli.CurrentRect.Y + cli.CurrentRect.Height > 700);
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
+  end;
+end;
+
+procedure TWMSamaTest.TestStackingOrderTwoWindowsCouplesResizeWindow();
+var
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  wm: TWMSamaCompositingWM;
+  cli1, cli2: TXCBWMClient;
+  Root, Win1, Win2: xcb_window_t;
+  order: array of xcb_window_t;
+  count, i: Integer;
+  frame1, frame2, resize1, resize2: xcb_window_t;
+  idxF1, idxF2, idxR1, idxR2: Integer;
+begin
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then
+    SkipIfNoServer('no X server');
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
+      Root := wm.RootWindow;
+
+      Win1 := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win1, Root, 100, 100, 400, 300, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, Win1);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+      cli1 := wm.ManageWindow(Win1);
+      AssertNotNull('window 1 managed', cli1);
+
+      Win2 := xcb_generate_id(Obs);
+      xcb_create_window(Obs, XCB_COPY_FROM_PARENT, Win2, Root, 300, 200, 400, 300, 0,
+                        XCB_WINDOW_CLASS_INPUT_OUTPUT, XCB_COPY_FROM_PARENT, 0, nil);
+      xcb_map_window(Obs, Win2);
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+      cli2 := wm.ManageWindow(Win2);
+      AssertNotNull('window 2 managed', cli2);
+
+      frame1 := cli1.FrameWindow;
+      resize1 := cli1.ResizeWindow;
+      frame2 := cli2.FrameWindow;
+      resize2 := cli2.ResizeWindow;
+
+      AssertTrue('cli1 has frame window', frame1 <> 0);
+      AssertTrue('cli1 has resize window', resize1 <> 0);
+      AssertTrue('cli2 has frame window', frame2 <> 0);
+      AssertTrue('cli2 has resize window', resize2 <> 0);
+
+      // 1. Activate cli2 (Win2 on top)
+      cli2.Activate();
+      SyncConnection(Conn);
+
+      SetLength(order, 512);
+      wm.GetStackOrder(order, count);
+      AssertTrue('stack order was read', count > 0);
+
+      idxF1 := -1; idxR1 := -1; idxF2 := -1; idxR2 := -1;
+      for i := 0 to count - 1 do
+      begin
+        if order[i] = frame1 then idxF1 := i;
+        if order[i] = resize1 then idxR1 := i;
+        if order[i] = frame2 then idxF2 := i;
+        if order[i] = resize2 then idxR2 := i;
+      end;
+
+      AssertTrue('all 4 windows are in server stack', (idxF1 >= 0) and (idxR1 >= 0) and (idxF2 >= 0) and (idxR2 >= 0));
+      AssertEquals('cli2 resize window is immediately below its frame', idxF2 - 1, idxR2);
+      AssertEquals('cli1 resize window is immediately below its frame', idxF1 - 1, idxR1);
+      AssertTrue('cli2 is above cli1', idxF2 > idxF1);
+      AssertTrue('cli2 resize window is above cli1 frame', idxR2 > idxF1);
+
+      // 2. Activate cli1 (Win1 on top)
+      cli1.Activate();
+      SyncConnection(Conn);
+
+      wm.GetStackOrder(order, count);
+      idxF1 := -1; idxR1 := -1; idxF2 := -1; idxR2 := -1;
+      for i := 0 to count - 1 do
+      begin
+        if order[i] = frame1 then idxF1 := i;
+        if order[i] = resize1 then idxR1 := i;
+        if order[i] = frame2 then idxF2 := i;
+        if order[i] = resize2 then idxR2 := i;
+      end;
+
+      AssertTrue('all 4 windows remain in server stack', (idxF1 >= 0) and (idxR1 >= 0) and (idxF2 >= 0) and (idxR2 >= 0));
+      AssertEquals('cli1 resize window is immediately below its frame', idxF1 - 1, idxR1);
+      AssertEquals('cli2 resize window is immediately below its frame', idxF2 - 1, idxR2);
+      AssertTrue('cli1 is above cli2', idxF1 > idxF2);
+      AssertTrue('cli1 resize window is above cli2 frame', idxR1 > idxF2);
     finally
       wm.Free();
     end;
