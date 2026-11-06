@@ -103,6 +103,10 @@ type
     // Window Button Theming, Layout and Hover States
     FWindowButtonStyle  : Integer;
     FThemeDarkMode      : Boolean;
+    FAtomSamarindaTheme     : xcb_atom_t;
+    FAtomSamarindaThemeDark : xcb_atom_t;
+    FAtomKiranaTheme        : xcb_atom_t;
+    FAtomNetWmTheme         : xcb_atom_t;
     FButtonAlignment    : TWMSamaButtonAlignment;
     FButtonLayout       : AnsiString;
     FButtonLayoutItems  : array of TWMSamaButtonLayoutItem;
@@ -235,6 +239,7 @@ type
     procedure SetBottomCornerRadius(const AValue: Integer);
     procedure SetWindowButtonStyle(const AValue: Integer);
     procedure SetThemeDarkMode(const AValue: Boolean);
+    procedure PublishThemeToRoot();
     procedure SetButtonAlignment(const AValue: TWMSamaButtonAlignment);
     procedure SetButtonLayout(const AValue: AnsiString);
 
@@ -289,6 +294,8 @@ type
 
     procedure PaintAllFrames();
     procedure PaintClientFrame(const AClient: TXCBWMClient);
+    function RenderTitlebar(const AClient: TXCBWMClient): TFloriaImage;
+    procedure UpdateThemeFromRoot(const AChangedAtom: xcb_atom_t = 0);
 
     // Window Button Layout and Hit Detection
     procedure CalculateButtons(const AWidth: Integer; out AButtons: TWMSamaButtonArray; out ATitleX, ATitleW: Integer); overload;
@@ -353,6 +360,8 @@ type
     property BottomCornerRadius : Integer        read FBottomCornerRadius  write SetBottomCornerRadius;
     property WindowButtonStyle  : Integer        read FWindowButtonStyle   write SetWindowButtonStyle;
     property ThemeDarkMode      : Boolean        read FThemeDarkMode       write SetThemeDarkMode;
+    property AtomSamarindaTheme    : xcb_atom_t  read FAtomSamarindaTheme;
+    property AtomSamarindaThemeDark: xcb_atom_t  read FAtomSamarindaThemeDark;
     property ButtonAlignment    : TWMSamaButtonAlignment read FButtonAlignment    write SetButtonAlignment;
     property ButtonLayout       : AnsiString             read FButtonLayout       write SetButtonLayout;
     property WindowMenuClient   : TXCBWMClient           read FWindowMenuClient;
@@ -605,6 +614,19 @@ begin
 
   FWindowButtonStyle := FT_WINDOW_BUTTON_CIRCLE;
   FThemeDarkMode := True;
+  FAtomSamarindaTheme := 0;
+  FAtomSamarindaThemeDark := 0;
+  FAtomKiranaTheme := 0;
+  FAtomNetWmTheme := 0;
+
+  if Connection <> nil then
+  begin
+    FAtomSamarindaTheme := InternAtom(Connection, '_SAMARINDA_THEME');
+    FAtomSamarindaThemeDark := InternAtom(Connection, '_SAMARINDA_THEME_DARK');
+    FAtomKiranaTheme := InternAtom(Connection, '_KIRANA_THEME');
+    FAtomNetWmTheme := InternAtom(Connection, '_NET_WM_THEME');
+  end;
+
   FButtonAlignment := baLeft;
   SetLength(FShadedWindows, 0);
   FWindowMenuClient := nil;
@@ -697,7 +719,11 @@ function TWMSamaCompositingWM.ClaimOwnership(): Boolean;
 begin
   Result := inherited ClaimOwnership();
   if Result then
+  begin
     GrabGlobalKeys();
+    UpdateThemeFromRoot();
+    PublishThemeToRoot();
+  end;
 end;
 
 procedure TWMSamaCompositingWM.GrabGlobalKeys();
@@ -1470,8 +1496,123 @@ procedure TWMSamaCompositingWM.SetThemeDarkMode(const AValue: Boolean);
 begin
   if FThemeDarkMode = AValue then Exit;
   FThemeDarkMode := AValue;
+  PublishThemeToRoot();
   PaintAllFrames();
   RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.PublishThemeToRoot();
+var
+  themeStr: AnsiString;
+  darkVal: Cardinal;
+begin
+  if (Connection = nil) or (RootWindow = 0) then Exit;
+
+  if FThemeDarkMode then
+  begin
+    themeStr := 'dark';
+    darkVal := 1;
+  end
+  else
+  begin
+    themeStr := 'light';
+    darkVal := 0;
+  end;
+
+  if FAtomSamarindaTheme <> 0 then
+    xcb_change_property(Connection, XCB_PROP_MODE_REPLACE, RootWindow,
+                        FAtomSamarindaTheme, XCB_ATOM_STRING, 8,
+                        Length(themeStr), PAnsiChar(themeStr));
+
+  if FAtomSamarindaThemeDark <> 0 then
+    xcb_change_property(Connection, XCB_PROP_MODE_REPLACE, RootWindow,
+                        FAtomSamarindaThemeDark, XCB_ATOM_CARDINAL, 32,
+                        1, @darkVal);
+
+  if FAtomNetWmTheme <> 0 then
+    xcb_change_property(Connection, XCB_PROP_MODE_REPLACE, RootWindow,
+                        FAtomNetWmTheme, XCB_ATOM_STRING, 8,
+                        Length(themeStr), PAnsiChar(themeStr));
+
+  xcb_flush(Connection);
+end;
+
+procedure TWMSamaCompositingWM.UpdateThemeFromRoot(const AChangedAtom: xcb_atom_t);
+var
+  targetAtom: xcb_atom_t;
+  cookie: xcb_get_property_cookie_t;
+  reply: Pxcb_get_property_reply_t;
+  len: Integer;
+  valPtr: Pointer;
+  valStr: AnsiString;
+  darkVal: Cardinal;
+begin
+  if (Connection = nil) or (RootWindow = 0) then Exit;
+
+  // 1. If a string theme atom changed or general query
+  if (AChangedAtom = 0) or
+     (AChangedAtom = FAtomSamarindaTheme) or
+     (AChangedAtom = FAtomKiranaTheme) or
+     (AChangedAtom = FAtomNetWmTheme) then
+  begin
+    targetAtom := AChangedAtom;
+    if targetAtom = 0 then
+      targetAtom := FAtomSamarindaTheme;
+    if targetAtom <> 0 then
+    begin
+      cookie := xcb_get_property(Connection, 0, RootWindow, targetAtom, XCB_ATOM_STRING, 0, 32);
+      reply := xcb_get_property_reply(Connection, cookie, nil);
+      if reply <> nil then
+      begin
+        try
+          len := xcb_get_property_value_length(reply);
+          if len > 0 then
+          begin
+            valPtr := xcb_get_property_value(reply);
+            SetString(valStr, PAnsiChar(valPtr), len);
+            valStr := LowerCase(valStr);
+            if Pos('light', valStr) > 0 then
+            begin
+              SetThemeDarkMode(False);
+              Exit;
+            end
+            else if Pos('dark', valStr) > 0 then
+            begin
+              SetThemeDarkMode(True);
+              Exit;
+            end;
+          end;
+        finally
+          xcb_free(reply);
+        end;
+      end;
+    end;
+  end;
+
+  // 2. Check _SAMARINDA_THEME_DARK (Cardinal: 0 = light, 1 = dark)
+  if (AChangedAtom = 0) or (AChangedAtom = FAtomSamarindaThemeDark) then
+  begin
+    if FAtomSamarindaThemeDark <> 0 then
+    begin
+      cookie := xcb_get_property(Connection, 0, RootWindow, FAtomSamarindaThemeDark, XCB_ATOM_CARDINAL, 0, 1);
+      reply := xcb_get_property_reply(Connection, cookie, nil);
+      if reply <> nil then
+      begin
+        try
+          len := xcb_get_property_value_length(reply);
+          if len >= SizeOf(Cardinal) then
+          begin
+            valPtr := xcb_get_property_value(reply);
+            darkVal := PCardinal(valPtr)^;
+            SetThemeDarkMode(darkVal <> 0);
+            Exit;
+          end;
+        finally
+          xcb_free(reply);
+        end;
+      end;
+    end;
+  end;
 end;
 
 procedure TWMSamaCompositingWM.SetButtonAlignment(const AValue: TWMSamaButtonAlignment);
@@ -2859,45 +3000,31 @@ begin
   end;
 end;
 
-procedure TWMSamaCompositingWM.PaintClientFrame(const AClient: TXCBWMClient);
+function TWMSamaCompositingWM.RenderTitlebar(const AClient: TXCBWMClient): TFloriaImage;
 var
-  w, h, th, bw, i: Integer;
+  w, th, i: Integer;
   isActive, isHoveredWin: Boolean;
-  frameImg: TFloriaImage;
   canvas: TFloriaCanvasAgg;
   winTitle: AnsiString;
-  dataLen: Cardinal;
-  mask: Cardinal;
-  values: array[0..0] of Cardinal;
-  compWin: TXCBCompositedWindow;
   kindVal, btnState: Integer;
   btns: TWMSamaButtonArray;
   titleX, titleW: Integer;
 begin
-  if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) or (wsMinimized in AClient.State) then Exit;
-
-  if AClient.ExtendedClientArea then
-  begin
-    Inc(FFramePaintCount);
-    RequestComposite();
-    Exit;
-  end;
+  Result := nil;
+  if AClient = nil then Exit;
 
   w := AClient.CurrentRect.Width;
-  h := AClient.CurrentRect.Height;
   th := FTitlebarHeight;
-  bw := FrameMetrics.BorderWidth;
-  if (w <= 0) or (h <= 0) or (th <= 0) then Exit;
+  if (w <= 0) or (th <= 0) then Exit;
 
   isActive := (AClient = ActiveClient);
 
-  Inc(FFramePaintCount);
-
-  frameImg := TFloriaImage.Create(w, th);
+  Result := TFloriaImage.Create(w, th);
+  canvas := TFloriaCanvasAgg.Create(Result);
   try
-    canvas := TFloriaCanvasAgg.Create(frameImg);
-    try
-      // 1. Titlebar background
+    // 1. Titlebar background
+    if FThemeDarkMode then
+    begin
       if isActive then
       begin
         // Deep Charcoal Sapphire (#21232B)
@@ -2914,58 +3041,122 @@ begin
         // Bottom divider line (#121318)
         canvas.DrawLine(0, th - 1, w, th - 1, 1.0, 18 / 255, 19 / 255, 24 / 255, 1.0);
       end;
-
-      // 2. Vector Window Buttons via Floria Toolkit (libft.so)
-      CalculateButtons(AClient, w, btns, titleX, titleW);
-
-      for i := 0 to High(btns) do
+    end
+    else
+    begin
+      // Light mode matching shellsama topbar (#F0F2F5)
+      if isActive then
       begin
-        isHoveredWin := (FHoveredWindow <> 0) and (FHoveredWindow = AClient.FrameWindow);
-        if (FPressedWindow = AClient.FrameWindow) and (FPressedButton = i) and (FHoveredButton = i) then
-          btnState := FT_BUTTON_STATE_PRESSED
-        else if (FPressedButton = -1) and isHoveredWin and (FHoveredButton = i) then
-          btnState := FT_BUTTON_STATE_HOVERED
-        else if (btns[i].Kind = sbkPin) and (wsAbove in AClient.State) then
-          btnState := FT_BUTTON_STATE_PRESSED
-        else if (btns[i].Kind = sbkShade) and IsClientShaded(AClient.ClientWindow) then
-          btnState := FT_BUTTON_STATE_PRESSED
-        else
-          btnState := FT_BUTTON_STATE_NORMAL;
+        // Shellsama topbar background (#F0F2F5)
+        canvas.DrawRect(0, 0, w, th, 240 / 255, 242 / 255, 245 / 255, 1.0);
+        // Top specular highlight line (#FFFFFF)
+        canvas.DrawLine(0, 0, w, 0, 1.0, 1.0, 1.0, 1.0, 0.85);
+        // Bottom divider line (#CBD5E1 - slate-300 border)
+        canvas.DrawLine(0, th - 1, w, th - 1, 1.0, 203 / 255, 213 / 255, 225 / 255, 1.0);
+      end
+      else
+      begin
+        // Inactive light surface - subtle muted tint (#E4E7EB)
+        canvas.DrawRect(0, 0, w, th, 228 / 255, 231 / 255, 235 / 255, 1.0);
+        // Top subtle highlight line (#F5F7FA)
+        canvas.DrawLine(0, 0, w, 0, 1.0, 245 / 255, 247 / 255, 250 / 255, 0.60);
+        // Bottom divider line (#CBD5E1)
+        canvas.DrawLine(0, th - 1, w, th - 1, 1.0, 203 / 255, 213 / 255, 225 / 255, 1.0);
+      end;
+    end;
 
-        case btns[i].Kind of
-          sbkClose:    kindVal := FT_WINDOW_BUTTON_CLOSE;
-          sbkMinimize: kindVal := FT_WINDOW_BUTTON_MINIMIZE;
-          sbkMaximize:
-          begin
-            if (wsMaximizedHorz in AClient.State) or (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
-              kindVal := FT_WINDOW_BUTTON_RESTORE
-            else
-              kindVal := FT_WINDOW_BUTTON_MAXIMIZE;
-          end;
-          sbkShade:    kindVal := FT_WINDOW_BUTTON_SHADE;
-          sbkPin:      kindVal := FT_WINDOW_BUTTON_PIN;
-          sbkMenu:     kindVal := FT_WINDOW_BUTTON_MENU;
+    // 2. Vector Window Buttons via Floria Toolkit (libft.so)
+    CalculateButtons(AClient, w, btns, titleX, titleW);
+
+    for i := 0 to High(btns) do
+    begin
+      isHoveredWin := (FHoveredWindow <> 0) and (FHoveredWindow = AClient.FrameWindow);
+      if (FPressedWindow = AClient.FrameWindow) and (FPressedButton = i) and (FHoveredButton = i) then
+        btnState := FT_BUTTON_STATE_PRESSED
+      else if (FPressedButton = -1) and isHoveredWin and (FHoveredButton = i) then
+        btnState := FT_BUTTON_STATE_HOVERED
+      else if (btns[i].Kind = sbkPin) and (wsAbove in AClient.State) then
+        btnState := FT_BUTTON_STATE_PRESSED
+      else if (btns[i].Kind = sbkShade) and IsClientShaded(AClient.ClientWindow) then
+        btnState := FT_BUTTON_STATE_PRESSED
+      else
+        btnState := FT_BUTTON_STATE_NORMAL;
+
+      case btns[i].Kind of
+        sbkClose:    kindVal := FT_WINDOW_BUTTON_CLOSE;
+        sbkMinimize: kindVal := FT_WINDOW_BUTTON_MINIMIZE;
+        sbkMaximize:
+        begin
+          if (wsMaximizedHorz in AClient.State) or (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
+            kindVal := FT_WINDOW_BUTTON_RESTORE
+          else
+            kindVal := FT_WINDOW_BUTTON_MAXIMIZE;
         end;
-
-        FtDrawWindowButton(canvas, btns[i].X, btns[i].Y, btns[i].Size, btns[i].Size,
-                           kindVal, FWindowButtonStyle, btnState, FThemeDarkMode);
+        sbkShade:    kindVal := FT_WINDOW_BUTTON_SHADE;
+        sbkPin:      kindVal := FT_WINDOW_BUTTON_PIN;
+        sbkMenu:     kindVal := FT_WINDOW_BUTTON_MENU;
       end;
 
-      // 3. Window title text (centered vertically with top and bottom margins)
-      winTitle := AClient.Title;
-      if winTitle = '' then
-        winTitle := AClient.WindowClass;
-      if winTitle = '' then
-        winTitle := 'Window';
+      FtDrawWindowButton(canvas, btns[i].X, btns[i].Y, btns[i].Size, btns[i].Size,
+                         kindVal, FWindowButtonStyle, btnState, FThemeDarkMode);
+    end;
 
+    // 3. Window title text (centered vertically with top and bottom margins)
+    winTitle := AClient.Title;
+    if winTitle = '' then
+      winTitle := AClient.WindowClass;
+    if winTitle = '' then
+      winTitle := 'Window';
+
+    if FThemeDarkMode then
+    begin
       if isActive then
         canvas.DrawTextLeft(titleX, 0, titleW, th, winTitle, nil, 236 / 255, 239 / 255, 244 / 255)
       else
         canvas.DrawTextLeft(titleX, 0, titleW, th, winTitle, nil, 127 / 255, 132 / 255, 156 / 255);
-    finally
-      canvas.Free();
+    end
+    else
+    begin
+      // Light mode matching shellsama topbar text
+      if isActive then
+        canvas.DrawTextLeft(titleX, 0, titleW, th, winTitle, nil, 30 / 255, 41 / 255, 59 / 255)
+      else
+        canvas.DrawTextLeft(titleX, 0, titleW, th, winTitle, nil, 100 / 255, 116 / 255, 139 / 255);
     end;
+  finally
+    canvas.Free();
+  end;
+end;
 
+procedure TWMSamaCompositingWM.PaintClientFrame(const AClient: TXCBWMClient);
+var
+  w, h, th, bw: Integer;
+  frameImg: TFloriaImage;
+  dataLen: Cardinal;
+  mask: Cardinal;
+  values: array[0..0] of Cardinal;
+  compWin: TXCBCompositedWindow;
+begin
+  if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) or (wsMinimized in AClient.State) then Exit;
+
+  if AClient.ExtendedClientArea then
+  begin
+    Inc(FFramePaintCount);
+    RequestComposite();
+    Exit;
+  end;
+
+  w := AClient.CurrentRect.Width;
+  h := AClient.CurrentRect.Height;
+  th := FTitlebarHeight;
+  bw := FrameMetrics.BorderWidth;
+  if (w <= 0) or (h <= 0) or (th <= 0) then Exit;
+
+  Inc(FFramePaintCount);
+
+  frameImg := RenderTitlebar(AClient);
+  if frameImg = nil then Exit;
+  try
     // 4. Send image to frame window titlebar
     if Connection <> nil then
     begin
@@ -3838,10 +4029,20 @@ begin
 
     IncludeOverlay(cardX, cardY, cardW, cardH, 30);
 
-    // Card shadow and dark frosted glass background
-    ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 16, 0, 8, 24, 0.0, 0.0, 0.0, 0.55);
-    ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 16, 24 / 255, 25 / 255, 38 / 255, 0.92);
-    ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 16, 1.5, 69 / 255, 71 / 255, 90 / 255, 0.6);
+    if FThemeDarkMode then
+    begin
+      // Card shadow and dark frosted glass background
+      ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 16, 0, 8, 24, 0.0, 0.0, 0.0, 0.55);
+      ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 16, 24 / 255, 25 / 255, 38 / 255, 0.92);
+      ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 16, 1.5, 69 / 255, 71 / 255, 90 / 255, 0.6);
+    end
+    else
+    begin
+      // Light card shadow and crisp light background matching shellsama
+      ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 16, 0, 8, 24, 0.0, 0.0, 0.0, 0.22);
+      ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 16, 248 / 255, 250 / 255, 252 / 255, 0.96);
+      ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 16, 1.5, 203 / 255, 213 / 255, 225 / 255, 0.90);
+    end;
 
     itemW := 114;
     itemH := 88;
@@ -3858,21 +4059,43 @@ begin
       if Length(titleStr) > 14 then
         titleStr := Copy(titleStr, 1, 12) + '..';
 
-      if i = FAltTabIndex then
+      if FThemeDarkMode then
       begin
-        // Active selection highlight
-        ACanvas.DrawRoundedRect(itemX, itemY, itemW, itemH, 10, 49 / 255, 50 / 255, 68 / 255, 0.95);
-        ACanvas.DrawRoundedRectOutline(itemX, itemY, itemW, itemH, 10, 2.0, 137 / 255, 180 / 255, 250 / 255, 0.95);
-        // Window badge circle
-        ACanvas.DrawCircle(itemX + (itemW div 2), itemY + 28, 12, 137 / 255, 180 / 255, 250 / 255, 1.0);
-        ACanvas.DrawTextLeft(itemX + 8, itemY + 54, itemW - 16, 24, titleStr, nil, 236 / 255, 239 / 255, 244 / 255);
+        if i = FAltTabIndex then
+        begin
+          // Active selection highlight
+          ACanvas.DrawRoundedRect(itemX, itemY, itemW, itemH, 10, 49 / 255, 50 / 255, 68 / 255, 0.95);
+          ACanvas.DrawRoundedRectOutline(itemX, itemY, itemW, itemH, 10, 2.0, 137 / 255, 180 / 255, 250 / 255, 0.95);
+          // Window badge circle
+          ACanvas.DrawCircle(itemX + (itemW div 2), itemY + 28, 12, 137 / 255, 180 / 255, 250 / 255, 1.0);
+          ACanvas.DrawTextLeft(itemX + 8, itemY + 54, itemW - 16, 24, titleStr, nil, 236 / 255, 239 / 255, 244 / 255);
+        end
+        else
+        begin
+          // Unselected window card
+          ACanvas.DrawRoundedRect(itemX, itemY, itemW, itemH, 10, 30 / 255, 30 / 255, 46 / 255, 0.6);
+          ACanvas.DrawCircle(itemX + (itemW div 2), itemY + 28, 10, 88 / 255, 91 / 255, 112 / 255, 1.0);
+          ACanvas.DrawTextLeft(itemX + 8, itemY + 54, itemW - 16, 24, titleStr, nil, 147 / 255, 153 / 255, 178 / 255);
+        end;
       end
       else
       begin
-        // Unselected window card
-        ACanvas.DrawRoundedRect(itemX, itemY, itemW, itemH, 10, 30 / 255, 30 / 255, 46 / 255, 0.6);
-        ACanvas.DrawCircle(itemX + (itemW div 2), itemY + 28, 10, 88 / 255, 91 / 255, 112 / 255, 1.0);
-        ACanvas.DrawTextLeft(itemX + 8, itemY + 54, itemW - 16, 24, titleStr, nil, 147 / 255, 153 / 255, 178 / 255);
+        if i = FAltTabIndex then
+        begin
+          // Active selection highlight (light mode)
+          ACanvas.DrawRoundedRect(itemX, itemY, itemW, itemH, 10, 226 / 255, 232 / 255, 240 / 255, 0.95);
+          ACanvas.DrawRoundedRectOutline(itemX, itemY, itemW, itemH, 10, 2.0, 2 / 255, 132 / 255, 199 / 255, 0.95);
+          // Window badge circle
+          ACanvas.DrawCircle(itemX + (itemW div 2), itemY + 28, 12, 2 / 255, 132 / 255, 199 / 255, 1.0);
+          ACanvas.DrawTextLeft(itemX + 8, itemY + 54, itemW - 16, 24, titleStr, nil, 15 / 255, 23 / 255, 42 / 255);
+        end
+        else
+        begin
+          // Unselected window card (light mode)
+          ACanvas.DrawRoundedRect(itemX, itemY, itemW, itemH, 10, 1.0, 1.0, 1.0, 0.70);
+          ACanvas.DrawCircle(itemX + (itemW div 2), itemY + 28, 10, 148 / 255, 163 / 255, 184 / 255, 1.0);
+          ACanvas.DrawTextLeft(itemX + 8, itemY + 54, itemW - 16, 24, titleStr, nil, 71 / 255, 85 / 255, 105 / 255);
+        end;
       end;
     end;
   end;
@@ -3890,36 +4113,73 @@ begin
 
     IncludeOverlay(cardX, cardY, cardW, cardH, 24);
 
-    ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 12, 0, 4, 18, 0.0, 0.0, 0.0, 0.50);
-    ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 10, 24 / 255, 25 / 255, 38 / 255, 0.96);
-    ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 10, 1.2, 69 / 255, 71 / 255, 90 / 255, 0.7);
+    if FThemeDarkMode then
+    begin
+      ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 12, 0, 4, 18, 0.0, 0.0, 0.0, 0.50);
+      ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 10, 24 / 255, 25 / 255, 38 / 255, 0.96);
+      ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 10, 1.2, 69 / 255, 71 / 255, 90 / 255, 0.7);
 
-    // Header
-    ACanvas.DrawTextLeft(cardX + 12, cardY + 6, cardW - 24, 20, 'Window Actions', nil, 147 / 255, 153 / 255, 178 / 255);
-    ACanvas.DrawLine(cardX + 8, cardY + 28, cardX + cardW - 8, cardY + 28, 1.0, 49 / 255, 50 / 255, 68 / 255, 0.8);
+      // Header
+      ACanvas.DrawTextLeft(cardX + 12, cardY + 6, cardW - 24, 20, 'Window Actions', nil, 147 / 255, 153 / 255, 178 / 255);
+      ACanvas.DrawLine(cardX + 8, cardY + 28, cardX + cardW - 8, cardY + 28, 1.0, 49 / 255, 50 / 255, 68 / 255, 0.8);
 
-    // Items:
-    // [0] Minimize
-    ACanvas.DrawTextLeft(cardX + 14, cardY + 32, cardW - 28, 22, '—  Minimize', nil, 236 / 255, 239 / 255, 244 / 255);
-    // [1] Maximize / Restore
-    if (wsMaximizedHorz in FWindowMenuClient.State) or (wsTiledLeft in FWindowMenuClient.State) or (wsTiledRight in FWindowMenuClient.State) then
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤡  Restore', nil, 236 / 255, 239 / 255, 244 / 255)
+      // Items:
+      // [0] Minimize
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 32, cardW - 28, 22, '—  Minimize', nil, 236 / 255, 239 / 255, 244 / 255);
+      // [1] Maximize / Restore
+      if (wsMaximizedHorz in FWindowMenuClient.State) or (wsTiledLeft in FWindowMenuClient.State) or (wsTiledRight in FWindowMenuClient.State) then
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤡  Restore', nil, 236 / 255, 239 / 255, 244 / 255)
+      else
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤢  Maximize', nil, 236 / 255, 239 / 255, 244 / 255);
+      // [2] Keep on Top (Pin)
+      if wsAbove in FWindowMenuClient.State then
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '✓  Always on Top', nil, 137 / 255, 180 / 255, 250 / 255)
+      else
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '•  Always on Top', nil, 205 / 255, 214 / 255, 244 / 255);
+      // [3] Shade / Roll Up
+      if IsClientShaded(FWindowMenuClient.ClientWindow) then
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '✓  Roll Up (Shade)', nil, 137 / 255, 180 / 255, 250 / 255)
+      else
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '▴  Roll Up (Shade)', nil, 205 / 255, 214 / 255, 244 / 255);
+      // Divider
+      ACanvas.DrawLine(cardX + 8, cardY + 128, cardX + cardW - 8, cardY + 128, 1.0, 49 / 255, 50 / 255, 68 / 255, 0.8);
+      // [4] Close
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 132, cardW - 28, 22, '×  Close Window', nil, 243 / 255, 139 / 255, 168 / 255);
+    end
     else
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤢  Maximize', nil, 236 / 255, 239 / 255, 244 / 255);
-    // [2] Keep on Top (Pin)
-    if wsAbove in FWindowMenuClient.State then
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '✓  Always on Top', nil, 137 / 255, 180 / 255, 250 / 255)
-    else
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '•  Always on Top', nil, 205 / 255, 214 / 255, 244 / 255);
-    // [3] Shade / Roll Up
-    if IsClientShaded(FWindowMenuClient.ClientWindow) then
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '✓  Roll Up (Shade)', nil, 137 / 255, 180 / 255, 250 / 255)
-    else
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '▴  Roll Up (Shade)', nil, 205 / 255, 214 / 255, 244 / 255);
-    // Divider
-    ACanvas.DrawLine(cardX + 8, cardY + 128, cardX + cardW - 8, cardY + 128, 1.0, 49 / 255, 50 / 255, 68 / 255, 0.8);
-    // [4] Close
-    ACanvas.DrawTextLeft(cardX + 14, cardY + 132, cardW - 28, 22, '×  Close Window', nil, 243 / 255, 139 / 255, 168 / 255);
+    begin
+      // Light Mode matching shellsama and Floria light styling
+      ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 12, 0, 4, 18, 0.0, 0.0, 0.0, 0.20);
+      ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 10, 1.0, 1.0, 1.0, 0.98);
+      ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 10, 1.2, 203 / 255, 213 / 255, 225 / 255, 0.90);
+
+      // Header
+      ACanvas.DrawTextLeft(cardX + 12, cardY + 6, cardW - 24, 20, 'Window Actions', nil, 100 / 255, 116 / 255, 139 / 255);
+      ACanvas.DrawLine(cardX + 8, cardY + 28, cardX + cardW - 8, cardY + 28, 1.0, 226 / 255, 232 / 255, 240 / 255, 1.0);
+
+      // Items:
+      // [0] Minimize
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 32, cardW - 28, 22, '—  Minimize', nil, 30 / 255, 41 / 255, 59 / 255);
+      // [1] Maximize / Restore
+      if (wsMaximizedHorz in FWindowMenuClient.State) or (wsTiledLeft in FWindowMenuClient.State) or (wsTiledRight in FWindowMenuClient.State) then
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤡  Restore', nil, 30 / 255, 41 / 255, 59 / 255)
+      else
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤢  Maximize', nil, 30 / 255, 41 / 255, 59 / 255);
+      // [2] Keep on Top (Pin)
+      if wsAbove in FWindowMenuClient.State then
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '✓  Always on Top', nil, 2 / 255, 132 / 255, 199 / 255)
+      else
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '•  Always on Top', nil, 71 / 255, 85 / 255, 105 / 255);
+      // [3] Shade / Roll Up
+      if IsClientShaded(FWindowMenuClient.ClientWindow) then
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '✓  Roll Up (Shade)', nil, 2 / 255, 132 / 255, 199 / 255)
+      else
+        ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '▴  Roll Up (Shade)', nil, 71 / 255, 85 / 255, 105 / 255);
+      // Divider
+      ACanvas.DrawLine(cardX + 8, cardY + 128, cardX + cardW - 8, cardY + 128, 1.0, 226 / 255, 232 / 255, 240 / 255, 1.0);
+      // [4] Close
+      ACanvas.DrawTextLeft(cardX + 14, cardY + 132, cardW - 28, 22, '×  Close Window', nil, 220 / 255, 38 / 255, 38 / 255);
+    end;
   end;
 
   // Tell the compositor what area this overlay covered. Under partial present the
@@ -3941,6 +4201,7 @@ var
   destroyEv: Pxcb_destroy_notify_event_t;
   cfgNotifyEv: Pxcb_configure_notify_event_t;
   exposeEv: Pxcb_expose_event_t;
+  propEv: Pxcb_property_notify_event_t;
   geomCookie: xcb_get_geometry_cookie_t;
   geomReply: Pxcb_get_geometry_reply_t;
   geomRect: TXCBRect;
@@ -4574,6 +4835,22 @@ begin
         begin
           compWin.MarkDamaged();
           RequestComposite();
+        end;
+      end;
+    end;
+
+    XCB_PROPERTY_NOTIFY:
+    begin
+      propEv := Pxcb_property_notify_event_t(AEvent);
+      if (propEv <> nil) and (propEv^.window = RootWindow) then
+      begin
+        if (propEv^.atom = FAtomSamarindaTheme) or
+           (propEv^.atom = FAtomSamarindaThemeDark) or
+           (propEv^.atom = FAtomKiranaTheme) or
+           (propEv^.atom = FAtomNetWmTheme) then
+        begin
+          UpdateThemeFromRoot(propEv^.atom);
+          Exit(True);
         end;
       end;
     end;

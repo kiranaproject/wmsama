@@ -78,6 +78,7 @@ type
     procedure TestDragAcrossMonitorsUsesTargetMonitor();
     procedure TestNewWindowLaunchClampedToWorkarea();
     procedure TestScanExistingWindowsMappedBeforeStartup();
+    procedure TestTitlebarLightModeRendering();
   end;
 
 implementation
@@ -3596,6 +3597,183 @@ begin
       end;
 
       AssertNull('Client unmanaged after genuine unmap from application', wm.FindClientByClientWindow(Win));
+    finally
+      wm.Free();
+    end;
+  finally
+    if Obs <> nil then xcb_disconnect(Obs);
+    xcb_disconnect(Conn);
+  end;
+end;
+
+procedure TWMSamaTest.TestTitlebarLightModeRendering();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  darkImg, darkInactiveImg: TFloriaImage;
+  lightImg, lightInactiveImg: TFloriaImage;
+  bgDarkActive, bgDarkInactive: TBgraPixel;
+  bgLightActive, bgLightInactive: TBgraPixel;
+  Conn, Obs: Pxcb_connection_t;
+  ScreenNum: Integer;
+  ConnSetup: Pxcb_setup_t;
+  ScreenIter: xcb_screen_iterator_t;
+  Root: xcb_window_t;
+  themeStr: AnsiString;
+  i: Integer;
+  ev: Pxcb_generic_event_t;
+begin
+  // 1. Offline tests: verify pixel-accurate titlebar rendering in dark and light modes
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(9002);
+    AssertNotNull('Client created offline', cli);
+    cli.CurrentRect := TXCBRect.Create(50, 50, 400, 300);
+    cli.Title := 'Theme Verification Window';
+
+    // Verify default dark mode
+    AssertTrue('Default theme is dark mode', wm.ThemeDarkMode);
+    wm.SetActiveClient(cli);
+    darkImg := wm.RenderTitlebar(cli);
+    try
+      AssertNotNull('Dark active titlebar rendered', darkImg);
+      AssertEquals('Dark titlebar width matches client', 400, darkImg.Width);
+      AssertEquals('Dark titlebar height matches wm', wm.TitlebarHeight, darkImg.Height);
+      // Sample background pixel at x=350, y=18 (away from buttons and title)
+      bgDarkActive := darkImg.Pixels[350, 18];
+      AssertEquals('Dark active background R (#21232B)', 33, bgDarkActive.R);
+      AssertEquals('Dark active background G (#21232B)', 35, bgDarkActive.G);
+      AssertEquals('Dark active background B (#21232B)', 43, bgDarkActive.B);
+    finally
+      darkImg.Free();
+    end;
+
+    // Inactive window in dark mode
+    wm.SetActiveClient(nil);
+    darkInactiveImg := wm.RenderTitlebar(cli);
+    try
+      AssertNotNull('Dark inactive titlebar rendered', darkInactiveImg);
+      bgDarkInactive := darkInactiveImg.Pixels[350, 18];
+      AssertEquals('Dark inactive background R (#181920)', 24, bgDarkInactive.R);
+      AssertEquals('Dark inactive background G (#181920)', 25, bgDarkInactive.G);
+      AssertEquals('Dark inactive background B (#181920)', 32, bgDarkInactive.B);
+    finally
+      darkInactiveImg.Free();
+    end;
+
+    // Switch to light mode
+    wm.ThemeDarkMode := False;
+    AssertFalse('ThemeDarkMode switched to light mode', wm.ThemeDarkMode);
+
+    // Active window in light mode (matching shellsama topbar #F0F2F5)
+    wm.SetActiveClient(cli);
+    lightImg := wm.RenderTitlebar(cli);
+    try
+      AssertNotNull('Light active titlebar rendered', lightImg);
+      bgLightActive := lightImg.Pixels[350, 18];
+      AssertEquals('Light active background R (#F0F2F5)', 240, bgLightActive.R);
+      AssertEquals('Light active background G (#F0F2F5)', 242, bgLightActive.G);
+      AssertEquals('Light active background B (#F0F2F5)', 245, bgLightActive.B);
+    finally
+      lightImg.Free();
+    end;
+
+    // Inactive window in light mode (muted light surface #E4E7EB)
+    wm.SetActiveClient(nil);
+    lightInactiveImg := wm.RenderTitlebar(cli);
+    try
+      AssertNotNull('Light inactive titlebar rendered', lightInactiveImg);
+      bgLightInactive := lightInactiveImg.Pixels[350, 18];
+      AssertEquals('Light inactive background R (#E4E7EB)', 228, bgLightInactive.R);
+      AssertEquals('Light inactive background G (#E4E7EB)', 231, bgLightInactive.G);
+      AssertEquals('Light inactive background B (#E4E7EB)', 235, bgLightInactive.B);
+    finally
+      lightInactiveImg.Free();
+    end;
+  finally
+    wm.Free();
+  end;
+
+  // 2. Live X11 Server test: root window property publishing and dynamic updates
+  ScreenNum := 0;
+  Conn := xcb_connect(nil, @ScreenNum);
+  if Conn = nil then
+    SkipIfNoServer('no X server available');
+
+  Obs := nil;
+  try
+    if xcb_connection_has_error(Conn) <> 0 then
+      SkipIfNoServer('X connection failed');
+
+    Obs := xcb_connect(nil, @ScreenNum);
+    if (Obs = nil) or (xcb_connection_has_error(Obs) <> 0) then
+      SkipIfNoServer('second X connection failed');
+
+    ConnSetup := xcb_get_setup(Obs);
+    if ConnSetup = nil then SkipIfNoServer('no setup');
+    ScreenIter := xcb_setup_roots_iterator(ConnSetup);
+    if ScreenIter.data = nil then SkipIfNoServer('no screen');
+    Root := ScreenIter.data^.root;
+
+    wm := TWMSamaCompositingWM.Create(Conn, ScreenNum);
+    try
+      if not TryClaimOwnership(wm) then
+        SkipIfNoServer('another window manager owns this display');
+
+      wm.InitEWMH();
+
+      // Ensure initial theme is dark mode
+      AssertTrue('Initial theme is dark mode', wm.ThemeDarkMode);
+
+      // Switch to light mode and verify root property changes
+      wm.ThemeDarkMode := False;
+      AssertFalse('wm switched to light mode', wm.ThemeDarkMode);
+
+      // Test dynamic property update from client connection (Obs):
+      // Setting _SAMARINDA_THEME to "dark" on Root
+      themeStr := 'dark';
+      xcb_change_property(Obs, XCB_PROP_MODE_REPLACE, Root,
+                          wm.AtomSamarindaTheme, XCB_ATOM_STRING, 8,
+                          Length(themeStr), PAnsiChar(themeStr));
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+
+      // Pump events on WM connection
+      for i := 1 to 20 do
+      begin
+        ev := xcb_poll_for_event(Conn);
+        if ev <> nil then
+        begin
+          wm.ProcessEvent(ev);
+          xcb_free(ev);
+        end
+        else
+          Break;
+      end;
+
+      AssertTrue('Theme dynamically switched back to dark via root property', wm.ThemeDarkMode);
+
+      // Now set _SAMARINDA_THEME to "light" on Root
+      themeStr := 'light';
+      xcb_change_property(Obs, XCB_PROP_MODE_REPLACE, Root,
+                          wm.AtomSamarindaTheme, XCB_ATOM_STRING, 8,
+                          Length(themeStr), PAnsiChar(themeStr));
+      xcb_flush(Obs);
+      SyncConnection(Obs);
+
+      for i := 1 to 20 do
+      begin
+        ev := xcb_poll_for_event(Conn);
+        if ev <> nil then
+        begin
+          wm.ProcessEvent(ev);
+          xcb_free(ev);
+        end
+        else
+          Break;
+      end;
+
+      AssertFalse('Theme dynamically switched to light via root property', wm.ThemeDarkMode);
     finally
       wm.Free();
     end;

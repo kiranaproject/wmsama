@@ -33,6 +33,7 @@ var
   ButtonAlignmentStr : AnsiString;
   ButtonLayoutStr    : AnsiString;
   ThemeDark          : Boolean;
+  EnvTheme           : AnsiString;
   LibFtPath          : AnsiString;
   I                  : Integer;
   Arg                : AnsiString;
@@ -58,6 +59,8 @@ begin
   WriteLn('  --button-alignment <a> Window button alignment: left, right (default: left)');
   WriteLn('  --button-layout <lay>  Custom window button layout (<left>:<right>, e.g. "menu:shade,pin,minimize,maximize,close")');
   WriteLn('  --theme <theme>        Window theme: dark, light (default: dark)');
+  WriteLn('  --light, --light-mode  Enable light mode window titlebars (matches shellsama topbar)');
+  WriteLn('  --dark, --dark-mode    Enable dark mode window titlebars');
   WriteLn('  --libft <path>         Path to libft.so shared library');
 end;
 
@@ -87,6 +90,17 @@ begin
   ButtonStyleStr := 'circle';
   ThemeDark := True;
   LibFtPath := '';
+
+  // Detect theme from environment variables if set
+  EnvTheme := LowerCase(GetEnvironmentVariable('WMSAMA_THEME'));
+  if EnvTheme = '' then
+    EnvTheme := LowerCase(GetEnvironmentVariable('KIRANA_THEME'));
+  if EnvTheme = '' then
+    EnvTheme := LowerCase(GetEnvironmentVariable('SAMARINDA_THEME'));
+  if (EnvTheme = 'light') or (EnvTheme = '0') or (EnvTheme = 'false') then
+    ThemeDark := False
+  else if (EnvTheme = 'dark') or (EnvTheme = '1') or (EnvTheme = 'true') then
+    ThemeDark := True;
 
   I := 1;
   while I <= ParamCount do
@@ -170,6 +184,14 @@ begin
         ThemeDark := False
       else
         ThemeDark := True;
+    end
+    else if (Arg = '--light') or (Arg = '--light-mode') then
+    begin
+      ThemeDark := False;
+    end
+    else if (Arg = '--dark') or (Arg = '--dark-mode') then
+    begin
+      ThemeDark := True;
     end
     else if (Arg = '--libft') and (I < ParamCount) then
     begin

@@ -167,17 +167,25 @@ begin
     cenX := BX + BW * 0.5;
     cenY := BY + BH * 0.5;
     r := (BW * 0.5) - 1.0;
-    case AKind of
-      FT_WINDOW_BUTTON_CLOSE:
-        Canvas.DrawCircle(cenX, cenY, r, 255 / 255, 95 / 255, 86 / 255, 1.0);
-      FT_WINDOW_BUTTON_MINIMIZE:
-        Canvas.DrawCircle(cenX, cenY, r, 255 / 255, 189 / 255, 46 / 255, 1.0);
-      FT_WINDOW_BUTTON_MAXIMIZE, FT_WINDOW_BUTTON_RESTORE:
-        Canvas.DrawCircle(cenX, cenY, r, 39 / 255, 201 / 255, 63 / 255, 1.0);
-      FT_WINDOW_BUTTON_SHADE, FT_WINDOW_BUTTON_PIN, FT_WINDOW_BUTTON_MENU:
-        Canvas.DrawCircle(cenX, cenY, r, 56 / 255, 128 / 255, 235 / 255, 1.0);
+    if not ADarkMode and (AState = FT_BUTTON_STATE_NORMAL) then
+    begin
+      Canvas.DrawCircle(cenX, cenY, r, 245 / 255, 247 / 255, 250 / 255, 1.0);
+      Canvas.DrawCircleOutline(cenX, cenY, r, 1.0, 204 / 255, 209 / 255, 217 / 255, 1.0);
+    end
     else
-      Canvas.DrawCircle(cenX, cenY, r, 120 / 255, 120 / 255, 120 / 255, 1.0);
+    begin
+      case AKind of
+        FT_WINDOW_BUTTON_CLOSE:
+          Canvas.DrawCircle(cenX, cenY, r, 255 / 255, 95 / 255, 86 / 255, 1.0);
+        FT_WINDOW_BUTTON_MINIMIZE:
+          Canvas.DrawCircle(cenX, cenY, r, 255 / 255, 189 / 255, 46 / 255, 1.0);
+        FT_WINDOW_BUTTON_MAXIMIZE, FT_WINDOW_BUTTON_RESTORE:
+          Canvas.DrawCircle(cenX, cenY, r, 39 / 255, 201 / 255, 63 / 255, 1.0);
+        FT_WINDOW_BUTTON_SHADE, FT_WINDOW_BUTTON_PIN, FT_WINDOW_BUTTON_MENU:
+          Canvas.DrawCircle(cenX, cenY, r, 56 / 255, 128 / 255, 235 / 255, 1.0);
+      else
+        Canvas.DrawCircle(cenX, cenY, r, 120 / 255, 120 / 255, 120 / 255, 1.0);
+      end;
     end;
   end;
 end;
