@@ -627,11 +627,11 @@ begin
     FAtomNetWmTheme := InternAtom(Connection, '_NET_WM_THEME');
   end;
 
-  FButtonAlignment := baLeft;
+  FButtonAlignment := baRight;
   SetLength(FShadedWindows, 0);
   FWindowMenuClient := nil;
   FWindowMenuRect := TXCBRect.Create(0, 0, 0, 0);
-  SetButtonLayout('close,minimize,maximize:');
+  SetButtonLayout(':minimize,maximize,close');
   FHoveredWindow := 0;
   FHoveredButton := -1;
   FLastHoverClient := nil;
@@ -1739,14 +1739,14 @@ begin
   if Length(FButtonLayoutItems) = 0 then
   begin
     SetLength(FButtonLayoutItems, 3);
-    FButtonLayoutItems[0].Kind := sbkClose;
-    FButtonLayoutItems[0].Placement := bpLeft;
-    FButtonLayoutItems[1].Kind := sbkMinimize;
-    FButtonLayoutItems[1].Placement := bpLeft;
-    FButtonLayoutItems[2].Kind := sbkMaximize;
-    FButtonLayoutItems[2].Placement := bpLeft;
-    FButtonLayout := 'close,minimize,maximize:';
-    FButtonAlignment := baLeft;
+    FButtonLayoutItems[0].Kind := sbkMinimize;
+    FButtonLayoutItems[0].Placement := bpRight;
+    FButtonLayoutItems[1].Kind := sbkMaximize;
+    FButtonLayoutItems[1].Placement := bpRight;
+    FButtonLayoutItems[2].Kind := sbkClose;
+    FButtonLayoutItems[2].Placement := bpRight;
+    FButtonLayout := ':minimize,maximize,close';
+    FButtonAlignment := baRight;
   end
   else
   begin

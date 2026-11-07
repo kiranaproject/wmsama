@@ -56,7 +56,7 @@ begin
   WriteLn('  --button-style <style> Window button style: circle, squircle, square (default: circle)');
   WriteLn('  --buttons-left         Align window buttons to the left (macOS style)');
   WriteLn('  --buttons-right        Align window buttons to the right (Windows/GNOME/KDE style)');
-  WriteLn('  --button-alignment <a> Window button alignment: left, right (default: left)');
+  WriteLn('  --button-alignment <a> Window button alignment: left, right (default: right)');
   WriteLn('  --button-layout <lay>  Custom window button layout (<left>:<right>, e.g. "menu:shade,pin,minimize,maximize,close")');
   WriteLn('  --theme <theme>        Window theme: dark, light (default: dark)');
   WriteLn('  --light, --light-mode  Enable light mode window titlebars (matches shellsama topbar)');

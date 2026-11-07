@@ -294,9 +294,9 @@ begin
     wm.GetWindowButtonMetrics(btnSize, btnY, x0, x1, x2, titleX);
     AssertTrue('Button size scaled for 34px titlebar', Abs(btnSize - 15.0) < 0.01);
     AssertTrue('Button Y centered in 34px titlebar', Abs(btnY - 9.5) < 0.01);
-    AssertEquals('Hit close button', 0, wm.GetButtonAt(Round(x0), Round(btnY + 2)));
-    AssertEquals('Hit minimize button', 1, wm.GetButtonAt(Round(x1), Round(btnY + 2)));
-    AssertEquals('Hit maximize button', 2, wm.GetButtonAt(Round(x2), Round(btnY + 2)));
+    AssertEquals('Hit minimize button', 0, wm.GetButtonAt(Round(x0), Round(btnY + 2)));
+    AssertEquals('Hit maximize button', 1, wm.GetButtonAt(Round(x1), Round(btnY + 2)));
+    AssertEquals('Hit close button', 2, wm.GetButtonAt(Round(x2), Round(btnY + 2)));
     AssertEquals('Hit title text is not button', -1, wm.GetButtonAt(titleX, 10));
 
     // Update titlebar height to 40
@@ -310,7 +310,7 @@ begin
     wm.GetWindowButtonMetrics(btnSize, btnY, x0, x1, x2, titleX);
     AssertTrue('Button size scaled for 40px titlebar', Abs(btnSize - 18.0) < 0.01);
     AssertTrue('Button Y centered in 40px titlebar', Abs(btnY - 11.0) < 0.01);
-    AssertEquals('Hit close button in 40px', 0, wm.GetButtonAt(Round(x0), Round(btnY + 2)));
+    AssertEquals('Hit minimize button in 40px', 0, wm.GetButtonAt(Round(x0), Round(btnY + 2)));
   finally
     wm.Free();
   end;
@@ -842,21 +842,9 @@ var
 begin
   wm := TWMSamaCompositingWM.Create(nil, 0);
   try
-    // 1. Default is baLeft with 3 buttons
-    AssertEquals('Default button alignment is baLeft', Ord(baLeft), Ord(wm.ButtonAlignment));
-    AssertEquals('Default button layout is close,minimize,maximize:', 'close,minimize,maximize:', wm.ButtonLayout);
-
-    wm.CalculateButtons(800, btns, tX, tW);
-    AssertEquals('3 buttons calculated', 3, Length(btns));
-    AssertEquals('Button 0 is close', Ord(sbkClose), Ord(btns[0].Kind));
-    AssertEquals('Button 0 is left', Ord(bpLeft), Ord(btns[0].Placement));
-    AssertTrue('Button 0 is near left margin', btns[0].X < 20.0);
-    AssertTrue('Title starts after left buttons', tX > btns[2].X);
-
-    // 2. Switch to baRight
-    wm.ButtonAlignment := baRight;
-    AssertEquals('Button alignment changed to baRight', Ord(baRight), Ord(wm.ButtonAlignment));
-    AssertEquals('Button layout updated to right style', ':minimize,maximize,close', wm.ButtonLayout);
+    // 1. Default is baRight with 3 buttons
+    AssertEquals('Default button alignment is baRight', Ord(baRight), Ord(wm.ButtonAlignment));
+    AssertEquals('Default button layout is :minimize,maximize,close', ':minimize,maximize,close', wm.ButtonLayout);
 
     wm.CalculateButtons(800, btns, tX, tW);
     AssertEquals('3 buttons calculated on right', 3, Length(btns));
@@ -864,6 +852,18 @@ begin
     AssertEquals('Button 0 is right', Ord(bpRight), Ord(btns[0].Placement));
     AssertTrue('Right buttons are positioned near right edge', btns[0].X > 700.0);
     AssertTrue('Title starts near left edge when no left buttons', tX < 20);
+
+    // 2. Switch to baLeft
+    wm.ButtonAlignment := baLeft;
+    AssertEquals('Button alignment changed to baLeft', Ord(baLeft), Ord(wm.ButtonAlignment));
+    AssertEquals('Button layout updated to left style', 'close,minimize,maximize:', wm.ButtonLayout);
+
+    wm.CalculateButtons(800, btns, tX, tW);
+    AssertEquals('3 buttons calculated on left', 3, Length(btns));
+    AssertEquals('Button 0 is close', Ord(sbkClose), Ord(btns[0].Kind));
+    AssertEquals('Button 0 is left', Ord(bpLeft), Ord(btns[0].Placement));
+    AssertTrue('Button 0 is near left margin', btns[0].X < 20.0);
+    AssertTrue('Title starts after left buttons', tX > btns[2].X);
 
     // 3. Custom button layout with both sides: menu on left, shade, pin, min, max, close on right
     wm.ButtonLayout := 'menu:shade,pin,minimize,maximize,close';
@@ -1142,6 +1142,8 @@ procedure TWMSamaTest.TestWindowButtonReleaseAndCancel();
 var
   wm: TWMSamaCompositingWM;
   cli: TXCBWMClient;
+  btns: TWMSamaButtonArray;
+  tX, tW, maxBtnX, maxBtnY: Integer;
   pressEv: xcb_button_press_event_t;
   releaseEv: xcb_button_release_event_t;
   motionEv: xcb_motion_notify_event_t;
@@ -1154,22 +1156,28 @@ begin
     cli.FrameWindow := 7002;
     cli.SetGeometry(100, 100, 500, 350);
 
-    // Default button layout: 'close,minimize,maximize:'
-    // Close is btn 0, Minimize is btn 1, Maximize is btn 2
-    btnIdx := wm.GetButtonAt(64, 17, 500);
-    AssertEquals('Button at (64, 17) is maximize button (idx 2)', 2, btnIdx);
+    // Default button layout: ':minimize,maximize,close'
+    // Minimize is btn 0, Maximize is btn 1, Close is btn 2
+    wm.CalculateButtons(cli, 500, btns, tX, tW);
+    AssertEquals('3 buttons calculated', 3, Length(btns));
+    AssertEquals('Button 1 is Maximize', Ord(sbkMaximize), Ord(btns[1].Kind));
+    maxBtnX := Round(btns[1].X + btns[1].Size * 0.5);
+    maxBtnY := Round(btns[1].Y + btns[1].Size * 0.5);
+
+    btnIdx := wm.GetButtonAt(maxBtnX, maxBtnY, 500);
+    AssertEquals('Button at maxBtn is maximize button (idx 1)', 1, btnIdx);
 
     // 1. Mouse Button 1 Down on Maximize Button
     FillChar(pressEv, SizeOf(pressEv), 0);
     pressEv.response_type := XCB_BUTTON_PRESS;
     pressEv.detail := XCB_BUTTON_INDEX_1;
     pressEv.event := cli.FrameWindow;
-    pressEv.event_x := 64;
-    pressEv.event_y := 17;
+    pressEv.event_x := maxBtnX;
+    pressEv.event_y := maxBtnY;
     wm.ProcessEvent(Pxcb_generic_event_t(@pressEv));
 
     // Must be in pressed state, but NOT yet maximized!
-    AssertEquals('PressedButton recorded as 2', 2, wm.PressedButton);
+    AssertEquals('PressedButton recorded as 1', 1, wm.PressedButton);
     AssertEquals('PressedWindow recorded as FrameWindow', cli.FrameWindow, wm.PressedWindow);
     AssertFalse('Client NOT maximized on button press', wsMaximizedHorz in cli.State);
 
@@ -1178,7 +1186,7 @@ begin
     motionEv.response_type := XCB_MOTION_NOTIFY;
     motionEv.event := cli.FrameWindow;
     motionEv.event_x := 200; // Far in titlebar center
-    motionEv.event_y := 17;
+    motionEv.event_y := maxBtnY;
     wm.ProcessEvent(Pxcb_generic_event_t(@motionEv));
     AssertEquals('HoveredButton now -1 outside button', -1, wm.HoveredButton);
 
@@ -1188,7 +1196,7 @@ begin
     releaseEv.detail := XCB_BUTTON_INDEX_1;
     releaseEv.event := cli.FrameWindow;
     releaseEv.event_x := 200; // Released outside!
-    releaseEv.event_y := 17;
+    releaseEv.event_y := maxBtnY;
     wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
 
     // Pressed state cleared, action CANCELLED (still not maximized)
@@ -1197,7 +1205,7 @@ begin
 
     // 4. Mouse Button 1 Down on Maximize Button again
     wm.ProcessEvent(Pxcb_generic_event_t(@pressEv));
-    AssertEquals('PressedButton recorded as 2 again', 2, wm.PressedButton);
+    AssertEquals('PressedButton recorded as 1 again', 1, wm.PressedButton);
     AssertFalse('Client still NOT maximized on press', wsMaximizedHorz in cli.State);
 
     // 5. Release mouse INSIDE the Maximize Button
@@ -1205,8 +1213,8 @@ begin
     releaseEv.response_type := XCB_BUTTON_RELEASE;
     releaseEv.detail := XCB_BUTTON_INDEX_1;
     releaseEv.event := cli.FrameWindow;
-    releaseEv.event_x := 64; // Released within button bounds!
-    releaseEv.event_y := 17;
+    releaseEv.event_x := maxBtnX; // Released within button bounds!
+    releaseEv.event_y := maxBtnY;
     wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
 
     // Maximize action MUST now be executed!
@@ -1214,7 +1222,15 @@ begin
     AssertTrue('Client successfully maximized on release within bounds!', wsMaximizedHorz in cli.State);
 
     // 6. Test Restore button on release within bounds
-    // Window is now maximized, button 2 is restore button
+    // Window is now maximized, right-aligned buttons moved with the wider width
+    wm.CalculateButtons(cli, cli.CurrentRect.Width, btns, tX, tW);
+    maxBtnX := Round(btns[1].X + btns[1].Size * 0.5);
+    maxBtnY := Round(btns[1].Y + btns[1].Size * 0.5);
+    pressEv.event_x := maxBtnX;
+    pressEv.event_y := maxBtnY;
+    releaseEv.event_x := maxBtnX;
+    releaseEv.event_y := maxBtnY;
+
     wm.ProcessEvent(Pxcb_generic_event_t(@pressEv));
     AssertTrue('Client still maximized on press', wsMaximizedHorz in cli.State);
 
@@ -1722,23 +1738,23 @@ begin
     cli := wm.ManageWindow(5555);
     cli.CurrentRect := TXCBRect.Create(100, 100, 600, 400);
 
-    // 1. By default, all 3 standard buttons (Close, Minimize, Maximize) are generated
+    // 1. By default, all 3 standard buttons (Minimize, Maximize, Close) are generated
     wm.CalculateButtons(cli, cli.CurrentRect.Width, btns, tX, tW);
     AssertEquals('Default button count', 3, Length(btns));
-    AssertEquals('Btn 0 is Close', Ord(sbkClose), Ord(btns[0].Kind));
-    AssertEquals('Btn 1 is Minimize', Ord(sbkMinimize), Ord(btns[1].Kind));
-    AssertEquals('Btn 2 is Maximize', Ord(sbkMaximize), Ord(btns[2].Kind));
+    AssertEquals('Btn 0 is Minimize', Ord(sbkMinimize), Ord(btns[0].Kind));
+    AssertEquals('Btn 1 is Maximize', Ord(sbkMaximize), Ord(btns[1].Kind));
+    AssertEquals('Btn 2 is Close', Ord(sbkClose), Ord(btns[2].Kind));
 
     // 2. Hide Maximize button (e.g. BorderIcons without biMaximize)
     cli.HasMaximizeButton := False;
     wm.CalculateButtons(cli, cli.CurrentRect.Width, btns, tX, tW);
     AssertEquals('Button count without Maximize', 2, Length(btns));
-    AssertEquals('Btn 0 is still Close', Ord(sbkClose), Ord(btns[0].Kind));
-    AssertEquals('Btn 1 is still Minimize', Ord(sbkMinimize), Ord(btns[1].Kind));
+    AssertEquals('Btn 0 is still Minimize', Ord(sbkMinimize), Ord(btns[0].Kind));
+    AssertEquals('Btn 1 is Close', Ord(sbkClose), Ord(btns[1].Kind));
 
     // Hit-testing should not hit maximize
     btnIdx := wm.GetButtonAt(Round(btns[1].X), Round(btns[1].Y), cli, cli.CurrentRect.Width);
-    AssertEquals('Hit-test button 1 returns Minimize index', 1, btnIdx);
+    AssertEquals('Hit-test button 1 returns Close index', 1, btnIdx);
 
     // 3. Dialog window: hide both Minimize and Maximize (e.g. BorderStyle = bsDialog)
     cli.HasMinimizeButton := False;
@@ -2245,18 +2261,18 @@ begin
     cli.ExtendedClientArea := True;
     cli.SetGeometry(100, 100, 600, 400);
 
-    // 1. Inset calculation with default Left buttons
-    insets := wm.CalculateControlsInset(cli, 600);
-    AssertTrue('ECA Left inset > 0', insets.Left > 0);
-    AssertEquals('ECA Right inset = 0 for left-aligned', 0, insets.Right);
-    AssertEquals('ECA Top inset matches titlebar height', wm.TitlebarHeight, insets.Top);
-    AssertEquals('ECA Bottom inset = 0', 0, insets.Bottom);
-
-    // 2. Inset calculation with Right buttons
-    wm.ButtonAlignment := baRight;
+    // 1. Inset calculation with default Right buttons
     insets := wm.CalculateControlsInset(cli, 600);
     AssertEquals('ECA Left inset = 0 for right-aligned', 0, insets.Left);
     AssertTrue('ECA Right inset > 0', insets.Right > 0);
+    AssertEquals('ECA Top inset matches titlebar height', wm.TitlebarHeight, insets.Top);
+    AssertEquals('ECA Bottom inset = 0', 0, insets.Bottom);
+
+    // 2. Inset calculation with Left buttons
+    wm.ButtonAlignment := baLeft;
+    insets := wm.CalculateControlsInset(cli, 600);
+    AssertTrue('ECA Left inset > 0', insets.Left > 0);
+    AssertEquals('ECA Right inset = 0 for left-aligned', 0, insets.Right);
     AssertEquals('ECA Top inset matches titlebar height', wm.TitlebarHeight, insets.Top);
 
     // Reset to left
@@ -2309,7 +2325,21 @@ begin
     cli.ExtendedClientArea := True;
     cli.SetGeometry(100, 100, 600, 400);
 
+    // Right alignment (default): the right inset is measured from the
+    // right edge, so the leftmost right-hand button must be at least that far in.
+    insets := wm.CalculateControlsInset(cli, 600);
+    wm.CalculateButtons(cli, 600, btns, titleX, titleW);
+    firstX := 600;
+    for i := 0 to High(btns) do
+      if btns[i].Placement = bpRight then
+        if btns[i].X < firstX then
+          firstX := btns[i].X;
+    AssertEquals('right alignment leaves the left inset empty', 0, insets.Left);
+    AssertTrue('right inset covers every right button',
+               (600 - firstX) <= insets.Right + 1);
+
     // Left alignment: every button sits inside the left inset.
+    wm.ButtonAlignment := baLeft;
     insets := wm.CalculateControlsInset(cli, 600);
     wm.CalculateButtons(cli, 600, btns, titleX, titleW);
     widest := 0;
@@ -2322,20 +2352,7 @@ begin
       end;
     AssertTrue('left inset covers every left button (inset >= %f)'.Format([widest]),
                insets.Left >= widest);
-
-    // Right alignment: the mirror image. The right inset is measured from the
-    // right edge, so the leftmost right-hand button must be at least that far in.
-    wm.ButtonAlignment := baRight;
-    insets := wm.CalculateControlsInset(cli, 600);
-    wm.CalculateButtons(cli, 600, btns, titleX, titleW);
-    firstX := 600;
-    for i := 0 to High(btns) do
-      if btns[i].Placement = bpRight then
-        if btns[i].X < firstX then
-          firstX := btns[i].X;
-    AssertEquals('right alignment leaves the left inset empty', 0, insets.Left);
-    AssertTrue('right inset covers every right button',
-               (600 - firstX) <= insets.Right + 1);
+    AssertEquals('left alignment leaves the right inset empty', 0, insets.Right);
 
     // Top inset is the titlebar row the overlay draws into; bottom is unused.
     AssertEquals('top inset is the titlebar height', wm.TitlebarHeight, insets.Top);
@@ -2401,6 +2418,8 @@ var
   wm: TWMSamaCompositingWM;
   cli: TXCBWMClient;
   plain: TXCBWMClient;
+  btns: TWMSamaButtonArray;
+  titleX, titleW: Integer;
 begin
   wm := TWMSamaCompositingWM.Create(nil, 0);
   try
@@ -2421,10 +2440,11 @@ begin
 
     // In the extended layout every pixel of the titlebar row is a drag zone
     // except where a button is drawn: the whole bar moves the window.
+    wm.CalculateButtons(cli, 600, btns, titleX, titleW);
     AssertTrue('empty titlebar area is draggable',
                wm.IsTitlebarDraggable(300, 17, cli, 600));
     AssertFalse('a button is not a drag zone',
-                wm.IsTitlebarDraggable(64, 17, cli, 600));
+                wm.IsTitlebarDraggable(Round(btns[0].X + btns[0].Size * 0.5), 17, cli, 600));
   finally
     cli := nil;
     plain := nil;
@@ -2440,6 +2460,8 @@ var
   wm: TWMSamaCompositingWM;
   cli: TXCBWMClient;
   insets: TXCBFrameInsets;
+  btns: TWMSamaButtonArray;
+  titleX, titleW: Integer;
 begin
   wm := TWMSamaCompositingWM.Create(nil, 0);
   try
@@ -2451,7 +2473,7 @@ begin
 
     // With the flag on, an inset is reported and the overlay is wanted.
     insets := wm.CalculateControlsInset(cli, 600);
-    AssertTrue('flag on: inset reserved', insets.Left > 0);
+    AssertTrue('flag on: inset reserved', insets.Right > 0);
 
     // A client that never set the property is not extended at all. ManageWindow
     // reads the property, so this is the default state for an ordinary client.
@@ -2469,8 +2491,9 @@ begin
     // additive, not a replacement for SSD. What must not happen is an inset
     // being reserved on the client's behalf.
     cli.ExtendedClientArea := False;
+    wm.CalculateButtons(cli, 600, btns, titleX, titleW);
     AssertEquals('no property: ordinary titlebar button is still hit-testable',
-                 2, wm.GetButtonAt(64, 17, cli, 600));
+                 2, wm.GetButtonAt(Round(btns[2].X + 7), 17, cli, 600));
     insets := wm.CalculateControlsInset(cli, 600);
     AssertEquals('no property: no inset reserved in the client canvas',
                  0, insets.Left + insets.Right + insets.Top);
