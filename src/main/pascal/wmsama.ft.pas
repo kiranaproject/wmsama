@@ -5,7 +5,7 @@ unit WMSama.FT;
 interface
 
 uses
-  ctypes, SysUtils, Classes, dynlibs,
+  ctypes, SysUtils, Classes, Math, dynlibs,
   Floria.Canvas.Agg;
 
 const
@@ -153,6 +153,9 @@ procedure FtDrawWindowButton(Canvas: TFloriaCanvasAgg; BX, BY, BW, BH: Double;
 var
   dmInt: cint32;
   cenX, cenY, r: Double;
+  prog: Double;
+  normR, normG, normB, normBdR, normBdG, normBdB: Double;
+  hovR, hovG, hovB, curR, curG, curB, outlineA: Double;
 begin
   if Canvas = nil then Exit;
 
@@ -167,26 +170,69 @@ begin
     cenX := BX + BW * 0.5;
     cenY := BY + BH * 0.5;
     r := (BW * 0.5) - 1.0;
-    if not ADarkMode and (AState = FT_BUTTON_STATE_NORMAL) then
+
+    if AHoverProgress >= 0.0 then
+      prog := Max(0.0, Min(1.0, AHoverProgress))
+    else if (AState = FT_BUTTON_STATE_HOVERED) or (AState = FT_BUTTON_STATE_PRESSED) then
+      prog := 1.0
+    else
+      prog := 0.0;
+
+    if ADarkMode then
     begin
-      Canvas.DrawCircle(cenX, cenY, r, 245 / 255, 247 / 255, 250 / 255, 1.0);
-      Canvas.DrawCircleOutline(cenX, cenY, r, 1.0, 204 / 255, 209 / 255, 217 / 255, 1.0);
+      normR := 0.22; normG := 0.24; normB := 0.26;
+      normBdR := 0.32; normBdG := 0.35; normBdB := 0.38;
     end
     else
     begin
-      case AKind of
-        FT_WINDOW_BUTTON_CLOSE:
-          Canvas.DrawCircle(cenX, cenY, r, 255 / 255, 95 / 255, 86 / 255, 1.0);
-        FT_WINDOW_BUTTON_MINIMIZE:
-          Canvas.DrawCircle(cenX, cenY, r, 255 / 255, 189 / 255, 46 / 255, 1.0);
-        FT_WINDOW_BUTTON_MAXIMIZE, FT_WINDOW_BUTTON_RESTORE:
-          Canvas.DrawCircle(cenX, cenY, r, 39 / 255, 201 / 255, 63 / 255, 1.0);
-        FT_WINDOW_BUTTON_SHADE, FT_WINDOW_BUTTON_PIN, FT_WINDOW_BUTTON_MENU:
-          Canvas.DrawCircle(cenX, cenY, r, 56 / 255, 128 / 255, 235 / 255, 1.0);
-      else
-        Canvas.DrawCircle(cenX, cenY, r, 120 / 255, 120 / 255, 120 / 255, 1.0);
-      end;
+      normR := 245 / 255; normG := 247 / 255; normB := 250 / 255;
+      normBdR := 204 / 255; normBdG := 209 / 255; normBdB := 217 / 255;
     end;
+
+    case AKind of
+      FT_WINDOW_BUTTON_CLOSE:
+      begin
+        hovR := 255 / 255; hovG := 95 / 255; hovB := 86 / 255;
+      end;
+      FT_WINDOW_BUTTON_MINIMIZE:
+      begin
+        hovR := 255 / 255; hovG := 189 / 255; hovB := 46 / 255;
+      end;
+      FT_WINDOW_BUTTON_MAXIMIZE, FT_WINDOW_BUTTON_RESTORE:
+      begin
+        hovR := 39 / 255; hovG := 201 / 255; hovB := 63 / 255;
+      end;
+      FT_WINDOW_BUTTON_SHADE, FT_WINDOW_BUTTON_PIN, FT_WINDOW_BUTTON_MENU:
+      begin
+        hovR := 56 / 255; hovG := 128 / 255; hovB := 235 / 255;
+      end;
+    else
+      hovR := 120 / 255; hovG := 120 / 255; hovB := 120 / 255;
+    end;
+
+    if AState = FT_BUTTON_STATE_PRESSED then
+    begin
+      curR := hovR * 0.75;
+      curG := hovG * 0.75;
+      curB := hovB * 0.75;
+    end
+    else
+    begin
+      curR := normR + (hovR - normR) * prog;
+      curG := normG + (hovG - normG) * prog;
+      curB := normB + (hovB - normB) * prog;
+    end;
+
+    if (AState <> FT_BUTTON_STATE_PRESSED) and (prog > 0.005) then
+    begin
+      Canvas.DrawCircle(cenX, cenY, r + 2.5 * prog, hovR, hovG, hovB, 0.20 * prog);
+      Canvas.DrawCircle(cenX, cenY, r + 1.2 * prog, hovR, hovG, hovB, 0.40 * prog);
+    end;
+
+    Canvas.DrawCircle(cenX, cenY, r, curR, curG, curB, 1.0);
+    outlineA := (1.0 - prog);
+    if outlineA > 0.01 then
+      Canvas.DrawCircleOutline(cenX, cenY, r, 1.0, normBdR, normBdG, normBdB, outlineA);
   end;
 end;
 

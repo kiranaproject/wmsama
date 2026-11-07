@@ -45,6 +45,7 @@ type
     procedure TestWindowResizingDirectionalAndTiled();
     procedure TestWindowCursors();
     procedure TestWindowButtonReleaseAndCancel();
+    procedure TestWindowButtonHoverTransition();
     procedure TestWindowSnappingWithStrutsAndWorkarea();
     procedure TestWindowMinimizeAndRestoreCompositor();
     procedure TestUndecoratedAndSplashCornerRadius();
@@ -1236,6 +1237,76 @@ begin
 
     wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
     AssertFalse('Client successfully restored on release within bounds!', wsMaximizedHorz in cli.State);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowButtonHoverTransition();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  motionEv: xcb_motion_notify_event_t;
+  leaveEv: xcb_leave_notify_event_t;
+  prog: Double;
+  btns: TWMSamaButtonArray;
+  tX, tW: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(7050);
+    cli.IsReparented := True;
+    cli.FrameWindow := 7051;
+    cli.ControlsWindow := 7052;
+    cli.ExtendedClientArea := True;
+    cli.SetGeometry(100, 100, 500, 350);
+
+    // 1. Initial progress is 0.0
+    AssertEquals('Initial button hover progress is 0.0', 0.0, wm.GetClientButtonHoverProgress(cli));
+
+    // 2. IsOverButtonCluster checks
+    // Buttons default to right side on width 500
+    wm.CalculateButtons(cli, 500, btns, tX, tW);
+    AssertTrue('Inside button cluster at right button edge',
+               wm.IsOverButtonCluster(Round(btns[1].X), 17, cli, 500));
+    AssertFalse('Outside button cluster at center titlebar',
+                wm.IsOverButtonCluster(200, 17, cli, 500));
+
+    // 3. Motion over ControlsWindow starts hover transition toward 1.0
+    FillChar(motionEv, SizeOf(motionEv), 0);
+    motionEv.response_type := XCB_MOTION_NOTIFY;
+    motionEv.event := cli.ControlsWindow;
+    motionEv.event_x := Round(btns[1].X);
+    motionEv.event_y := 17;
+    wm.ProcessEvent(Pxcb_generic_event_t(@motionEv));
+
+    // Target set to 1.0; after short delay progress advances smoothly
+    Sleep(50);
+    wm.UpdateButtonHoverAnimations();
+    prog := wm.GetClientButtonHoverProgress(cli);
+    AssertTrue('Hover progress > 0.0 during transition', prog > 0.0);
+    AssertTrue('Hover progress < 1.0 mid-transition', prog < 1.0);
+
+    // Wait remaining duration for transition to complete
+    Sleep(150);
+    wm.UpdateButtonHoverAnimations();
+    AssertTrue('Hover progress reaches 1.0', Abs(wm.GetClientButtonHoverProgress(cli) - 1.0) < 0.01);
+
+    // 4. Mouse leave starts transition back toward 0.0
+    FillChar(leaveEv, SizeOf(leaveEv), 0);
+    leaveEv.response_type := XCB_LEAVE_NOTIFY;
+    leaveEv.event := cli.ControlsWindow;
+    wm.ProcessEvent(Pxcb_generic_event_t(@leaveEv));
+
+    Sleep(50);
+    wm.UpdateButtonHoverAnimations();
+    prog := wm.GetClientButtonHoverProgress(cli);
+    AssertTrue('Hover progress decreasing (< 1.0)', prog < 1.0);
+    AssertTrue('Hover progress > 0.0 mid-exit', prog > 0.0);
+
+    Sleep(150);
+    wm.UpdateButtonHoverAnimations();
+    AssertTrue('Hover progress reaches 0.0', wm.GetClientButtonHoverProgress(cli) < 0.01);
   finally
     wm.Free();
   end;
