@@ -73,6 +73,7 @@ type
 
   TWMSamaButtonHoverAnim = record
     ClientWindow : xcb_window_t;
+    ButtonIndex  : Integer;
     Progress     : Double;
     StartVal     : Double;
     TargetVal    : Double;
@@ -314,8 +315,11 @@ type
     procedure GetWindowButtonMetrics(out ABtnSize, ABtnY, AX0, AX1, AX2: Double; out ATitleX: Integer);
     function GetButtonAt(const AX, AY: Integer; const AWidth: Integer = 820): Integer; overload;
     function GetButtonAt(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer = 0): Integer; overload;
-    function GetClientButtonHoverProgress(const AClient: TXCBWMClient): Double;
-    procedure SetClientButtonHoverTarget(const AClient: TXCBWMClient; const ATarget: Double; const ADurationMs: Integer = 160);
+    function GetClientButtonHoverProgress(const AClient: TXCBWMClient; const AButtonIndex: Integer): Double; overload;
+    function GetClientButtonHoverProgress(const AClient: TXCBWMClient): Double; overload;
+    procedure SetClientButtonHoverTarget(const AClient: TXCBWMClient; const AButtonIndex: Integer; const ATarget: Double; const ADurationMs: Integer = 160); overload;
+    procedure SetClientButtonHoverTarget(const AClient: TXCBWMClient; const ATarget: Double; const ADurationMs: Integer = 160); overload;
+    procedure SetClientOtherButtonsHoverTarget(const AClient: TXCBWMClient; const AExceptButtonIndex: Integer; const ATarget: Double; const ADurationMs: Integer = 160);
     function IsOverButtonCluster(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer = 0): Boolean;
     procedure UpdateButtonHoverAnimations();
     function IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean; overload;
@@ -1901,14 +1905,18 @@ begin
       Break;
     end;
 
-  for i := 0 to High(FButtonHoverAnims) do
+  i := 0;
+  while i < Length(FButtonHoverAnims) do
+  begin
     if FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow then
     begin
       for j := i to High(FButtonHoverAnims) - 1 do
         FButtonHoverAnims[j] := FButtonHoverAnims[j + 1];
       SetLength(FButtonHoverAnims, Length(FButtonHoverAnims) - 1);
-      Break;
-    end;
+    end
+    else
+      Inc(i);
+  end;
 
   if FCompositor = nil then Exit;
 
@@ -2301,7 +2309,7 @@ begin
   end;
 end;
 
-function TWMSamaCompositingWM.GetClientButtonHoverProgress(const AClient: TXCBWMClient): Double;
+function TWMSamaCompositingWM.GetClientButtonHoverProgress(const AClient: TXCBWMClient; const AButtonIndex: Integer): Double;
 var
   i: Integer;
 begin
@@ -2309,23 +2317,69 @@ begin
   if AClient = nil then Exit;
   for i := 0 to High(FButtonHoverAnims) do
   begin
-    if FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow then
+    if (FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow) and
+       (FButtonHoverAnims[i].ButtonIndex = AButtonIndex) then
       Exit(FButtonHoverAnims[i].Progress);
   end;
 end;
 
-procedure TWMSamaCompositingWM.SetClientButtonHoverTarget(const AClient: TXCBWMClient; const ATarget: Double; const ADurationMs: Integer);
+function TWMSamaCompositingWM.GetClientButtonHoverProgress(const AClient: TXCBWMClient): Double;
+var
+  i: Integer;
+  maxP: Double;
+begin
+  Result := 0.0;
+  if AClient = nil then Exit;
+  maxP := 0.0;
+  for i := 0 to High(FButtonHoverAnims) do
+  begin
+    if FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow then
+      if FButtonHoverAnims[i].Progress > maxP then
+        maxP := FButtonHoverAnims[i].Progress;
+  end;
+  Result := maxP;
+end;
+
+procedure TWMSamaCompositingWM.SetClientButtonHoverTarget(const AClient: TXCBWMClient; const AButtonIndex: Integer; const ATarget: Double; const ADurationMs: Integer);
 var
   i, idx: Integer;
   targetClamped: Double;
+  nowMs: QWord;
 begin
   if AClient = nil then Exit;
   targetClamped := Max(0.0, Min(1.0, ATarget));
 
+  if AButtonIndex < 0 then
+  begin
+    nowMs := GetTickCount64();
+    for i := 0 to High(FButtonHoverAnims) do
+    begin
+      if FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow then
+      begin
+        if (FButtonHoverAnims[i].TargetVal = targetClamped) and FButtonHoverAnims[i].Active then
+          Continue;
+        if (FButtonHoverAnims[i].Progress = targetClamped) and not FButtonHoverAnims[i].Active then
+          Continue;
+
+        FButtonHoverAnims[i].StartVal := FButtonHoverAnims[i].Progress;
+        FButtonHoverAnims[i].TargetVal := targetClamped;
+        FButtonHoverAnims[i].StartTimeMs := nowMs;
+        if ADurationMs > 0 then
+          FButtonHoverAnims[i].DurationMs := ADurationMs
+        else
+          FButtonHoverAnims[i].DurationMs := 160;
+        FButtonHoverAnims[i].Active := True;
+      end;
+    end;
+    RequestComposite();
+    Exit;
+  end;
+
   idx := -1;
   for i := 0 to High(FButtonHoverAnims) do
   begin
-    if FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow then
+    if (FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow) and
+       (FButtonHoverAnims[i].ButtonIndex = AButtonIndex) then
     begin
       idx := i;
       Break;
@@ -2334,9 +2388,12 @@ begin
 
   if idx < 0 then
   begin
+    if targetClamped = 0.0 then Exit;
+
     idx := Length(FButtonHoverAnims);
     SetLength(FButtonHoverAnims, idx + 1);
     FButtonHoverAnims[idx].ClientWindow := AClient.ClientWindow;
+    FButtonHoverAnims[idx].ButtonIndex := AButtonIndex;
     FButtonHoverAnims[idx].Progress := 0.0;
     FButtonHoverAnims[idx].StartVal := 0.0;
     FButtonHoverAnims[idx].TargetVal := 0.0;
@@ -2361,6 +2418,26 @@ begin
   FButtonHoverAnims[idx].Active := True;
 
   RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.SetClientButtonHoverTarget(const AClient: TXCBWMClient; const ATarget: Double; const ADurationMs: Integer);
+begin
+  SetClientButtonHoverTarget(AClient, -1, ATarget, ADurationMs);
+end;
+
+procedure TWMSamaCompositingWM.SetClientOtherButtonsHoverTarget(const AClient: TXCBWMClient; const AExceptButtonIndex: Integer; const ATarget: Double; const ADurationMs: Integer);
+var
+  i: Integer;
+begin
+  if AClient = nil then Exit;
+  for i := 0 to High(FButtonHoverAnims) do
+  begin
+    if (FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow) and
+       (FButtonHoverAnims[i].ButtonIndex <> AExceptButtonIndex) then
+    begin
+      SetClientButtonHoverTarget(AClient, FButtonHoverAnims[i].ButtonIndex, ATarget, ADurationMs);
+    end;
+  end;
 end;
 
 function TWMSamaCompositingWM.IsOverButtonCluster(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer): Boolean;
@@ -2697,10 +2774,10 @@ begin
   if (cli = nil) or not cli.ExtendedClientArea or (wsMinimized in cli.State) then Exit;
 
   CalculateButtons(cli, cli.CurrentRect.Width, btns, titleX, titleW);
-  hoverProg := GetClientButtonHoverProgress(cli);
 
   for i := 0 to High(btns) do
   begin
+    hoverProg := GetClientButtonHoverProgress(cli, i);
     isHoveredWin := (FHoveredWindow <> 0) and
                     ((FHoveredWindow = cli.FrameWindow) or (FHoveredWindow = cli.ControlsWindow));
     if ((FPressedWindow = cli.FrameWindow) or (FPressedWindow = cli.ControlsWindow)) and
@@ -3249,10 +3326,10 @@ begin
 
     // 2. Vector Window Buttons via Floria Toolkit (libft.so)
     CalculateButtons(AClient, w, btns, titleX, titleW);
-    hoverProg := GetClientButtonHoverProgress(AClient);
 
     for i := 0 to High(btns) do
     begin
+      hoverProg := GetClientButtonHoverProgress(AClient, i);
       isHoveredWin := (FHoveredWindow <> 0) and (FHoveredWindow = AClient.FrameWindow);
       if (FPressedWindow = AClient.FrameWindow) and (FPressedButton = i) and (FHoveredButton = i) then
         btnState := FT_BUTTON_STATE_PRESSED
@@ -4522,13 +4599,15 @@ begin
           localX := motionEv^.event_x;
           localY := motionEv^.event_y;
           newBtn := GetButtonAt(localX, localY, cli, cli.CurrentRect.Width);
-          isOverCluster := (newBtn >= 0) or (motionEv^.event = cli.ControlsWindow) or
-                           IsOverButtonCluster(localX, localY, cli, cli.CurrentRect.Width);
-
-          if isOverCluster then
-            SetClientButtonHoverTarget(cli, 1.0)
+          if newBtn >= 0 then
+          begin
+            SetClientButtonHoverTarget(cli, newBtn, 1.0);
+            SetClientOtherButtonsHoverTarget(cli, newBtn, 0.0);
+          end
           else
-            SetClientButtonHoverTarget(cli, 0.0);
+          begin
+            SetClientButtonHoverTarget(cli, -1, 0.0);
+          end;
 
           if (newBtn <> FHoveredButton) or (motionEv^.event <> FHoveredWindow) then
           begin
@@ -4546,7 +4625,7 @@ begin
           oldCli := FindClient(oldWin);
           if oldCli <> nil then
           begin
-            SetClientButtonHoverTarget(oldCli, 0.0);
+            SetClientButtonHoverTarget(oldCli, -1, 0.0);
             PaintClientFrame(oldCli);
           end;
           RequestComposite();
@@ -4601,7 +4680,13 @@ begin
       begin
         FHoveredWindow := enterEv^.event;
         FHoveredButton := GetButtonAt(enterEv^.event_x, enterEv^.event_y, cli, cli.CurrentRect.Width);
-        SetClientButtonHoverTarget(cli, 1.0);
+        if FHoveredButton >= 0 then
+        begin
+          SetClientButtonHoverTarget(cli, FHoveredButton, 1.0);
+          SetClientOtherButtonsHoverTarget(cli, FHoveredButton, 0.0);
+        end
+        else
+          SetClientButtonHoverTarget(cli, -1, 0.0);
         PaintClientFrame(cli);
         RequestComposite();
       end;
@@ -4628,7 +4713,7 @@ begin
         oldCli := FindClient(oldWin);
         if oldCli <> nil then
         begin
-          SetClientButtonHoverTarget(oldCli, 0.0);
+          SetClientButtonHoverTarget(oldCli, -1, 0.0);
           PaintClientFrame(oldCli);
         end;
         RequestComposite();
@@ -4654,10 +4739,15 @@ begin
 
           FHoveredButton := releasedBtn;
           FHoveredWindow := btnEv^.event;
-          if (releasedBtn >= 0) or (btnEv^.event = cli.ControlsWindow) or IsOverButtonCluster(localX, localY, cli, cli.CurrentRect.Width) then
-            SetClientButtonHoverTarget(cli, 1.0)
+          if releasedBtn >= 0 then
+          begin
+            SetClientButtonHoverTarget(cli, releasedBtn, 1.0);
+            SetClientOtherButtonsHoverTarget(cli, releasedBtn, 0.0);
+          end
           else
-            SetClientButtonHoverTarget(cli, 0.0);
+          begin
+            SetClientButtonHoverTarget(cli, -1, 0.0);
+          end;
           PaintClientFrame(cli);
           RequestComposite();
 
@@ -4690,7 +4780,7 @@ begin
             if oldCli <> nil then
             begin
               FHoveredButton := -1;
-              SetClientButtonHoverTarget(oldCli, 0.0);
+              SetClientButtonHoverTarget(oldCli, -1, 0.0);
               PaintClientFrame(oldCli);
             end;
           end;

@@ -1283,16 +1283,36 @@ begin
     // Target set to 1.0; after short delay progress advances smoothly
     Sleep(50);
     wm.UpdateButtonHoverAnimations();
-    prog := wm.GetClientButtonHoverProgress(cli);
-    AssertTrue('Hover progress > 0.0 during transition', prog > 0.0);
-    AssertTrue('Hover progress < 1.0 mid-transition', prog < 1.0);
+    prog := wm.GetClientButtonHoverProgress(cli, 1);
+    AssertTrue('Hovered button 1 progress > 0.0 during transition', prog > 0.0);
+    AssertTrue('Hovered button 1 progress < 1.0 mid-transition', prog < 1.0);
+    AssertEquals('Non-hovered button 0 progress stays 0.0', 0.0, wm.GetClientButtonHoverProgress(cli, 0));
+    AssertEquals('Non-hovered button 2 progress stays 0.0', 0.0, wm.GetClientButtonHoverProgress(cli, 2));
 
     // Wait remaining duration for transition to complete
     Sleep(150);
     wm.UpdateButtonHoverAnimations();
-    AssertTrue('Hover progress reaches 1.0', Abs(wm.GetClientButtonHoverProgress(cli) - 1.0) < 0.01);
+    AssertTrue('Hovered button 1 progress reaches 1.0', Abs(wm.GetClientButtonHoverProgress(cli, 1) - 1.0) < 0.01);
+    AssertEquals('Non-hovered button 0 progress remains 0.0', 0.0, wm.GetClientButtonHoverProgress(cli, 0));
+    AssertEquals('Non-hovered button 2 progress remains 0.0', 0.0, wm.GetClientButtonHoverProgress(cli, 2));
 
-    // 4. Mouse leave starts transition back toward 0.0
+    // 4. Moving directly to button 2 cross-fades: button 2 glows up, button 1 glows down
+    motionEv.event_x := Round(btns[2].X);
+    motionEv.event_y := 17;
+    wm.ProcessEvent(Pxcb_generic_event_t(@motionEv));
+
+    Sleep(50);
+    wm.UpdateButtonHoverAnimations();
+    AssertTrue('Button 2 progress > 0.0 mid-entry', wm.GetClientButtonHoverProgress(cli, 2) > 0.0);
+    AssertTrue('Button 1 progress < 1.0 mid-exit', wm.GetClientButtonHoverProgress(cli, 1) < 1.0);
+    AssertEquals('Button 0 remains 0.0', 0.0, wm.GetClientButtonHoverProgress(cli, 0));
+
+    Sleep(150);
+    wm.UpdateButtonHoverAnimations();
+    AssertTrue('Button 2 progress reaches 1.0', Abs(wm.GetClientButtonHoverProgress(cli, 2) - 1.0) < 0.01);
+    AssertTrue('Button 1 progress reaches 0.0', wm.GetClientButtonHoverProgress(cli, 1) < 0.01);
+
+    // 5. Mouse leave starts transition back toward 0.0
     FillChar(leaveEv, SizeOf(leaveEv), 0);
     leaveEv.response_type := XCB_LEAVE_NOTIFY;
     leaveEv.event := cli.ControlsWindow;
@@ -1300,13 +1320,14 @@ begin
 
     Sleep(50);
     wm.UpdateButtonHoverAnimations();
-    prog := wm.GetClientButtonHoverProgress(cli);
+    prog := wm.GetClientButtonHoverProgress(cli, 2);
     AssertTrue('Hover progress decreasing (< 1.0)', prog < 1.0);
     AssertTrue('Hover progress > 0.0 mid-exit', prog > 0.0);
 
     Sleep(150);
     wm.UpdateButtonHoverAnimations();
-    AssertTrue('Hover progress reaches 0.0', wm.GetClientButtonHoverProgress(cli) < 0.01);
+    AssertTrue('Button 2 progress reaches 0.0', wm.GetClientButtonHoverProgress(cli, 2) < 0.01);
+    AssertEquals('All buttons at 0.0', 0.0, wm.GetClientButtonHoverProgress(cli));
   finally
     wm.Free();
   end;
