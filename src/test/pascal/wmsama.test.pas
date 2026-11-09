@@ -81,6 +81,7 @@ type
     procedure TestScanExistingWindowsMappedBeforeStartup();
     procedure TestTitlebarLightModeRendering();
     procedure TestTitlebarRightClickShowsWindowMenu();
+    procedure TestAlwaysOnTopStackingAndClickFocus();
   end;
 
 implementation
@@ -4051,6 +4052,94 @@ begin
       testCanvas.Free();
     end;
   finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestAlwaysOnTopStackingAndClickFocus();
+var
+  wm: TWMSamaCompositingWM;
+  cliBack, cliFront: TXCBWMClient;
+  compBack, compFront: TXCBCompositedWindow;
+  btnEv: xcb_button_press_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // cliBack (normal window): (100, 100, 600, 400)
+    cliBack := wm.ManageWindow(3001);
+    cliBack.CurrentRect := TXCBRect.Create(100, 100, 600, 400);
+    cliBack.RestoredRect := cliBack.CurrentRect;
+    cliBack.FrameWindow := 3002;
+    cliBack.ResizeWindow := 3003;
+    cliBack.IsReparented := True;
+    compBack := wm.Compositor.RegisterWindow(cliBack.FrameWindow, cliBack.CurrentRect, cliBack.ClientWindow);
+
+    // cliFront (Always On Top candidate): (200, 200, 400, 300)
+    cliFront := wm.ManageWindow(4001);
+    cliFront.CurrentRect := TXCBRect.Create(200, 200, 400, 300);
+    cliFront.RestoredRect := cliFront.CurrentRect;
+    cliFront.FrameWindow := 4002;
+    cliFront.ResizeWindow := 4003;
+    cliFront.IsReparented := True;
+    compFront := wm.Compositor.RegisterWindow(cliFront.FrameWindow, cliFront.CurrentRect, cliFront.ClientWindow);
+
+    // Initial ranks are normal (1)
+    AssertEquals('cliBack initial rank is normal', 1, wm.CompositorStackRank(cliBack));
+    AssertEquals('cliFront initial rank is normal', 1, wm.CompositorStackRank(cliFront));
+
+    // Toggle Keep On Top on cliFront
+    wm.ToggleKeepOnTop(cliFront);
+    AssertTrue('wsAbove flag is set on cliFront', wsAbove in cliFront.State);
+    AssertEquals('cliFront rank is csrAbove (2)', 2, wm.CompositorStackRank(cliFront));
+    AssertTrue('cliFront is stacked above cliBack in compositor',
+               wm.Compositor.Windows.IndexOf(compFront) > wm.Compositor.Windows.IndexOf(compBack));
+
+    // Focus the back window (cliBack)
+    cliBack.Activate();
+    AssertSame('cliBack is now active client', cliBack, wm.ActiveClient);
+
+    // cliFront must remain above cliBack in compositor stack even after cliBack activation
+    AssertTrue('cliFront remains above cliBack in compositor when cliBack is active',
+               wm.Compositor.Windows.IndexOf(compFront) > wm.Compositor.Windows.IndexOf(compBack));
+
+    // Test occlusion at overlapping coordinate (250, 250)
+    AssertTrue('Point (250, 250) is occluded for cliBack',
+               wm.IsPointOccluded(250, 250, cliBack));
+    AssertFalse('Point (250, 250) is NOT occluded for cliFront',
+               wm.IsPointOccluded(250, 250, cliFront));
+
+    // FindClientTopmostAt must identify cliFront at (250, 250)
+    AssertSame('Topmost client at (250, 250) is cliFront',
+               cliFront, wm.FindClientTopmostAt(250, 250));
+
+    // Button press on cliBack at (250, 250) must NOT activate cliBack or start drag;
+    // it must activate cliFront instead.
+    FillChar(btnEv, SizeOf(btnEv), 0);
+    btnEv.response_type := XCB_BUTTON_PRESS;
+    btnEv.detail := XCB_BUTTON_INDEX_1;
+    btnEv.root_x := 250;
+    btnEv.root_y := 250;
+    btnEv.event := cliBack.FrameWindow;
+
+    wm.ProcessEvent(Pxcb_generic_event_t(@btnEv));
+    AssertSame('Clicking on occluded window at (250, 250) transfers focus to cliFront',
+               cliFront, wm.ActiveClient);
+
+    // Direct click on cliFront at (250, 250) activates cliFront
+    wm.ActiveClient := cliBack;
+    AssertSame('cliBack set active before direct click test', cliBack, wm.ActiveClient);
+
+    btnEv.event := cliFront.FrameWindow;
+    wm.ProcessEvent(Pxcb_generic_event_t(@btnEv));
+    AssertSame('Direct click on cliFront activates cliFront', cliFront, wm.ActiveClient);
+
+    // Toggle Keep On Top OFF restores normal rank (1)
+    wm.ToggleKeepOnTop(cliFront);
+    AssertFalse('wsAbove flag cleared on cliFront', wsAbove in cliFront.State);
+    AssertEquals('cliFront rank restored to normal (1)', 1, wm.CompositorStackRank(cliFront));
+  finally
+    cliFront := nil;
+    cliBack := nil;
     wm.Free();
   end;
 end;

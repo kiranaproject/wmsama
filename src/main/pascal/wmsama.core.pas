@@ -331,6 +331,7 @@ type
     procedure UpdateControlsWindow(const AClient: TXCBWMClient);
     function GetResizeModeForPoint(const AClient: TXCBWMClient; const ARootX, ARootY: Integer): TXCBDragMode;
     function IsPointOccluded(const ARootX, ARootY: Integer; const AClient: TXCBWMClient): Boolean;
+    function FindClientTopmostAt(const ARootX, ARootY: Integer): TXCBWMClient;
 
     // Additional Window Controls (Shade, Keep on Top, Window Menu)
     procedure ToggleKeepOnTop(const AClient: TXCBWMClient);
@@ -1129,10 +1130,11 @@ const
   // not the compositor's problem to arbitrate -- their struts keep them apart.
   csrDesktop      = 0;
   csrNormal       = 1;
-  csrPanel        = 2;
+  csrAbove        = 2;
+  csrPanel        = 3;
   // Fullscreen windows cover the panels, as they do everywhere else. A panel drawn
   // over a fullscreen video is worse than the panel being hidden for a while.
-  csrFullscreen   = 3;
+  csrFullscreen   = 4;
 
 function TWMSamaCompositingWM.CompositorStackRank(const AClient: TXCBWMClient): Integer;
 begin
@@ -1141,10 +1143,12 @@ begin
 
   if AClient.WindowType = wtDesktop then
     Result := csrDesktop
+  else if wsFullscreen in AClient.State then
+    Result := csrFullscreen
   else if AClient.WindowType = wtDock then
     Result := csrPanel
-  else if wsFullscreen in AClient.State then
-    Result := csrFullscreen;
+  else if wsAbove in AClient.State then
+    Result := csrAbove;
 end;
 
 procedure TWMSamaCompositingWM.RaiseInCompositor(const AClient: TXCBWMClient);
@@ -1822,7 +1826,10 @@ begin
     // RegisterWindow appends, which would put a new window above the panels. Put it
     // in its own band instead: desktops stay at the bottom, panels stay at the top.
     if not (AClient.WindowType in [wtDock, wtDesktop]) then
-      RaiseInCompositor(AClient)
+    begin
+      RaiseInCompositor(AClient);
+      RaiseInStacking(AClient);
+    end
     else
     begin
       FCompositor.Windows.Extract(compWin);
@@ -2078,7 +2085,7 @@ begin
     end;
   end;
 
-  // Ensure all wsAbove windows remain at the very top of stacking order
+  // Ensure all wsAbove windows remain at the very top of stacking order in compositor and X11
   for i := 0 to Clients.Count - 1 do
   begin
     cli := TXCBWMClient(Clients[i]);
@@ -2091,6 +2098,7 @@ begin
       compWin := FCompositor.FindWindow(targetWin);
       if compWin <> nil then
         RaiseInCompositor(cli);
+      RaiseInStacking(cli);
     end;
   end;
 
@@ -3074,6 +3082,7 @@ begin
       begin
         otherCli := TXCBWMClient(MruClients[i]);
         if (otherCli = nil) or (wsMinimized in otherCli.State) then Continue;
+        if CompositorStackRank(otherCli) < CompositorStackRank(AClient) then Continue;
 
         otherRect := otherCli.CurrentRect;
         if IsClientShaded(otherCli.ClientWindow) then
@@ -3092,7 +3101,8 @@ begin
   end;
 
   // 3. Ensure ActiveClient in front occludes AClient if not already caught
-  if (ActiveClient <> nil) and (ActiveClient <> AClient) and not (wsMinimized in ActiveClient.State) then
+  if (ActiveClient <> nil) and (ActiveClient <> AClient) and not (wsMinimized in ActiveClient.State) and
+     (CompositorStackRank(ActiveClient) >= CompositorStackRank(AClient)) then
   begin
     otherRect := ActiveClient.CurrentRect;
     if IsClientShaded(ActiveClient.ClientWindow) then
@@ -3109,11 +3119,113 @@ begin
   end;
 end;
 
+function TWMSamaCompositingWM.FindClientTopmostAt(const ARootX, ARootY: Integer): TXCBWMClient;
+var
+  i: Integer;
+  compWin: TXCBCompositedWindow;
+  cli: TXCBWMClient;
+  r: TXCBRect;
+begin
+  Result := nil;
+
+  // 1. Check compositor windows from top to bottom
+  if (FCompositor <> nil) and (FCompositor.Windows <> nil) then
+  begin
+    for i := FCompositor.Windows.Count - 1 downto 0 do
+    begin
+      compWin := TXCBCompositedWindow(FCompositor.Windows[i]);
+      if compWin = nil then Continue;
+
+      cli := FindClient(compWin.Window);
+      if cli = nil then
+        cli := FindClient(compWin.ClientWindow);
+
+      if (cli <> nil) and not (wsMinimized in cli.State) then
+      begin
+        r := cli.CurrentRect;
+        if IsClientShaded(cli.ClientWindow) then
+          r.Height := FTitlebarHeight;
+
+        if r.Contains(ARootX, ARootY) then
+          Exit(cli);
+
+        if cli.CanResize and not ((wsMaximizedHorz in cli.State) or (wsFullscreen in cli.State)) then
+        begin
+          if GetResizeModeForPoint(cli, ARootX, ARootY) <> dmNone then
+            Exit(cli);
+        end;
+      end;
+    end;
+  end;
+
+  // 2. Fallback: check wsAbove clients first
+  if Clients <> nil then
+  begin
+    for i := 0 to Clients.Count - 1 do
+    begin
+      cli := TXCBWMClient(Clients[i]);
+      if (cli = nil) or (wsMinimized in cli.State) or not (wsAbove in cli.State) then Continue;
+
+      r := cli.CurrentRect;
+      if IsClientShaded(cli.ClientWindow) then
+        r.Height := FTitlebarHeight;
+
+      if r.Contains(ARootX, ARootY) then
+        Exit(cli);
+
+      if cli.CanResize and not ((wsMaximizedHorz in cli.State) or (wsFullscreen in cli.State)) then
+      begin
+        if GetResizeModeForPoint(cli, ARootX, ARootY) <> dmNone then
+          Exit(cli);
+      end;
+    end;
+  end;
+
+  // 3. Fallback: check ActiveClient if under cursor
+  if (ActiveClient <> nil) and not (wsMinimized in ActiveClient.State) then
+  begin
+    r := ActiveClient.CurrentRect;
+    if IsClientShaded(ActiveClient.ClientWindow) then
+      r.Height := FTitlebarHeight;
+
+    if r.Contains(ARootX, ARootY) then
+      Exit(ActiveClient);
+
+    if ActiveClient.CanResize and not ((wsMaximizedHorz in ActiveClient.State) or (wsFullscreen in ActiveClient.State)) then
+    begin
+      if GetResizeModeForPoint(ActiveClient, ARootX, ARootY) <> dmNone then
+        Exit(ActiveClient);
+    end;
+  end;
+
+  // 4. Fallback: check MRU order
+  if MruClients <> nil then
+  begin
+    for i := 0 to MruClients.Count - 1 do
+    begin
+      cli := TXCBWMClient(MruClients[i]);
+      if (cli = nil) or (wsMinimized in cli.State) then Continue;
+
+      r := cli.CurrentRect;
+      if IsClientShaded(cli.ClientWindow) then
+        r.Height := FTitlebarHeight;
+
+      if r.Contains(ARootX, ARootY) then
+        Exit(cli);
+
+      if cli.CanResize and not ((wsMaximizedHorz in cli.State) or (wsFullscreen in cli.State)) then
+      begin
+        if GetResizeModeForPoint(cli, ARootX, ARootY) <> dmNone then
+          Exit(cli);
+      end;
+    end;
+  end;
+end;
+
 procedure TWMSamaCompositingWM.ToggleKeepOnTop(const AClient: TXCBWMClient);
 var
   targetWin: xcb_window_t;
   compWin: TXCBCompositedWindow;
-  values: array[0..1] of Cardinal;
 begin
   if AClient = nil then Exit;
 
@@ -3127,32 +3239,16 @@ begin
   else
     targetWin := AClient.ClientWindow;
 
-  // Elevate within its own band. "Always on top" is relative to other windows, not
-  // to the panels.
+  // Elevate or lower within its appropriate band
   if FCompositor <> nil then
   begin
     compWin := FCompositor.FindWindow(targetWin);
-    if (compWin <> nil) and (wsAbove in AClient.State) then
+    if compWin <> nil then
       RaiseInCompositor(AClient);
   end;
-  if wsAbove in AClient.State then
-    RaiseInStacking(AClient);
-
-  // Elevate in X11
-  if (Connection <> nil) and (wsAbove in AClient.State) then
-  begin
-    values[0] := XCB_STACK_MODE_ABOVE;
-    xcb_configure_window(Connection, targetWin, XCB_CONFIG_WINDOW_STACK_MODE, @values[0]);
-    if (AClient.ResizeWindow <> 0) and (targetWin = AClient.FrameWindow) and
-       not ((wsMaximizedHorz in AClient.State) or (wsFullscreen in AClient.State)) then
-    begin
-      values[0] := targetWin;
-      values[1] := XCB_STACK_MODE_BELOW;
-      xcb_configure_window(Connection, AClient.ResizeWindow,
-        XCB_CONFIG_WINDOW_SIBLING or XCB_CONFIG_WINDOW_STACK_MODE, @values[0]);
-    end;
+  RaiseInStacking(AClient);
+  if Connection <> nil then
     xcb_flush(Connection);
-  end;
 
   if AClient.ExtendedClientArea then
   begin
@@ -4219,10 +4315,28 @@ begin
 end;
 
 procedure TWMSamaCompositingWM.DoOnClientPropertiesChanged(const AClient: TXCBWMClient);
+var
+  targetWin: xcb_window_t;
+  compWin: TXCBCompositedWindow;
 begin
   inherited DoOnClientPropertiesChanged(AClient);
   if AClient <> nil then
   begin
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+
+    if FCompositor <> nil then
+    begin
+      compWin := FCompositor.FindWindow(targetWin);
+      if compWin <> nil then
+        RaiseInCompositor(AClient);
+    end;
+    RaiseInStacking(AClient);
+    if Connection <> nil then
+      xcb_flush(Connection);
+
     UpdateControlsWindow(AClient);
     UpdateControlsInsetProperty(AClient);
     UpdateFrameExtents(AClient);
@@ -5082,12 +5196,30 @@ begin
       cli := FindClient(btnEv^.event);
       if cli <> nil then
       begin
+        // If this client is occluded by another window in front, activate the topmost window
+        if IsPointOccluded(btnEv^.root_x, btnEv^.root_y, cli) then
+        begin
+          targetCli := FindClientTopmostAt(btnEv^.root_x, btnEv^.root_y);
+          if (targetCli <> nil) and (targetCli <> cli) then
+          begin
+            targetCli.Activate();
+            if Connection <> nil then
+            begin
+              xcb_allow_events(Connection, XCB_ALLOW_ASYNC_POINTER, btnEv^.time);
+              xcb_flush(Connection);
+            end;
+            Exit(True);
+          end;
+        end;
+
         // 0. Direct clicks on outer resize frame window (InputOnly window)
         if (cli.ResizeWindow <> 0) and (btnEv^.event = cli.ResizeWindow) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
         begin
           // Check if this click falls in the outer resize zone of an overlapping window in front (e.g. ActiveClient)
           if (ActiveClient <> nil) and (ActiveClient <> cli) and
-             not (wsMinimized in ActiveClient.State) then
+             not (wsMinimized in ActiveClient.State) and
+             (CompositorStackRank(ActiveClient) >= CompositorStackRank(cli)) and
+             not IsPointOccluded(btnEv^.root_x, btnEv^.root_y, ActiveClient) then
           begin
             resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
             if resizeMode <> dmNone then
@@ -5116,7 +5248,9 @@ begin
         begin
           // Check if this click falls in the outer resize zone of an overlapping window in front (e.g. ActiveClient)
           if (ActiveClient <> nil) and (ActiveClient <> cli) and
-             not (wsMinimized in ActiveClient.State) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+             not (wsMinimized in ActiveClient.State) and (btnEv^.detail = XCB_BUTTON_INDEX_1) and
+             (CompositorStackRank(ActiveClient) >= CompositorStackRank(cli)) and
+             not IsPointOccluded(btnEv^.root_x, btnEv^.root_y, ActiveClient) then
           begin
             resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
             if resizeMode <> dmNone then
@@ -5167,7 +5301,9 @@ begin
 
           // Check if cursor is in outer resize zone of an active window on top
           if (ActiveClient <> nil) and (ActiveClient <> cli) and
-             not (wsMinimized in ActiveClient.State) and (btnEv^.detail = XCB_BUTTON_INDEX_1) then
+             not (wsMinimized in ActiveClient.State) and (btnEv^.detail = XCB_BUTTON_INDEX_1) and
+             (CompositorStackRank(ActiveClient) >= CompositorStackRank(cli)) and
+             not IsPointOccluded(btnEv^.root_x, btnEv^.root_y, ActiveClient) then
           begin
             resizeMode := GetResizeModeForPoint(ActiveClient, btnEv^.root_x, btnEv^.root_y);
             if resizeMode <> dmNone then
