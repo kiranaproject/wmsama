@@ -923,7 +923,7 @@ begin
     wm.TriggerWindowMenu(cli);
     AssertSame('Window menu opened for client', cli, wm.WindowMenuClient);
     AssertTrue('Window menu rect calculated', wm.WindowMenuRect.Width > 0);
-    AssertEquals('Window menu width', 160, wm.WindowMenuRect.Width);
+    AssertEquals('Window menu width', 220, wm.WindowMenuRect.Width);
     AssertEquals('Window menu height', 154, wm.WindowMenuRect.Height);
 
     wm.DismissWindowMenu();
@@ -3967,7 +3967,7 @@ begin
 
     // Must trigger Window Action Menu HUD
     AssertSame('WindowMenuClient is cli', cli, wm.WindowMenuClient);
-    AssertEquals('WindowMenuRect Width is 160', 160, wm.WindowMenuRect.Width);
+    AssertEquals('WindowMenuRect Width is 220', 220, wm.WindowMenuRect.Width);
     AssertEquals('WindowMenuRect Height is 154', 154, wm.WindowMenuRect.Height);
     AssertEquals('WindowMenuRect X positioned at click root_x', 350, wm.WindowMenuRect.X);
     AssertEquals('WindowMenuRect Y positioned at click root_y', 115, wm.WindowMenuRect.Y);
@@ -3986,7 +3986,7 @@ begin
     AssertTrue('Handled motion over item 1', wm.ProcessEvent(Pxcb_generic_event_t(@motionEv)));
     AssertEquals('WindowMenuHoverItem is 1', 1, wm.WindowMenuHoverItem);
 
-    motionEv.root_x := wm.WindowMenuRect.X + 200; // Outside menu
+    motionEv.root_x := wm.WindowMenuRect.X + 250; // Outside menu
     AssertTrue('Handled motion outside menu', wm.ProcessEvent(Pxcb_generic_event_t(@motionEv)));
     AssertEquals('WindowMenuHoverItem reset to -1', -1, wm.WindowMenuHoverItem);
 

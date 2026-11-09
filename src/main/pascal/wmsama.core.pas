@@ -3283,7 +3283,7 @@ begin
 
   FWindowMenuClient := AClient;
   FWindowMenuHoverItem := -1;
-  menuW := 160;
+  menuW := 220;
   menuH := 154;
 
   if (ARootX >= 0) and (ARootY >= 0) then

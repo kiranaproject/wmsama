@@ -371,23 +371,27 @@ begin
       end;
     end;
 
+    fnt := FloriaGetSystemFont();
     if AIcon <> '' then
-      Canvas.DrawTextLeft(X + 8, Y, 16, H, AIcon, nil, txtR, txtG, txtB)
+      Canvas.DrawTextLeft(X + 8, Y, 16, H, AIcon, fnt, txtR, txtG, txtB)
     else if AChecked then
-      Canvas.DrawTextLeft(X + 8, Y, 16, H, '✓', nil, txtR, txtG, txtB);
-
-    Canvas.DrawTextLeft(X + 26, Y, W - 32, H, ACaption, nil, txtR, txtG, txtB);
+      Canvas.DrawTextLeft(X + 8, Y, 16, H, '✓', fnt, txtR, txtG, txtB);
 
     if AShortcut <> '' then
     begin
-      fnt := FloriaGetSystemFont();
+      if fnt <> nil then
+        sw := fnt.GetTextWidth(AShortcut)
+      else
+        sw := 40.0;
+      Canvas.DrawTextLeft(X + 26, Y, W - sw - 36, H, ACaption, fnt, txtR, txtG, txtB);
       if fnt <> nil then
       begin
-        sw := fnt.GetTextWidth(AShortcut);
         ty := Round(Y + (H / 2.0) + (fnt.Ascent - fnt.Descent) / 2.0);
         Canvas.DrawText(Round(X + W - sw - 12), ty, AShortcut, fnt, shortR, shortG, shortB);
       end;
-    end;
+    end
+    else
+      Canvas.DrawTextLeft(X + 26, Y, W - 32, H, ACaption, fnt, txtR, txtG, txtB);
   end;
 end;
 
