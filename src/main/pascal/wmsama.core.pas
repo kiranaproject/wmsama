@@ -320,6 +320,7 @@ type
     procedure SetClientButtonHoverTarget(const AClient: TXCBWMClient; const AButtonIndex: Integer; const ATarget: Double; const ADurationMs: Integer = 160); overload;
     procedure SetClientButtonHoverTarget(const AClient: TXCBWMClient; const ATarget: Double; const ADurationMs: Integer = 160); overload;
     procedure SetClientOtherButtonsHoverTarget(const AClient: TXCBWMClient; const AExceptButtonIndex: Integer; const ATarget: Double; const ADurationMs: Integer = 160);
+    procedure ClearClientButtonHoverAnims(const AClient: TXCBWMClient);
     function IsOverButtonCluster(const AX, AY: Integer; const AClient: TXCBWMClient; const AWidth: Integer = 0): Boolean;
     procedure UpdateButtonHoverAnimations();
     function IsTitlebarDraggable(const AX, AY, AWidth: Integer): Boolean; overload;
@@ -1890,7 +1891,17 @@ begin
     FPressedButton := -1;
     FPressedWindow := 0;
   end;
+  if (AClient.ControlsWindow <> 0) and (AClient.ControlsWindow = FPressedWindow) then
+  begin
+    FPressedButton := -1;
+    FPressedWindow := 0;
+  end;
   if (AClient.FrameWindow <> 0) and (AClient.FrameWindow = FHoveredWindow) then
+  begin
+    FHoveredButton := -1;
+    FHoveredWindow := 0;
+  end;
+  if (AClient.ControlsWindow <> 0) and (AClient.ControlsWindow = FHoveredWindow) then
   begin
     FHoveredButton := -1;
     FHoveredWindow := 0;
@@ -1905,18 +1916,7 @@ begin
       Break;
     end;
 
-  i := 0;
-  while i < Length(FButtonHoverAnims) do
-  begin
-    if FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow then
-    begin
-      for j := i to High(FButtonHoverAnims) - 1 do
-        FButtonHoverAnims[j] := FButtonHoverAnims[j + 1];
-      SetLength(FButtonHoverAnims, Length(FButtonHoverAnims) - 1);
-    end
-    else
-      Inc(i);
-  end;
+  ClearClientButtonHoverAnims(AClient);
 
   if FCompositor = nil then Exit;
 
@@ -1950,11 +1950,23 @@ begin
     FHoveredWindow := 0;
     FHoveredButton := -1;
   end;
+  if (AClient.ControlsWindow <> 0) and (AClient.ControlsWindow = FHoveredWindow) then
+  begin
+    FHoveredWindow := 0;
+    FHoveredButton := -1;
+  end;
   if (targetWin <> 0) and (targetWin = FPressedWindow) then
   begin
     FPressedWindow := 0;
     FPressedButton := -1;
   end;
+  if (AClient.ControlsWindow <> 0) and (AClient.ControlsWindow = FPressedWindow) then
+  begin
+    FPressedWindow := 0;
+    FPressedButton := -1;
+  end;
+
+  ClearClientButtonHoverAnims(AClient);
 
   if FWindowMenuClient = AClient then
     DismissWindowMenu();
@@ -1970,6 +1982,18 @@ begin
   inherited DoOnClientRestored(AClient);
 
   if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  ClearClientButtonHoverAnims(AClient);
+  if (AClient.FrameWindow <> 0) and (FHoveredWindow = AClient.FrameWindow) then
+  begin
+    FHoveredWindow := 0;
+    FHoveredButton := -1;
+  end;
+  if (AClient.ControlsWindow <> 0) and (FHoveredWindow = AClient.ControlsWindow) then
+  begin
+    FHoveredWindow := 0;
+    FHoveredButton := -1;
+  end;
 
   if AClient.IsReparented and (AClient.FrameWindow <> 0) then
     targetWin := AClient.FrameWindow
@@ -2105,10 +2129,55 @@ procedure TWMSamaCompositingWM.DoOnClientConfigure(const AClient: TXCBWMClient);
 var
   targetWin: xcb_window_t;
   compWin: TXCBCompositedWindow;
+  ptrCookie: xcb_query_pointer_cookie_t;
+  ptrReply: Pxcb_query_pointer_reply_t;
+  rootX, rootY, localX, localY, newBtn: Integer;
 begin
   inherited DoOnClientConfigure(AClient);
 
   if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  // Re-evaluate button hover state against updated geometry
+  if (FHoveredWindow <> 0) and ((FHoveredWindow = AClient.FrameWindow) or
+     ((AClient.ControlsWindow <> 0) and (FHoveredWindow = AClient.ControlsWindow))) then
+  begin
+    newBtn := -1;
+    if (Connection <> nil) and (Screen <> nil) then
+    begin
+      ptrCookie := xcb_query_pointer(Connection, Screen^.root);
+      ptrReply := xcb_query_pointer_reply(Connection, ptrCookie, nil);
+      if ptrReply <> nil then
+      begin
+        rootX := ptrReply^.root_x;
+        rootY := ptrReply^.root_y;
+        xcb_free(ptrReply);
+
+        localX := rootX - AClient.CurrentRect.X;
+        localY := rootY - AClient.CurrentRect.Y;
+        if (localY >= 0) and (localY < FTitlebarHeight) then
+          newBtn := GetButtonAt(localX, localY, AClient, AClient.CurrentRect.Width);
+      end;
+    end;
+
+    if newBtn <> FHoveredButton then
+    begin
+      FHoveredButton := newBtn;
+      if newBtn >= 0 then
+      begin
+        SetClientButtonHoverTarget(AClient, newBtn, 1.0);
+        SetClientOtherButtonsHoverTarget(AClient, newBtn, 0.0);
+      end
+      else
+      begin
+        FHoveredWindow := 0;
+        ClearClientButtonHoverAnims(AClient);
+      end;
+    end;
+  end
+  else
+  begin
+    ClearClientButtonHoverAnims(AClient);
+  end;
 
   if AClient.IsReparented and (AClient.FrameWindow <> 0) then
     targetWin := AClient.FrameWindow
@@ -2437,6 +2506,25 @@ begin
     begin
       SetClientButtonHoverTarget(AClient, FButtonHoverAnims[i].ButtonIndex, ATarget, ADurationMs);
     end;
+  end;
+end;
+
+procedure TWMSamaCompositingWM.ClearClientButtonHoverAnims(const AClient: TXCBWMClient);
+var
+  i, j: Integer;
+begin
+  if AClient = nil then Exit;
+  i := 0;
+  while i < Length(FButtonHoverAnims) do
+  begin
+    if FButtonHoverAnims[i].ClientWindow = AClient.ClientWindow then
+    begin
+      for j := i to High(FButtonHoverAnims) - 1 do
+        FButtonHoverAnims[j] := FButtonHoverAnims[j + 1];
+      SetLength(FButtonHoverAnims, Length(FButtonHoverAnims) - 1);
+    end
+    else
+      Inc(i);
   end;
 end;
 
@@ -4818,39 +4906,75 @@ begin
           localY := btnEv^.event_y;
           releasedBtn := GetButtonAt(localX, localY, cli, cli.CurrentRect.Width);
 
-          FHoveredButton := releasedBtn;
-          FHoveredWindow := btnEv^.event;
-          if releasedBtn >= 0 then
-          begin
-            SetClientButtonHoverTarget(cli, releasedBtn, 1.0);
-            SetClientOtherButtonsHoverTarget(cli, releasedBtn, 0.0);
-          end
-          else
-          begin
-            SetClientButtonHoverTarget(cli, -1, 0.0);
-          end;
-          PaintClientFrame(cli);
-          RequestComposite();
-
-          // ONLY trigger button action if released within the SAME button's click bound area!
           CalculateButtons(cli, cli.CurrentRect.Width, btns, titleX, titleW);
           if (releasedBtn = btnIdx) and (btnIdx >= 0) and (btnIdx <= High(btns)) then
           begin
             case btns[btnIdx].Kind of
-              sbkClose: cli.Close();
-              sbkMinimize: cli.Minimize();
+              sbkClose:
+              begin
+                FHoveredButton := -1;
+                FHoveredWindow := 0;
+                ClearClientButtonHoverAnims(cli);
+                cli.Close();
+              end;
+              sbkMinimize:
+              begin
+                FHoveredButton := -1;
+                FHoveredWindow := 0;
+                ClearClientButtonHoverAnims(cli);
+                cli.Minimize();
+              end;
               sbkMaximize:
               begin
+                FHoveredButton := -1;
+                FHoveredWindow := 0;
+                ClearClientButtonHoverAnims(cli);
                 if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
                   cli.Restore()
                 else if cli.CanMaximize then
                   cli.Maximize();
               end;
-              sbkShade: ToggleShade(cli);
-              sbkPin: ToggleKeepOnTop(cli);
-              sbkMenu: TriggerWindowMenu(cli);
+              sbkShade:
+              begin
+                FHoveredButton := -1;
+                FHoveredWindow := 0;
+                ClearClientButtonHoverAnims(cli);
+                ToggleShade(cli);
+              end;
+              sbkPin:
+              begin
+                FHoveredButton := releasedBtn;
+                FHoveredWindow := btnEv^.event;
+                SetClientButtonHoverTarget(cli, releasedBtn, 1.0);
+                SetClientOtherButtonsHoverTarget(cli, releasedBtn, 0.0);
+                PaintClientFrame(cli);
+                ToggleKeepOnTop(cli);
+              end;
+              sbkMenu:
+              begin
+                FHoveredButton := -1;
+                FHoveredWindow := 0;
+                ClearClientButtonHoverAnims(cli);
+                TriggerWindowMenu(cli);
+              end;
             end;
             Exit(True);
+          end
+          else
+          begin
+            FHoveredButton := releasedBtn;
+            FHoveredWindow := btnEv^.event;
+            if releasedBtn >= 0 then
+            begin
+              SetClientButtonHoverTarget(cli, releasedBtn, 1.0);
+              SetClientOtherButtonsHoverTarget(cli, releasedBtn, 0.0);
+            end
+            else
+            begin
+              SetClientButtonHoverTarget(cli, -1, 0.0);
+            end;
+            PaintClientFrame(cli);
+            RequestComposite();
           end;
         end
         else
@@ -5092,6 +5216,9 @@ begin
           begin
             if (btnEv^.time - FLastClickTime < 350) and (FLastClickWindow = btnEv^.event) then
             begin
+              FHoveredButton := -1;
+              FHoveredWindow := 0;
+              ClearClientButtonHoverAnims(cli);
               if (wsMaximizedHorz in cli.State) or (wsTiledLeft in cli.State) or (wsTiledRight in cli.State) then
                 cli.Restore()
               else if cli.CanMaximize then

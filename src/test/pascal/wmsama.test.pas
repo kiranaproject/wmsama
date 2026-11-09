@@ -1145,7 +1145,7 @@ var
   wm: TWMSamaCompositingWM;
   cli: TXCBWMClient;
   btns: TWMSamaButtonArray;
-  tX, tW, maxBtnX, maxBtnY: Integer;
+  tX, tW, maxBtnX, maxBtnY, minBtnX, minBtnY: Integer;
   pressEv: xcb_button_press_event_t;
   releaseEv: xcb_button_release_event_t;
   motionEv: xcb_motion_notify_event_t;
@@ -1227,6 +1227,8 @@ begin
     // Maximize action MUST now be executed!
     AssertEquals('PressedButton reset to -1 after execute', -1, wm.PressedButton);
     AssertTrue('Client successfully maximized on release within bounds!', wsMaximizedHorz in cli.State);
+    AssertEquals('Maximize button hover progress reset to 0.0 after maximize', 0.0, wm.GetClientButtonHoverProgress(cli, 1));
+    AssertEquals('HoveredButton reset to -1 after maximize', -1, wm.HoveredButton);
 
     // 6. Test Restore button on release within bounds
     // Window is now maximized, right-aligned buttons moved with the wider width
@@ -1243,6 +1245,32 @@ begin
 
     wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
     AssertFalse('Client successfully restored on release within bounds!', wsMaximizedHorz in cli.State);
+    AssertEquals('Restore button hover progress reset to 0.0 after restore', 0.0, wm.GetClientButtonHoverProgress(cli, 1));
+    AssertEquals('HoveredButton reset to -1 after restore', -1, wm.HoveredButton);
+
+    // 7. Test Minimize button release and verify no lingering hover on unminimize
+    wm.CalculateButtons(cli, cli.CurrentRect.Width, btns, tX, tW);
+    minBtnX := Round(btns[0].X + btns[0].Size * 0.5);
+    minBtnY := Round(btns[0].Y + btns[0].Size * 0.5);
+    pressEv.event_x := minBtnX;
+    pressEv.event_y := minBtnY;
+    releaseEv.event_x := minBtnX;
+    releaseEv.event_y := minBtnY;
+
+    wm.ProcessEvent(Pxcb_generic_event_t(@pressEv));
+    AssertEquals('PressedButton is 0', 0, wm.PressedButton);
+    wm.ProcessEvent(Pxcb_generic_event_t(@releaseEv));
+    AssertTrue('Client is minimized', wsMinimized in cli.State);
+    AssertEquals('HoveredButton reset to -1 on minimize', -1, wm.HoveredButton);
+    AssertEquals('Minimize button hover progress is 0.0', 0.0, wm.GetClientButtonHoverProgress(cli, 0));
+
+    // Unminimize client: all buttons must remain at 0.0 hover progress
+    cli.Unminimize();
+    AssertFalse('Client unminimized', wsMinimized in cli.State);
+    AssertEquals('HoveredButton remains -1 after unminimize', -1, wm.HoveredButton);
+    AssertEquals('Minimize button hover progress remains 0.0 after unminimize', 0.0, wm.GetClientButtonHoverProgress(cli, 0));
+    AssertEquals('Maximize button hover progress is 0.0 after unminimize', 0.0, wm.GetClientButtonHoverProgress(cli, 1));
+    AssertEquals('Close button hover progress is 0.0 after unminimize', 0.0, wm.GetClientButtonHoverProgress(cli, 2));
   finally
     wm.Free();
   end;
