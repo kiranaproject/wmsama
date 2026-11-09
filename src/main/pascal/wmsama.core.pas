@@ -136,6 +136,7 @@ type
     FButtonHoverAnims   : array of TWMSamaButtonHoverAnim;
     FWindowMenuClient   : TXCBWMClient;
     FWindowMenuRect     : TXCBRect;
+    FWindowMenuHoverItem: Integer;
 
     // Double-click detection
     FLastClickTime      : Cardinal;
@@ -386,6 +387,7 @@ type
     property ButtonLayout       : AnsiString             read FButtonLayout       write SetButtonLayout;
     property WindowMenuClient   : TXCBWMClient           read FWindowMenuClient;
     property WindowMenuRect     : TXCBRect               read FWindowMenuRect;
+    property WindowMenuHoverItem: Integer                read FWindowMenuHoverItem;
     property ActiveSnap         : TWMSnapTarget  read FActiveSnap;
     property SnapPreviewRect    : TXCBRect       read FSnapPreviewRect;
 
@@ -652,6 +654,7 @@ begin
   SetLength(FButtonHoverAnims, 0);
   FWindowMenuClient := nil;
   FWindowMenuRect := TXCBRect.Create(0, 0, 0, 0);
+  FWindowMenuHoverItem := -1;
   SetButtonLayout(':minimize,maximize,close');
   FHoveredWindow := 0;
   FHoveredButton := -1;
@@ -3279,6 +3282,7 @@ begin
   end;
 
   FWindowMenuClient := AClient;
+  FWindowMenuHoverItem := -1;
   menuW := 160;
   menuH := 154;
 
@@ -3386,6 +3390,7 @@ begin
     oldCli := FWindowMenuClient;
     FWindowMenuClient := nil;
     FWindowMenuRect := TXCBRect.Create(0, 0, 0, 0);
+    FWindowMenuHoverItem := -1;
 
     if Connection <> nil then
     begin
@@ -4365,6 +4370,8 @@ var
   hudArea: TXCBRect;
   eligibleList: TFPList;
   overlay: TXCBRect;
+  isAbove, isShaded: Boolean;
+  checkIcon: string;
 
   // Union a HUD's painted area (including its shadow margin) into the overlay
   // bounds reported to the compositor.
@@ -4505,7 +4512,7 @@ begin
     eligibleList.Free();
   end;
 
-  // 3. Render Window Action Menu Overlay HUD
+  // 3. Render Window Action Menu Overlay HUD with Floria Toolkit styles
   if (FWindowMenuClient <> nil) and (FWindowMenuRect.Width > 0) then
   begin
     cardX := FWindowMenuRect.X;
@@ -4515,73 +4522,49 @@ begin
 
     IncludeOverlay(cardX, cardY, cardW, cardH, 24);
 
-    if FThemeDarkMode then
-    begin
-      ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 12, 0, 4, 18, 0.0, 0.0, 0.0, 0.50);
-      ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 10, 24 / 255, 25 / 255, 38 / 255, 0.96);
-      ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 10, 1.2, 69 / 255, 71 / 255, 90 / 255, 0.7);
+    // Plate with 6.0px rounded corners & compositor drop shadow
+    FtDrawMenuPlate(ACanvas, cardX, cardY, cardW, cardH, 6.0, FThemeDarkMode);
 
-      // Header
-      ACanvas.DrawTextLeft(cardX + 12, cardY + 6, cardW - 24, 20, 'Window Actions', nil, 147 / 255, 153 / 255, 178 / 255);
-      ACanvas.DrawLine(cardX + 8, cardY + 28, cardX + cardW - 8, cardY + 28, 1.0, 49 / 255, 50 / 255, 68 / 255, 0.8);
+    // Header & divider
+    FtDrawMenuHeader(ACanvas, cardX, cardY + 4, cardW, 20, 'Window Actions', FThemeDarkMode);
+    FtDrawMenuSeparator(ACanvas, cardX, cardY + 26, cardW, FThemeDarkMode);
 
-      // Items:
-      // [0] Minimize
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 32, cardW - 28, 22, '—  Minimize', nil, 236 / 255, 239 / 255, 244 / 255);
-      // [1] Maximize / Restore
-      if (wsMaximizedHorz in FWindowMenuClient.State) or (wsTiledLeft in FWindowMenuClient.State) or (wsTiledRight in FWindowMenuClient.State) then
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤡  Restore', nil, 236 / 255, 239 / 255, 244 / 255)
-      else
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤢  Maximize', nil, 236 / 255, 239 / 255, 244 / 255);
-      // [2] Keep on Top (Pin)
-      if wsAbove in FWindowMenuClient.State then
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '✓  Always on Top', nil, 137 / 255, 180 / 255, 250 / 255)
-      else
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '•  Always on Top', nil, 205 / 255, 214 / 255, 244 / 255);
-      // [3] Shade / Roll Up
-      if IsClientShaded(FWindowMenuClient.ClientWindow) then
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '✓  Roll Up (Shade)', nil, 137 / 255, 180 / 255, 250 / 255)
-      else
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '▴  Roll Up (Shade)', nil, 205 / 255, 214 / 255, 244 / 255);
-      // Divider
-      ACanvas.DrawLine(cardX + 8, cardY + 128, cardX + cardW - 8, cardY + 128, 1.0, 49 / 255, 50 / 255, 68 / 255, 0.8);
-      // [4] Close
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 132, cardW - 28, 22, '×  Close Window', nil, 243 / 255, 139 / 255, 168 / 255);
-    end
+    // [0] Minimize
+    FtDrawMenuItem(ACanvas, cardX + 2, cardY + 28, cardW - 4, 24,
+                   'Minimize', 'Alt+F9', '—',
+                   FWindowMenuHoverItem = 0, True, False, FThemeDarkMode);
+
+    // [1] Maximize / Restore
+    if (wsMaximizedHorz in FWindowMenuClient.State) or (wsTiledLeft in FWindowMenuClient.State) or (wsTiledRight in FWindowMenuClient.State) then
+      FtDrawMenuItem(ACanvas, cardX + 2, cardY + 52, cardW - 4, 24,
+                     'Restore', 'Alt+F10', '⤡',
+                     FWindowMenuHoverItem = 1, True, False, FThemeDarkMode)
     else
-    begin
-      // Light Mode matching shellsama and Floria light styling
-      ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 12, 0, 4, 18, 0.0, 0.0, 0.0, 0.20);
-      ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 10, 1.0, 1.0, 1.0, 0.98);
-      ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 10, 1.2, 203 / 255, 213 / 255, 225 / 255, 0.90);
+      FtDrawMenuItem(ACanvas, cardX + 2, cardY + 52, cardW - 4, 24,
+                     'Maximize', 'Alt+F10', '⤢',
+                     FWindowMenuHoverItem = 1, True, False, FThemeDarkMode);
 
-      // Header
-      ACanvas.DrawTextLeft(cardX + 12, cardY + 6, cardW - 24, 20, 'Window Actions', nil, 100 / 255, 116 / 255, 139 / 255);
-      ACanvas.DrawLine(cardX + 8, cardY + 28, cardX + cardW - 8, cardY + 28, 1.0, 226 / 255, 232 / 255, 240 / 255, 1.0);
+    // [2] Keep on Top (Pin)
+    isAbove := wsAbove in FWindowMenuClient.State;
+    if isAbove then checkIcon := '✓' else checkIcon := ' ';
+    FtDrawMenuItem(ACanvas, cardX + 2, cardY + 76, cardW - 4, 24,
+                   'Always on Top', '', checkIcon,
+                   FWindowMenuHoverItem = 2, True, isAbove, FThemeDarkMode);
 
-      // Items:
-      // [0] Minimize
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 32, cardW - 28, 22, '—  Minimize', nil, 30 / 255, 41 / 255, 59 / 255);
-      // [1] Maximize / Restore
-      if (wsMaximizedHorz in FWindowMenuClient.State) or (wsTiledLeft in FWindowMenuClient.State) or (wsTiledRight in FWindowMenuClient.State) then
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤡  Restore', nil, 30 / 255, 41 / 255, 59 / 255)
-      else
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 56, cardW - 28, 22, '⤢  Maximize', nil, 30 / 255, 41 / 255, 59 / 255);
-      // [2] Keep on Top (Pin)
-      if wsAbove in FWindowMenuClient.State then
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '✓  Always on Top', nil, 2 / 255, 132 / 255, 199 / 255)
-      else
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 80, cardW - 28, 22, '•  Always on Top', nil, 71 / 255, 85 / 255, 105 / 255);
-      // [3] Shade / Roll Up
-      if IsClientShaded(FWindowMenuClient.ClientWindow) then
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '✓  Roll Up (Shade)', nil, 2 / 255, 132 / 255, 199 / 255)
-      else
-        ACanvas.DrawTextLeft(cardX + 14, cardY + 104, cardW - 28, 22, '▴  Roll Up (Shade)', nil, 71 / 255, 85 / 255, 105 / 255);
-      // Divider
-      ACanvas.DrawLine(cardX + 8, cardY + 128, cardX + cardW - 8, cardY + 128, 1.0, 226 / 255, 232 / 255, 240 / 255, 1.0);
-      // [4] Close
-      ACanvas.DrawTextLeft(cardX + 14, cardY + 132, cardW - 28, 22, '×  Close Window', nil, 220 / 255, 38 / 255, 38 / 255);
-    end;
+    // [3] Shade / Roll Up
+    isShaded := IsClientShaded(FWindowMenuClient.ClientWindow);
+    if isShaded then checkIcon := '✓' else checkIcon := '▴';
+    FtDrawMenuItem(ACanvas, cardX + 2, cardY + 100, cardW - 4, 24,
+                   'Roll Up (Shade)', '', checkIcon,
+                   FWindowMenuHoverItem = 3, True, isShaded, FThemeDarkMode);
+
+    // Divider
+    FtDrawMenuSeparator(ACanvas, cardX, cardY + 126, cardW, FThemeDarkMode);
+
+    // [4] Close Window
+    FtDrawMenuItem(ACanvas, cardX + 2, cardY + 128, cardW - 4, 24,
+                   'Close Window', 'Alt+F4', '×',
+                   FWindowMenuHoverItem = 4, True, False, FThemeDarkMode);
   end;
 
   // Tell the compositor what area this overlay covered. Under partial present the
@@ -4733,6 +4716,29 @@ begin
     XCB_MOTION_NOTIFY:
     begin
       motionEv := Pxcb_motion_notify_event_t(AEvent);
+
+      // Track Window Menu HUD item hover state
+      if (FWindowMenuClient <> nil) and (FWindowMenuRect.Width > 0) then
+      begin
+        rx := motionEv^.root_x;
+        ry := motionEv^.root_y;
+        newBtn := -1;
+        if (rx >= FWindowMenuRect.X) and (rx < FWindowMenuRect.X + FWindowMenuRect.Width) then
+        begin
+          if (ry >= FWindowMenuRect.Y + 28) and (ry < FWindowMenuRect.Y + 124) then
+            newBtn := (ry - (FWindowMenuRect.Y + 28)) div 24
+          else if (ry >= FWindowMenuRect.Y + 128) and (ry < FWindowMenuRect.Y + 154) then
+            newBtn := 4;
+        end;
+
+        if newBtn <> FWindowMenuHoverItem then
+        begin
+          FWindowMenuHoverItem := newBtn;
+          RequestComposite();
+        end;
+        Exit(True);
+      end;
+
       if DragMode = dmNone then
       begin
         cli := FindClient(motionEv^.event);

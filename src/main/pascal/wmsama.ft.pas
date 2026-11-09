@@ -6,7 +6,7 @@ interface
 
 uses
   ctypes, SysUtils, Classes, Math, dynlibs,
-  Floria.Canvas.Agg;
+  Floria.Canvas.Agg, Floria.Font;
 
 const
   // Window button kinds (matching Ft.Widget.Buttons / ft.h)
@@ -42,6 +42,13 @@ type
   Tft_theme_set_dark_mode = procedure(dark_mode: cint32); cdecl;
   Tft_theme_get_corner_radius = function(): Double; cdecl;
 
+  // Popup menu canvas rendering procedures
+  Tft_menu_plate_draw = procedure(canvas: Pointer; x, y, w, h: Double; radius: Double; dark_mode: cint32); cdecl;
+  Tft_menu_header_draw = procedure(canvas: Pointer; x, y, w, h: Double; title: PChar; dark_mode: cint32); cdecl;
+  Tft_menu_item_draw = procedure(canvas: Pointer; x, y, w, h: Double; caption: PChar; shortcut: PChar; icon: PChar; hovered, enabled, checked, dark_mode: cint32); cdecl;
+  Tft_menu_separator_draw = procedure(canvas: Pointer; x, y, w: Double; dark_mode: cint32); cdecl;
+  Tft_theme_get_menu_color = procedure(color_kind: cint32; dark_mode: cint32; out_r, out_g, out_b: PDouble); cdecl;
+
 function FloriaToolkitLoaded(): Boolean;
 function InitFloriaToolkit(const AOverridePath: AnsiString = ''): Boolean;
 procedure CloseFloriaToolkit();
@@ -50,6 +57,11 @@ procedure FtDrawWindowButton(Canvas: TFloriaCanvasAgg; BX, BY, BW, BH: Double;
                              AKind: Integer; AStyle: Integer; AState: Integer;
                              ADarkMode: Boolean; AGlyphArm: Double = 0.0;
                              AHoverProgress: Double = -1.0);
+
+procedure FtDrawMenuPlate(Canvas: TFloriaCanvasAgg; X, Y, W, H, ARadius: Double; ADarkMode: Boolean);
+procedure FtDrawMenuHeader(Canvas: TFloriaCanvasAgg; X, Y, W, H: Double; const ATitle: string; ADarkMode: Boolean);
+procedure FtDrawMenuItem(Canvas: TFloriaCanvasAgg; X, Y, W, H: Double; const ACaption, AShortcut, AIcon: string; AHovered, AEnabled, AChecked, ADarkMode: Boolean);
+procedure FtDrawMenuSeparator(Canvas: TFloriaCanvasAgg; X, Y, W: Double; ADarkMode: Boolean);
 
 implementation
 
@@ -61,6 +73,11 @@ var
   gFtThemeGetDarkMode: Tft_theme_get_dark_mode = nil;
   gFtThemeSetDarkMode: Tft_theme_set_dark_mode = nil;
   gFtThemeGetCornerRadius: Tft_theme_get_corner_radius = nil;
+  gFtMenuPlateDraw: Tft_menu_plate_draw = nil;
+  gFtMenuHeaderDraw: Tft_menu_header_draw = nil;
+  gFtMenuItemDraw: Tft_menu_item_draw = nil;
+  gFtMenuSeparatorDraw: Tft_menu_separator_draw = nil;
+  gFtThemeGetMenuColor: Tft_theme_get_menu_color = nil;
 
 function FloriaToolkitLoaded(): Boolean;
 begin
@@ -81,6 +98,11 @@ begin
     gFtThemeGetDarkMode := Tft_theme_get_dark_mode(GetProcedureAddress(gLibHandle, 'ft_theme_get_dark_mode'));
     gFtThemeSetDarkMode := Tft_theme_set_dark_mode(GetProcedureAddress(gLibHandle, 'ft_theme_set_dark_mode'));
     gFtThemeGetCornerRadius := Tft_theme_get_corner_radius(GetProcedureAddress(gLibHandle, 'ft_theme_get_corner_radius'));
+    gFtMenuPlateDraw := Tft_menu_plate_draw(GetProcedureAddress(gLibHandle, 'ft_menu_plate_draw'));
+    gFtMenuHeaderDraw := Tft_menu_header_draw(GetProcedureAddress(gLibHandle, 'ft_menu_header_draw'));
+    gFtMenuItemDraw := Tft_menu_item_draw(GetProcedureAddress(gLibHandle, 'ft_menu_item_draw'));
+    gFtMenuSeparatorDraw := Tft_menu_separator_draw(GetProcedureAddress(gLibHandle, 'ft_menu_separator_draw'));
+    gFtThemeGetMenuColor := Tft_theme_get_menu_color(GetProcedureAddress(gLibHandle, 'ft_theme_get_menu_color'));
 
     if Assigned(gFtWindowButtonDraw) then
     begin
@@ -144,6 +166,11 @@ begin
   gFtThemeGetDarkMode := nil;
   gFtThemeSetDarkMode := nil;
   gFtThemeGetCornerRadius := nil;
+  gFtMenuPlateDraw := nil;
+  gFtMenuHeaderDraw := nil;
+  gFtMenuItemDraw := nil;
+  gFtMenuSeparatorDraw := nil;
+  gFtThemeGetMenuColor := nil;
 end;
 
 procedure FtDrawWindowButton(Canvas: TFloriaCanvasAgg; BX, BY, BW, BH: Double;
@@ -233,6 +260,154 @@ begin
     outlineA := (1.0 - prog);
     if outlineA > 0.01 then
       Canvas.DrawCircleOutline(cenX, cenY, r, 1.0, normBdR, normBdG, normBdB, outlineA);
+  end;
+end;
+
+procedure FtDrawMenuPlate(Canvas: TFloriaCanvasAgg; X, Y, W, H, ARadius: Double; ADarkMode: Boolean);
+var
+  dmInt: cint32;
+  rad: Double;
+begin
+  if Canvas = nil then Exit;
+  if ARadius >= 0.0 then rad := ARadius else rad := 6.0;
+
+  if Assigned(gFtMenuPlateDraw) then
+  begin
+    if ADarkMode then dmInt := 1 else dmInt := 0;
+    gFtMenuPlateDraw(Canvas, X, Y, W, H, rad, dmInt);
+  end
+  else
+  begin
+    if ADarkMode then
+    begin
+      // Matches Floria Toolkit dark menu background #2e333b and border #4d5461
+      Canvas.DrawShadow(Round(X), Round(Y), Round(W), Round(H), rad, 0.0, 3.0, 10.0, 0.0, 0.0, 0.0, 0.35);
+      Canvas.DrawRoundedRect(Round(X), Round(Y), Round(W), Round(H), rad, 0.18, 0.20, 0.23, 0.98);
+      Canvas.DrawRoundedRectOutline(Round(X), Round(Y), Round(W), Round(H), rad, 1.0, 0.30, 0.33, 0.38, 0.90);
+    end
+    else
+    begin
+      // Matches Floria Toolkit light menu background #fafeff and border #d9dee6
+      Canvas.DrawShadow(Round(X), Round(Y), Round(W), Round(H), rad, 0.0, 3.0, 10.0, 0.0, 0.0, 0.0, 0.16);
+      Canvas.DrawRoundedRect(Round(X), Round(Y), Round(W), Round(H), rad, 0.98, 0.99, 1.00, 0.98);
+      Canvas.DrawRoundedRectOutline(Round(X), Round(Y), Round(W), Round(H), rad, 1.0, 0.85, 0.87, 0.90, 0.90);
+    end;
+  end;
+end;
+
+procedure FtDrawMenuHeader(Canvas: TFloriaCanvasAgg; X, Y, W, H: Double; const ATitle: string; ADarkMode: Boolean);
+var
+  dmInt: cint32;
+begin
+  if (Canvas = nil) or (ATitle = '') then Exit;
+
+  if Assigned(gFtMenuHeaderDraw) then
+  begin
+    if ADarkMode then dmInt := 1 else dmInt := 0;
+    gFtMenuHeaderDraw(Canvas, X, Y, W, H, PChar(ATitle), dmInt);
+  end
+  else
+  begin
+    if ADarkMode then
+      Canvas.DrawTextLeft(X + 10, Y, W - 20, H, ATitle, nil, 0.55, 0.58, 0.65)
+    else
+      Canvas.DrawTextLeft(X + 10, Y, W - 20, H, ATitle, nil, 0.45, 0.48, 0.55);
+  end;
+end;
+
+procedure FtDrawMenuItem(Canvas: TFloriaCanvasAgg; X, Y, W, H: Double;
+                         const ACaption, AShortcut, AIcon: string;
+                         AHovered, AEnabled, AChecked, ADarkMode: Boolean);
+var
+  dmInt, hovInt, enInt, chkInt: cint32;
+  txtR, txtG, txtB, shortR, shortG, shortB: Double;
+  fnt: TFloriaFont;
+  sw, ty: Double;
+begin
+  if Canvas = nil then Exit;
+
+  if Assigned(gFtMenuItemDraw) then
+  begin
+    if ADarkMode then dmInt := 1 else dmInt := 0;
+    if AHovered then hovInt := 1 else hovInt := 0;
+    if AEnabled then enInt := 1 else enInt := 0;
+    if AChecked then chkInt := 1 else chkInt := 0;
+    gFtMenuItemDraw(Canvas, X, Y, W, H, PChar(ACaption), PChar(AShortcut), PChar(AIcon),
+                    hovInt, enInt, chkInt, dmInt);
+  end
+  else
+  begin
+    if AHovered and AEnabled then
+    begin
+      // Floria Toolkit primary accent hover pill #3b82f6
+      Canvas.DrawRoundedRect(Round(X + 3), Round(Y + 1), Round(W - 6), Round(H - 2), 4.0, 0.23, 0.51, 0.96, 1.0);
+      txtR := 1.0; txtG := 1.0; txtB := 1.0;
+      shortR := 0.85; shortG := 0.92; shortB := 1.0;
+    end
+    else if not AEnabled then
+    begin
+      if ADarkMode then
+      begin
+        txtR := 0.44; txtG := 0.44; txtB := 0.48;
+        shortR := 0.44; shortG := 0.44; shortB := 0.48;
+      end
+      else
+      begin
+        txtR := 0.58; txtG := 0.64; txtB := 0.72;
+        shortR := 0.58; shortG := 0.64; shortB := 0.72;
+      end;
+    end
+    else
+    begin
+      if ADarkMode then
+      begin
+        txtR := 0.90; txtG := 0.91; txtB := 0.92;
+        shortR := 0.55; shortG := 0.58; shortB := 0.65;
+      end
+      else
+      begin
+        txtR := 0.12; txtG := 0.14; txtB := 0.17;
+        shortR := 0.55; shortG := 0.58; shortB := 0.65;
+      end;
+    end;
+
+    if AIcon <> '' then
+      Canvas.DrawTextLeft(X + 8, Y, 16, H, AIcon, nil, txtR, txtG, txtB)
+    else if AChecked then
+      Canvas.DrawTextLeft(X + 8, Y, 16, H, '✓', nil, txtR, txtG, txtB);
+
+    Canvas.DrawTextLeft(X + 26, Y, W - 32, H, ACaption, nil, txtR, txtG, txtB);
+
+    if AShortcut <> '' then
+    begin
+      fnt := FloriaGetSystemFont();
+      if fnt <> nil then
+      begin
+        sw := fnt.GetTextWidth(AShortcut);
+        ty := Round(Y + (H / 2.0) + (fnt.Ascent - fnt.Descent) / 2.0);
+        Canvas.DrawText(Round(X + W - sw - 12), ty, AShortcut, fnt, shortR, shortG, shortB);
+      end;
+    end;
+  end;
+end;
+
+procedure FtDrawMenuSeparator(Canvas: TFloriaCanvasAgg; X, Y, W: Double; ADarkMode: Boolean);
+var
+  dmInt: cint32;
+begin
+  if Canvas = nil then Exit;
+
+  if Assigned(gFtMenuSeparatorDraw) then
+  begin
+    if ADarkMode then dmInt := 1 else dmInt := 0;
+    gFtMenuSeparatorDraw(Canvas, X, Y, W, dmInt);
+  end
+  else
+  begin
+    if ADarkMode then
+      Canvas.DrawRect(Round(X + 6), Round(Y), Round(W - 12), 1, 0.26, 0.28, 0.32)
+    else
+      Canvas.DrawRect(Round(X + 6), Round(Y), Round(W - 12), 1, 0.88, 0.90, 0.92);
   end;
 end;
 

@@ -3938,6 +3938,9 @@ var
   cli: TXCBWMClient;
   btnEv: xcb_button_press_event_t;
   clickEv: xcb_button_press_event_t;
+  motionEv: xcb_motion_notify_event_t;
+  testBuf: array of Byte;
+  testCanvas: TFloriaCanvasAgg;
 begin
   wm := TWMSamaCompositingWM.Create(nil, 0);
   try
@@ -3968,6 +3971,24 @@ begin
     AssertEquals('WindowMenuRect Height is 154', 154, wm.WindowMenuRect.Height);
     AssertEquals('WindowMenuRect X positioned at click root_x', 350, wm.WindowMenuRect.X);
     AssertEquals('WindowMenuRect Y positioned at click root_y', 115, wm.WindowMenuRect.Y);
+    AssertEquals('Initial WindowMenuHoverItem is -1', -1, wm.WindowMenuHoverItem);
+
+    // 1b. Test motion tracking over menu items
+    FillChar(motionEv, SizeOf(motionEv), 0);
+    motionEv.response_type := XCB_MOTION_NOTIFY;
+    motionEv.event := cli.FrameWindow;
+    motionEv.root_x := wm.WindowMenuRect.X + 20;
+    motionEv.root_y := wm.WindowMenuRect.Y + 40; // Over Item 0 (Minimize: 28..52)
+    AssertTrue('Handled motion over item 0', wm.ProcessEvent(Pxcb_generic_event_t(@motionEv)));
+    AssertEquals('WindowMenuHoverItem is 0', 0, wm.WindowMenuHoverItem);
+
+    motionEv.root_y := wm.WindowMenuRect.Y + 64; // Over Item 1 (Maximize: 52..76)
+    AssertTrue('Handled motion over item 1', wm.ProcessEvent(Pxcb_generic_event_t(@motionEv)));
+    AssertEquals('WindowMenuHoverItem is 1', 1, wm.WindowMenuHoverItem);
+
+    motionEv.root_x := wm.WindowMenuRect.X + 200; // Outside menu
+    AssertTrue('Handled motion outside menu', wm.ProcessEvent(Pxcb_generic_event_t(@motionEv)));
+    AssertEquals('WindowMenuHoverItem reset to -1', -1, wm.WindowMenuHoverItem);
 
     // 2. Click on item 0 (Minimize) in Window Menu HUD
     FillChar(clickEv, SizeOf(clickEv), 0);
@@ -3980,6 +4001,7 @@ begin
     AssertTrue('Handled click on menu item 0', wm.ProcessEvent(Pxcb_generic_event_t(@clickEv)));
     AssertTrue('Client successfully minimized via Window Menu HUD', wsMinimized in cli.State);
     AssertNull('WindowMenuClient dismissed after selection', wm.WindowMenuClient);
+    AssertEquals('Hover item reset after dismiss', -1, wm.WindowMenuHoverItem);
 
     // 3. Unminimize and test Always on Top (item 2)
     cli.Unminimize();
@@ -4006,6 +4028,28 @@ begin
     AssertTrue('Handled click on menu item 1', wm.ProcessEvent(Pxcb_generic_event_t(@clickEv)));
     AssertTrue('Client is maximized', wsMaximizedHorz in cli.State);
     AssertNull('Menu dismissed', wm.WindowMenuClient);
+
+    // 6. Test direct Floria Toolkit Menu Rendering routines
+    SetLength(testBuf, 200 * 200 * 4);
+    testCanvas := TFloriaCanvasAgg.Create(@testBuf[0], 200, 200);
+    try
+      FtDrawMenuPlate(testCanvas, 10, 10, 180, 180, 6.0, True);
+      FtDrawMenuHeader(testCanvas, 10, 14, 180, 20, 'Window Actions', True);
+      FtDrawMenuSeparator(testCanvas, 10, 36, 180, True);
+      FtDrawMenuItem(testCanvas, 14, 40, 172, 24, 'Minimize', 'Alt+F9', '—', False, True, False, True);
+      FtDrawMenuItem(testCanvas, 14, 64, 172, 24, 'Maximize', 'Alt+F10', '⤢', True, True, False, True);
+      FtDrawMenuItem(testCanvas, 14, 88, 172, 24, 'Always on Top', '', '✓', False, True, True, True);
+      FtDrawMenuSeparator(testCanvas, 10, 114, 180, True);
+      FtDrawMenuItem(testCanvas, 14, 118, 172, 24, 'Close Window', 'Alt+F4', '×', False, True, False, True);
+
+      // Light mode test
+      FtDrawMenuPlate(testCanvas, 10, 10, 180, 180, 6.0, False);
+      FtDrawMenuHeader(testCanvas, 10, 14, 180, 20, 'Window Actions', False);
+      FtDrawMenuSeparator(testCanvas, 10, 36, 180, False);
+      FtDrawMenuItem(testCanvas, 14, 40, 172, 24, 'Minimize', 'Alt+F9', '—', False, True, False, False);
+    finally
+      testCanvas.Free();
+    end;
   finally
     wm.Free();
   end;
