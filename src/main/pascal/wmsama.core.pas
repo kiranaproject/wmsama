@@ -334,7 +334,7 @@ type
     procedure ToggleKeepOnTop(const AClient: TXCBWMClient);
     procedure ToggleShade(const AClient: TXCBWMClient);
     function IsClientShaded(const AWin: xcb_window_t): Boolean;
-    procedure TriggerWindowMenu(const AClient: TXCBWMClient);
+    procedure TriggerWindowMenu(const AClient: TXCBWMClient; const ARootX: Integer = -1; const ARootY: Integer = -1);
     procedure DismissWindowMenu();
 
     // Interactive Dragging and Snapping
@@ -2778,6 +2778,8 @@ begin
   for i := 0 to High(btns) do
   begin
     hoverProg := GetClientButtonHoverProgress(cli, i);
+    if (FPressedButton <> -1) and (FPressedButton <> i) then
+      hoverProg := 0.0;
     isHoveredWin := (FHoveredWindow <> 0) and
                     ((FHoveredWindow = cli.FrameWindow) or (FHoveredWindow = cli.ControlsWindow));
     if ((FPressedWindow = cli.FrameWindow) or (FPressedWindow = cli.ControlsWindow)) and
@@ -3175,10 +3177,12 @@ begin
     if FShadedWindows[i].WindowId = AWin then Exit(True);
 end;
 
-procedure TWMSamaCompositingWM.TriggerWindowMenu(const AClient: TXCBWMClient);
+procedure TWMSamaCompositingWM.TriggerWindowMenu(const AClient: TXCBWMClient; const ARootX: Integer = -1; const ARootY: Integer = -1);
 var
   btns: TWMSamaButtonArray;
   tX, tW, i, menuBtnX: Integer;
+  menuX, menuY, menuW, menuH: Integer;
+  mon: TXCBMonitor;
 begin
   if (AClient = nil) or (FWindowMenuClient = AClient) then
   begin
@@ -3187,22 +3191,70 @@ begin
   end;
 
   FWindowMenuClient := AClient;
-  menuBtnX := 8;
+  menuW := 160;
+  menuH := 154;
 
-  CalculateButtons(AClient, AClient.CurrentRect.Width, btns, tX, tW);
-  for i := 0 to High(btns) do
-    if btns[i].Kind = sbkMenu then
+  if (ARootX >= 0) and (ARootY >= 0) then
+  begin
+    menuX := ARootX;
+    menuY := ARootY;
+
+    mon := MonitorAt(ARootX, ARootY);
+    if (mon <> nil) and (mon.Workarea.Width > 0) and (mon.Workarea.Height > 0) then
     begin
-      menuBtnX := Round(btns[i].X);
-      Break;
+      if menuX + menuW > mon.Workarea.X + mon.Workarea.Width then
+        menuX := mon.Workarea.X + mon.Workarea.Width - menuW;
+      if menuY + menuH > mon.Workarea.Y + mon.Workarea.Height then
+        menuY := mon.Workarea.Y + mon.Workarea.Height - menuH;
+      if menuX < mon.Workarea.X then
+        menuX := mon.Workarea.X;
+      if menuY < mon.Workarea.Y then
+        menuY := mon.Workarea.Y;
+    end
+    else if (Workarea.Width > 0) and (Workarea.Height > 0) then
+    begin
+      if menuX + menuW > Workarea.X + Workarea.Width then
+        menuX := Workarea.X + Workarea.Width - menuW;
+      if menuY + menuH > Workarea.Y + Workarea.Height then
+        menuY := Workarea.Y + Workarea.Height - menuH;
+      if menuX < Workarea.X then
+        menuX := Workarea.X;
+      if menuY < Workarea.Y then
+        menuY := Workarea.Y;
+    end
+    else if Screen <> nil then
+    begin
+      if menuX + menuW > Screen^.width_in_pixels then
+        menuX := Screen^.width_in_pixels - menuW;
+      if menuY + menuH > Screen^.height_in_pixels then
+        menuY := Screen^.height_in_pixels - menuH;
+      if menuX < 0 then
+        menuX := 0;
+      if menuY < 0 then
+        menuY := 0;
     end;
 
-  FWindowMenuRect := TXCBRect.Create(
-    Max(10, AClient.CurrentRect.X + menuBtnX - 4),
-    AClient.CurrentRect.Y + FTitlebarHeight + 4,
-    160,
-    154
-  );
+    FWindowMenuRect := TXCBRect.Create(menuX, menuY, menuW, menuH);
+  end
+  else
+  begin
+    menuBtnX := 8;
+
+    CalculateButtons(AClient, AClient.CurrentRect.Width, btns, tX, tW);
+    for i := 0 to High(btns) do
+      if btns[i].Kind = sbkMenu then
+      begin
+        menuBtnX := Round(btns[i].X);
+        Break;
+      end;
+
+    FWindowMenuRect := TXCBRect.Create(
+      Max(10, AClient.CurrentRect.X + menuBtnX - 4),
+      AClient.CurrentRect.Y + FTitlebarHeight + 4,
+      menuW,
+      menuH
+    );
+  end;
 
   // Grab pointer so menu clicks anywhere on screen are intercepted by WM
   if (Connection <> nil) and (Screen <> nil) then
@@ -3330,6 +3382,8 @@ begin
     for i := 0 to High(btns) do
     begin
       hoverProg := GetClientButtonHoverProgress(AClient, i);
+      if (FPressedButton <> -1) and (FPressedButton <> i) then
+        hoverProg := 0.0;
       isHoveredWin := (FHoveredWindow <> 0) and (FHoveredWindow = AClient.FrameWindow);
       if (FPressedWindow = AClient.FrameWindow) and (FPressedButton = i) and (FHoveredButton = i) then
         btnState := FT_BUTTON_STATE_PRESSED
@@ -4471,7 +4525,7 @@ var
   curMon, adjMon: TXCBMonitor;
   localX, localY, bw, th, newBtn: Integer;
   oldWin, pressedWin: xcb_window_t;
-  btnIdx, releasedBtn, rx, ry, itemIdx, i: Integer;
+  btnIdx, releasedBtn, rx, ry, itemIdx, i, menuRectY: Integer;
   resizeMode: TXCBDragMode;
   btns: TWMSamaButtonArray;
   titleX, titleW: Integer;
@@ -4599,14 +4653,31 @@ begin
           localX := motionEv^.event_x;
           localY := motionEv^.event_y;
           newBtn := GetButtonAt(localX, localY, cli, cli.CurrentRect.Width);
-          if newBtn >= 0 then
+          if FPressedButton >= 0 then
           begin
-            SetClientButtonHoverTarget(cli, newBtn, 1.0);
-            SetClientOtherButtonsHoverTarget(cli, newBtn, 0.0);
+            if newBtn = FPressedButton then
+            begin
+              SetClientButtonHoverTarget(cli, FPressedButton, 1.0);
+              SetClientOtherButtonsHoverTarget(cli, FPressedButton, 0.0);
+              newBtn := FPressedButton;
+            end
+            else
+            begin
+              SetClientButtonHoverTarget(cli, -1, 0.0);
+              newBtn := -1;
+            end;
           end
           else
           begin
-            SetClientButtonHoverTarget(cli, -1, 0.0);
+            if newBtn >= 0 then
+            begin
+              SetClientButtonHoverTarget(cli, newBtn, 1.0);
+              SetClientOtherButtonsHoverTarget(cli, newBtn, 0.0);
+            end
+            else
+            begin
+              SetClientButtonHoverTarget(cli, -1, 0.0);
+            end;
           end;
 
           if (newBtn <> FHoveredButton) or (motionEv^.event <> FHoveredWindow) then
@@ -4679,7 +4750,17 @@ begin
          ((enterEv^.event = cli.FrameWindow) and IsOverButtonCluster(enterEv^.event_x, enterEv^.event_y, cli, cli.CurrentRect.Width))) then
       begin
         FHoveredWindow := enterEv^.event;
-        FHoveredButton := GetButtonAt(enterEv^.event_x, enterEv^.event_y, cli, cli.CurrentRect.Width);
+        newBtn := GetButtonAt(enterEv^.event_x, enterEv^.event_y, cli, cli.CurrentRect.Width);
+        if FPressedButton >= 0 then
+        begin
+          if newBtn = FPressedButton then
+            FHoveredButton := FPressedButton
+          else
+            FHoveredButton := -1;
+        end
+        else
+          FHoveredButton := newBtn;
+
         if FHoveredButton >= 0 then
         begin
           SetClientButtonHoverTarget(cli, FHoveredButton, 1.0);
@@ -4802,10 +4883,11 @@ begin
            (ry >= FWindowMenuRect.Y) and (ry < FWindowMenuRect.Y + FWindowMenuRect.Height) then
         begin
           menuCli := FWindowMenuClient;
+          menuRectY := FWindowMenuRect.Y;
           DismissWindowMenu();
-          if ry >= FWindowMenuRect.Y + 28 then
+          if (btnEv^.detail = XCB_BUTTON_INDEX_1) and (ry >= menuRectY + 28) then
           begin
-            itemIdx := (ry - (FWindowMenuRect.Y + 28)) div 24;
+            itemIdx := (ry - (menuRectY + 28)) div 24;
             case itemIdx of
               0: menuCli.Minimize();
               1:
@@ -4977,16 +5059,17 @@ begin
             FPressedWindow := btnEv^.event;
             FHoveredButton := btnIdx;
             FHoveredWindow := btnEv^.event;
-            SetClientButtonHoverTarget(cli, 1.0);
+            SetClientButtonHoverTarget(cli, btnIdx, 1.0);
+            SetClientOtherButtonsHoverTarget(cli, btnIdx, 0.0);
             PaintClientFrame(cli);
             RequestComposite();
             Exit(True);
           end;
 
-          // B. Right-click on titlebar to resize window (legacy shortcut)
-          if (localY >= 0) and (localY < th) and (btnEv^.detail = XCB_BUTTON_INDEX_3) and cli.CanResize then
+          // B. Right-click on titlebar to trigger window action menu HUD
+          if (localY >= 0) and (localY < th) and (btnEv^.detail = XCB_BUTTON_INDEX_3) then
           begin
-            BeginDrag(cli, dmResize, btnEv^.root_x, btnEv^.root_y);
+            TriggerWindowMenu(cli, btnEv^.root_x, btnEv^.root_y);
             Exit(True);
           end;
 

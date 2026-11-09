@@ -80,6 +80,7 @@ type
     procedure TestNewWindowLaunchClampedToWorkarea();
     procedure TestScanExistingWindowsMappedBeforeStartup();
     procedure TestTitlebarLightModeRendering();
+    procedure TestTitlebarRightClickShowsWindowMenu();
   end;
 
 implementation
@@ -1181,6 +1182,9 @@ begin
     AssertEquals('PressedButton recorded as 1', 1, wm.PressedButton);
     AssertEquals('PressedWindow recorded as FrameWindow', cli.FrameWindow, wm.PressedWindow);
     AssertFalse('Client NOT maximized on button press', wsMaximizedHorz in cli.State);
+    // Sibling window buttons must NOT glow or target 1.0 when button 1 is pressed
+    AssertEquals('Sibling button 0 progress is 0.0 on press', 0.0, wm.GetClientButtonHoverProgress(cli, 0));
+    AssertEquals('Sibling button 2 progress is 0.0 on press', 0.0, wm.GetClientButtonHoverProgress(cli, 2));
 
     // 2. Drag cursor outside the button (to cancel)
     FillChar(motionEv, SizeOf(motionEv), 0);
@@ -1190,6 +1194,8 @@ begin
     motionEv.event_y := maxBtnY;
     wm.ProcessEvent(Pxcb_generic_event_t(@motionEv));
     AssertEquals('HoveredButton now -1 outside button', -1, wm.HoveredButton);
+    AssertEquals('Sibling button 0 progress stays 0.0 during drag', 0.0, wm.GetClientButtonHoverProgress(cli, 0));
+    AssertEquals('Sibling button 2 progress stays 0.0 during drag', 0.0, wm.GetClientButtonHoverProgress(cli, 2));
 
     // 3. Release mouse outside the button
     FillChar(releaseEv, SizeOf(releaseEv), 0);
@@ -3895,6 +3901,85 @@ begin
   finally
     if Obs <> nil then xcb_disconnect(Obs);
     xcb_disconnect(Conn);
+  end;
+end;
+
+procedure TWMSamaTest.TestTitlebarRightClickShowsWindowMenu();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  btnEv: xcb_button_press_event_t;
+  clickEv: xcb_button_press_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(8881);
+    cli.IsReparented := True;
+    cli.FrameWindow := 8882;
+    cli.CurrentRect := TXCBRect.Create(100, 100, 500, 400);
+
+    // 1. Right-click on titlebar (button 3, localY = 15 inside 36px titlebar)
+    FillChar(btnEv, SizeOf(btnEv), 0);
+    btnEv.response_type := XCB_BUTTON_PRESS;
+    btnEv.detail := XCB_BUTTON_INDEX_3;
+    btnEv.event := cli.FrameWindow;
+    btnEv.event_x := 250;
+    btnEv.event_y := 15;
+    btnEv.root_x := 350;
+    btnEv.root_y := 115;
+
+    AssertTrue('Handled button 3 press on titlebar', wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+
+    // Must NOT enter resize drag mode
+    AssertEquals('DragMode remains dmNone on right click', Integer(dmNone), Integer(wm.DragMode));
+    AssertNull('DragClient is nil', wm.DragClient);
+
+    // Must trigger Window Action Menu HUD
+    AssertSame('WindowMenuClient is cli', cli, wm.WindowMenuClient);
+    AssertEquals('WindowMenuRect Width is 160', 160, wm.WindowMenuRect.Width);
+    AssertEquals('WindowMenuRect Height is 154', 154, wm.WindowMenuRect.Height);
+    AssertEquals('WindowMenuRect X positioned at click root_x', 350, wm.WindowMenuRect.X);
+    AssertEquals('WindowMenuRect Y positioned at click root_y', 115, wm.WindowMenuRect.Y);
+
+    // 2. Click on item 0 (Minimize) in Window Menu HUD
+    FillChar(clickEv, SizeOf(clickEv), 0);
+    clickEv.response_type := XCB_BUTTON_PRESS;
+    clickEv.detail := XCB_BUTTON_INDEX_1;
+    clickEv.event := cli.FrameWindow;
+    clickEv.root_x := wm.WindowMenuRect.X + 20;
+    clickEv.root_y := wm.WindowMenuRect.Y + 36; // Within item 0 bounds (offset 28..52)
+
+    AssertTrue('Handled click on menu item 0', wm.ProcessEvent(Pxcb_generic_event_t(@clickEv)));
+    AssertTrue('Client successfully minimized via Window Menu HUD', wsMinimized in cli.State);
+    AssertNull('WindowMenuClient dismissed after selection', wm.WindowMenuClient);
+
+    // 3. Unminimize and test Always on Top (item 2)
+    cli.Unminimize();
+    AssertFalse('Client unminimized', wsMinimized in cli.State);
+    AssertTrue('Right click reopen menu', wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    AssertSame('Menu open again', cli, wm.WindowMenuClient);
+
+    clickEv.root_x := wm.WindowMenuRect.X + 20;
+    clickEv.root_y := wm.WindowMenuRect.Y + 84; // Item 2: Always on Top
+    AssertTrue('Handled click on menu item 2', wm.ProcessEvent(Pxcb_generic_event_t(@clickEv)));
+    AssertTrue('Client now always on top', wsAbove in cli.State);
+    AssertNull('Menu dismissed', wm.WindowMenuClient);
+
+    // 4. Test Shade / Roll Up (item 3)
+    AssertTrue('Right click reopen menu', wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    clickEv.root_y := wm.WindowMenuRect.Y + 108; // Item 3: Shade
+    AssertTrue('Handled click on menu item 3', wm.ProcessEvent(Pxcb_generic_event_t(@clickEv)));
+    AssertTrue('Client is shaded', wm.IsClientShaded(cli.ClientWindow));
+    AssertNull('Menu dismissed', wm.WindowMenuClient);
+
+    // 5. Test Maximize (item 1)
+    AssertTrue('Right click reopen menu', wm.ProcessEvent(Pxcb_generic_event_t(@btnEv)));
+    clickEv.root_y := wm.WindowMenuRect.Y + 60; // Item 1: Maximize
+    AssertTrue('Handled click on menu item 1', wm.ProcessEvent(Pxcb_generic_event_t(@clickEv)));
+    AssertTrue('Client is maximized', wsMaximizedHorz in cli.State);
+    AssertNull('Menu dismissed', wm.WindowMenuClient);
+  finally
+    wm.Free();
   end;
 end;
 
