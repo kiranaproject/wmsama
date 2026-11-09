@@ -322,7 +322,8 @@ var
   dmInt, hovInt, enInt, chkInt: cint32;
   txtR, txtG, txtB, shortR, shortG, shortB: Double;
   fnt: TFloriaFont;
-  sw, ty: Double;
+  sw, ty, icX, icY, arm, leg: Double;
+  isVectorIcon: Boolean;
 begin
   if Canvas = nil then Exit;
 
@@ -371,11 +372,67 @@ begin
       end;
     end;
 
+    isVectorIcon := False;
+    icX := X + 13.0;
+    icY := Y + (H * 0.5);
+    arm := 4.2;
+
+    if (AIcon = 'wb:close') or (AIcon = 'close') or (AIcon = '×') or (AIcon = #$C3#$97) then
+    begin
+      isVectorIcon := True;
+      Canvas.DrawLine(icX - arm, icY - arm, icX + arm, icY + arm, 1.4, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX + arm, icY - arm, icX - arm, icY + arm, 1.4, txtR, txtG, txtB, 1.0);
+    end
+    else if (AIcon = 'wb:minimize') or (AIcon = 'minimize') or (AIcon = '—') or (AIcon = #$E2#$80#$94) or (AIcon = '-') then
+    begin
+      isVectorIcon := True;
+      Canvas.DrawLine(icX - arm, icY, icX + arm, icY, 1.4, txtR, txtG, txtB, 1.0);
+    end
+    else if (AIcon = 'wb:maximize') or (AIcon = 'maximize') or (AIcon = '⤢') or (AIcon = #$E2#$A4#$A2) then
+    begin
+      isVectorIcon := True;
+      leg := arm * 0.75;
+      Canvas.DrawLine(icX + arm - leg, icY - arm, icX + arm, icY - arm, 1.3, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX + arm, icY - arm, icX + arm, icY - arm + leg, 1.3, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX - arm + leg, icY + arm, icX - arm, icY + arm, 1.3, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX - arm, icY + arm, icX - arm, icY + arm - leg, 1.3, txtR, txtG, txtB, 1.0);
+    end
+    else if (AIcon = 'wb:restore') or (AIcon = 'restore') or (AIcon = '⤡') or (AIcon = #$E2#$A4#$A1) then
+    begin
+      isVectorIcon := True;
+      leg := arm * 0.65;
+      Canvas.DrawLine(icX + arm * 0.35, icY - arm * 0.35 - leg, icX + arm * 0.35, icY - arm * 0.35, 1.3, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX + arm * 0.35 + leg, icY - arm * 0.35, icX + arm * 0.35, icY - arm * 0.35, 1.3, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX - arm * 0.35, icY + arm * 0.35 + leg, icX - arm * 0.35, icY + arm * 0.35, 1.3, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX - arm * 0.35 - leg, icY + arm * 0.35, icX - arm * 0.35, icY + arm * 0.35, 1.3, txtR, txtG, txtB, 1.0);
+    end
+    else if (AIcon = 'wb:shade') or (AIcon = 'shade') or (AIcon = '^') or (AIcon = '⌃') or (AIcon = #$E2#$8C#$83) or (AIcon = '▴') or (AIcon = #$E2#$96#$B4) then
+    begin
+      isVectorIcon := True;
+      Canvas.DrawLine(icX - arm, icY + arm * 0.35, icX, icY - arm * 0.45, 1.3, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX, icY - arm * 0.45, icX + arm, icY + arm * 0.35, 1.3, txtR, txtG, txtB, 1.0);
+    end
+    else if (AIcon = 'wb:pin') or (AIcon = 'pin') or (AIcon = '•') or (AIcon = #$E2#$80#$A2) then
+    begin
+      isVectorIcon := True;
+      Canvas.DrawCircle(icX, icY, 2.2, txtR, txtG, txtB, 1.0);
+    end
+    else if (AIcon = 'wb:menu') or (AIcon = 'menu') or (AIcon = '☰') or (AIcon = #$E2#$98#$B0) then
+    begin
+      isVectorIcon := True;
+      Canvas.DrawLine(icX - arm, icY - 2.8, icX + arm, icY - 2.8, 1.2, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX - arm, icY, icX + arm, icY, 1.2, txtR, txtG, txtB, 1.0);
+      Canvas.DrawLine(icX - arm, icY + 2.8, icX + arm, icY + 2.8, 1.2, txtR, txtG, txtB, 1.0);
+    end;
+
     fnt := FloriaGetSystemFont();
-    if AIcon <> '' then
-      Canvas.DrawTextLeft(X + 8, Y, 16, H, AIcon, fnt, txtR, txtG, txtB)
-    else if AChecked then
-      Canvas.DrawTextLeft(X + 8, Y, 16, H, '✓', fnt, txtR, txtG, txtB);
+    if not isVectorIcon then
+    begin
+      if AIcon <> '' then
+        Canvas.DrawTextLeft(X + 8, Y, 16, H, AIcon, fnt, txtR, txtG, txtB)
+      else if AChecked then
+        Canvas.DrawTextLeft(X + 8, Y, 16, H, '✓', fnt, txtR, txtG, txtB);
+    end;
 
     if AShortcut <> '' then
     begin

@@ -4531,17 +4531,17 @@ begin
 
     // [0] Minimize
     FtDrawMenuItem(ACanvas, cardX + 2, cardY + 28, cardW - 4, 24,
-                   'Minimize', 'Alt+F9', '—',
+                   'Minimize', 'Alt+F9', 'wb:minimize',
                    FWindowMenuHoverItem = 0, True, False, FThemeDarkMode);
 
     // [1] Maximize / Restore
     if (wsMaximizedHorz in FWindowMenuClient.State) or (wsTiledLeft in FWindowMenuClient.State) or (wsTiledRight in FWindowMenuClient.State) then
       FtDrawMenuItem(ACanvas, cardX + 2, cardY + 52, cardW - 4, 24,
-                     'Restore', 'Alt+F10', '⤡',
+                     'Restore', 'Alt+F10', 'wb:restore',
                      FWindowMenuHoverItem = 1, True, False, FThemeDarkMode)
     else
       FtDrawMenuItem(ACanvas, cardX + 2, cardY + 52, cardW - 4, 24,
-                     'Maximize', 'Alt+F10', '⤢',
+                     'Maximize', 'Alt+F10', 'wb:maximize',
                      FWindowMenuHoverItem = 1, True, False, FThemeDarkMode);
 
     // [2] Keep on Top (Pin)
@@ -4553,7 +4553,7 @@ begin
 
     // [3] Shade / Roll Up
     isShaded := IsClientShaded(FWindowMenuClient.ClientWindow);
-    if isShaded then checkIcon := '✓' else checkIcon := '▴';
+    if isShaded then checkIcon := '✓' else checkIcon := 'wb:shade';
     FtDrawMenuItem(ACanvas, cardX + 2, cardY + 100, cardW - 4, 24,
                    'Roll Up (Shade)', '', checkIcon,
                    FWindowMenuHoverItem = 3, True, isShaded, FThemeDarkMode);
@@ -4563,7 +4563,7 @@ begin
 
     // [4] Close Window
     FtDrawMenuItem(ACanvas, cardX + 2, cardY + 128, cardW - 4, 24,
-                   'Close Window', 'Alt+F4', '×',
+                   'Close Window', 'Alt+F4', 'wb:close',
                    FWindowMenuHoverItem = 4, True, False, FThemeDarkMode);
   end;
 
