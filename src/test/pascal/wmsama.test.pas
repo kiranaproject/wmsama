@@ -82,6 +82,7 @@ type
     procedure TestTitlebarLightModeRendering();
     procedure TestTitlebarRightClickShowsWindowMenu();
     procedure TestAlwaysOnTopStackingAndClickFocus();
+    procedure TestShadedWindowMaximizeRestoreAndTile();
   end;
 
 implementation
@@ -4140,6 +4141,102 @@ begin
   finally
     cliFront := nil;
     cliBack := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestShadedWindowMaximizeRestoreAndTile();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.Workarea := TXCBRect.Create(0, 0, 1920, 1040);
+
+    cli := wm.ManageWindow(7001);
+    cli.IsReparented := True;
+    cli.FrameWindow := 7002;
+    cli.SetGeometry(100, 100, 600, 400);
+
+    AssertEquals('Initial floating width', 600, cli.CurrentRect.Width);
+    AssertEquals('Initial floating height', 400, cli.CurrentRect.Height);
+    AssertEquals('Initial restored height', 400, cli.RestoredRect.Height);
+
+    // 1. Shade window while floating
+    wm.ToggleShade(cli);
+    AssertTrue('Window is marked shaded', wm.IsClientShaded(cli.ClientWindow));
+    AssertTrue('wsShaded in state', wsShaded in cli.State);
+    AssertEquals('Height collapsed to titlebar height', wm.TitlebarHeight, cli.CurrentRect.Height);
+    AssertEquals('Restored height preserved at 400 while shaded', 400, cli.RestoredRect.Height);
+
+    // 2. Maximize while shaded: must stay collapsed to titlebar height across full workarea
+    cli.Maximize();
+    AssertTrue('wsMaximizedHorz set', wsMaximizedHorz in cli.State);
+    AssertTrue('wsMaximizedVert set', wsMaximizedVert in cli.State);
+    AssertTrue('wsShaded preserved when maximized', wsShaded in cli.State);
+    AssertTrue('IsClientShaded remains true', wm.IsClientShaded(cli.ClientWindow));
+    AssertEquals('Width maximized to workarea width', 1920, cli.CurrentRect.Width);
+    AssertEquals('Height remains titlebar height (content hidden)', wm.TitlebarHeight, cli.CurrentRect.Height);
+    AssertEquals('Restored width preserved', 600, cli.RestoredRect.Width);
+    AssertEquals('Restored height preserved', 400, cli.RestoredRect.Height);
+
+    // 3. Un-shade while maximized: expands to full maximized workarea
+    wm.ToggleShade(cli);
+    AssertFalse('IsClientShaded false after un-shade', wm.IsClientShaded(cli.ClientWindow));
+    AssertFalse('wsShaded cleared', wsShaded in cli.State);
+    AssertEquals('Width remains workarea width', 1920, cli.CurrentRect.Width);
+    AssertEquals('Height expanded to full workarea height', 1040, cli.CurrentRect.Height);
+    AssertEquals('Restored height still preserved at 400', 400, cli.RestoredRect.Height);
+
+    // 4. Re-shade while maximized: collapses to titlebar height
+    wm.ToggleShade(cli);
+    AssertTrue('IsClientShaded true after re-shade', wm.IsClientShaded(cli.ClientWindow));
+    AssertTrue('wsShaded set', wsShaded in cli.State);
+    AssertEquals('Height collapsed to titlebar height', wm.TitlebarHeight, cli.CurrentRect.Height);
+    AssertEquals('Restored height still 400', 400, cli.RestoredRect.Height);
+
+    // 5. Restore while shaded: restores to floating position and width, remains shaded
+    cli.Restore();
+    AssertFalse('wsMaximizedHorz cleared on restore', wsMaximizedHorz in cli.State);
+    AssertFalse('wsMaximizedVert cleared on restore', wsMaximizedVert in cli.State);
+    AssertTrue('wsShaded preserved on restore', wsShaded in cli.State);
+    AssertTrue('IsClientShaded remains true on restore', wm.IsClientShaded(cli.ClientWindow));
+    AssertEquals('Restored to floating X', 100, cli.CurrentRect.X);
+    AssertEquals('Restored to floating Y', 100, cli.CurrentRect.Y);
+    AssertEquals('Restored to floating width', 600, cli.CurrentRect.Width);
+    AssertEquals('Height remains titlebar height after restore', wm.TitlebarHeight, cli.CurrentRect.Height);
+
+    // 6. Un-shade floating window: expands to original floating height
+    wm.ToggleShade(cli);
+    AssertFalse('IsClientShaded false', wm.IsClientShaded(cli.ClientWindow));
+    AssertFalse('wsShaded cleared', wsShaded in cli.State);
+    AssertEquals('Floating height restored to 400', 400, cli.CurrentRect.Height);
+
+    // 7. Tile left while shaded: remains shaded at half workarea width
+    wm.ToggleShade(cli);
+    AssertTrue('Window shaded again', wsShaded in cli.State);
+    AssertEquals('Height collapsed', wm.TitlebarHeight, cli.CurrentRect.Height);
+
+    cli.TileLeft();
+    AssertTrue('wsTiledLeft set', wsTiledLeft in cli.State);
+    AssertTrue('wsShaded preserved when tiled', wsShaded in cli.State);
+    AssertEquals('Tiled width is half workarea', 960, cli.CurrentRect.Width);
+    AssertEquals('Tiled height remains titlebar height', wm.TitlebarHeight, cli.CurrentRect.Height);
+    AssertEquals('Restored height still 400', 400, cli.RestoredRect.Height);
+
+    // 8. Restore from tile while shaded
+    cli.Restore();
+    AssertFalse('wsTiledLeft cleared', wsTiledLeft in cli.State);
+    AssertTrue('wsShaded preserved', wsShaded in cli.State);
+    AssertEquals('Width restored to 600', 600, cli.CurrentRect.Width);
+    AssertEquals('Height remains titlebar height', wm.TitlebarHeight, cli.CurrentRect.Height);
+
+    // 9. Un-shade expands back to 400
+    wm.ToggleShade(cli);
+    AssertEquals('Height restored to 400', 400, cli.CurrentRect.Height);
+  finally
+    cli := nil;
     wm.Free();
   end;
 end;

@@ -2143,10 +2143,66 @@ var
   ptrCookie: xcb_query_pointer_cookie_t;
   ptrReply: Pxcb_query_pointer_reply_t;
   rootX, rootY, localX, localY, newBtn: Integer;
+  idx, i: Integer;
+  values: array[0..3] of Cardinal;
 begin
   inherited DoOnClientConfigure(AClient);
 
   if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  // Synchronize shaded windows list and ensure frame/client windows remain collapsed
+  if (wsShaded in AClient.State) or IsClientShaded(AClient.ClientWindow) then
+  begin
+    idx := -1;
+    for i := 0 to High(FShadedWindows) do
+      if FShadedWindows[i].WindowId = AClient.ClientWindow then
+      begin
+        idx := i;
+        Break;
+      end;
+
+    if idx < 0 then
+    begin
+      SetLength(FShadedWindows, Length(FShadedWindows) + 1);
+      idx := High(FShadedWindows);
+      FShadedWindows[idx].WindowId := AClient.ClientWindow;
+      if AClient.UnshadedHeight > FTitlebarHeight then
+        FShadedWindows[idx].OriginalHeight := AClient.UnshadedHeight
+      else
+        FShadedWindows[idx].OriginalHeight := AClient.CurrentRect.Height;
+    end
+    else
+    begin
+      if AClient.UnshadedHeight > FTitlebarHeight then
+        FShadedWindows[idx].OriginalHeight := AClient.UnshadedHeight;
+    end;
+
+    if Connection <> nil then
+    begin
+      values[0] := AClient.CurrentRect.X;
+      values[1] := AClient.CurrentRect.Y;
+      values[2] := AClient.CurrentRect.Width;
+      values[3] := FTitlebarHeight;
+      xcb_configure_window(Connection, AClient.FrameWindow,
+                           XCB_CONFIG_WINDOW_X or XCB_CONFIG_WINDOW_Y or
+                           XCB_CONFIG_WINDOW_WIDTH or XCB_CONFIG_WINDOW_HEIGHT,
+                           @values[0]);
+
+      values[0] := 0;
+      values[1] := FTitlebarHeight;
+      values[2] := AClient.CurrentRect.Width;
+      values[3] := 1;
+      xcb_configure_window(Connection, AClient.ClientWindow,
+                           XCB_CONFIG_WINDOW_X or XCB_CONFIG_WINDOW_Y or
+                           XCB_CONFIG_WINDOW_WIDTH or XCB_CONFIG_WINDOW_HEIGHT,
+                           @values[0]);
+
+      if AClient.ResizeWindow <> 0 then
+        xcb_unmap_window(Connection, AClient.ResizeWindow);
+
+      xcb_flush(Connection);
+    end;
+  end;
 
   // Re-evaluate button hover state against updated geometry
   if (FHoveredWindow <> 0) and ((FHoveredWindow = AClient.FrameWindow) or
@@ -2927,9 +2983,10 @@ begin
   // Windows that cannot resize never trigger resize modes
   if not AClient.CanResize then Exit;
 
-  // Maximized and fullscreen windows cannot be resized
+  // Maximized, fullscreen, and shaded windows cannot be resized
   if (wsMaximizedHorz in AClient.State) or (wsMaximizedVert in AClient.State) or
-     (wsFullscreen in AClient.State) then
+     (wsFullscreen in AClient.State) or (wsShaded in AClient.State) or
+     IsClientShaded(AClient.ClientWindow) then
     Exit;
 
   wx := AClient.CurrentRect.X;
@@ -3270,6 +3327,7 @@ var
   values: array[0..3] of Cardinal;
   r: TXCBRect;
   compWin: TXCBCompositedWindow;
+  st: TXCBWindowState;
 begin
   if (AClient = nil) or not AClient.IsReparented or (AClient.FrameWindow = 0) then Exit;
 
@@ -3285,10 +3343,18 @@ begin
   if idx >= 0 then
   begin
     // Un-shade: restore original height
-    origH := FShadedWindows[idx].OriginalHeight;
+    if AClient.UnshadedHeight > FTitlebarHeight then
+      origH := AClient.UnshadedHeight
+    else
+      origH := FShadedWindows[idx].OriginalHeight;
     for i := idx to High(FShadedWindows) - 1 do
       FShadedWindows[i] := FShadedWindows[i + 1];
     SetLength(FShadedWindows, Length(FShadedWindows) - 1);
+
+    st := AClient.State;
+    Exclude(st, wsShaded);
+    AClient.State := st;
+    AClient.UpdateEWMHState();
 
     AClient.Resize(AClient.CurrentRect.Width, origH);
     if FCompositor <> nil then
@@ -3298,13 +3364,40 @@ begin
         compWin.UpdateGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y,
                                AClient.CurrentRect.Width, origH);
     end;
+
+    if (Connection <> nil) and (AClient.ResizeWindow <> 0) and
+       not ((wsMaximizedHorz in AClient.State) or (wsMaximizedVert in AClient.State) or (wsFullscreen in AClient.State)) then
+    begin
+      xcb_map_window(Connection, AClient.ResizeWindow);
+      values[0] := AClient.FrameWindow;
+      values[1] := XCB_STACK_MODE_BELOW;
+      xcb_configure_window(Connection, AClient.ResizeWindow,
+                           XCB_CONFIG_WINDOW_SIBLING or XCB_CONFIG_WINDOW_STACK_MODE,
+                           @values[0]);
+      xcb_flush(Connection);
+    end;
   end
   else
   begin
     // Shade: record original height and collapse frame to titlebar height
     SetLength(FShadedWindows, Length(FShadedWindows) + 1);
     FShadedWindows[High(FShadedWindows)].WindowId := targetWin;
-    FShadedWindows[High(FShadedWindows)].OriginalHeight := AClient.CurrentRect.Height;
+    if AClient.UnshadedHeight > FTitlebarHeight then
+      FShadedWindows[High(FShadedWindows)].OriginalHeight := AClient.UnshadedHeight
+    else
+      FShadedWindows[High(FShadedWindows)].OriginalHeight := AClient.CurrentRect.Height;
+
+    st := AClient.State;
+    Include(st, wsShaded);
+    AClient.State := st;
+    AClient.UnshadedHeight := FShadedWindows[High(FShadedWindows)].OriginalHeight;
+    AClient.UpdateEWMHState();
+
+    if (Connection <> nil) and (AClient.ResizeWindow <> 0) then
+    begin
+      xcb_unmap_window(Connection, AClient.ResizeWindow);
+      xcb_flush(Connection);
+    end;
 
     r := AClient.CurrentRect;
     r.Height := FTitlebarHeight;
@@ -4340,6 +4433,8 @@ begin
     UpdateControlsWindow(AClient);
     UpdateControlsInsetProperty(AClient);
     UpdateFrameExtents(AClient);
+    if (wsShaded in AClient.State) <> IsClientShaded(AClient.ClientWindow) then
+      ToggleShade(AClient);
     AClient.SetGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y, AClient.CurrentRect.Width, AClient.CurrentRect.Height);
     PaintClientFrame(AClient);
     RequestComposite();
