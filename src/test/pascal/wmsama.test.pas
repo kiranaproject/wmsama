@@ -85,6 +85,7 @@ type
     procedure TestShadedWindowMaximizeRestoreAndTile();
     procedure TestWindowMinimizeAndRestoreAnimation();
     procedure TestPropertyChangeDoesNotRaiseInactiveClient();
+    procedure TestMultipleWindowsMinimizeAnimationProgress();
   end;
 
 
@@ -4401,6 +4402,99 @@ begin
   finally
     cli1 := nil;
     cli2 := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestMultipleWindowsMinimizeAnimationProgress();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2, cli3: TXCBWMClient;
+  compWin1, compWin2, compWin3: TXCBCompositedWindow;
+  anim: TWMSamaWindowAnimation;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.AnimationsEnabled := True;
+
+    cli1 := wm.ManageWindow(1001);
+    cli1.SetGeometry(50, 50, 400, 300);
+    cli1.FrameWindow := 2001;
+    compWin1 := wm.Compositor.RegisterWindow(cli1.FrameWindow, cli1.CurrentRect, cli1.ClientWindow);
+    compWin1.FrameImage := TFloriaImage.Create(400, wm.TitlebarHeight);
+    compWin1.ClientImage := TFloriaImage.Create(400, 300 - wm.TitlebarHeight);
+
+    cli2 := wm.ManageWindow(1002);
+    cli2.SetGeometry(100, 100, 500, 350);
+    cli2.FrameWindow := 2002;
+    compWin2 := wm.Compositor.RegisterWindow(cli2.FrameWindow, cli2.CurrentRect, cli2.ClientWindow);
+    compWin2.FrameImage := TFloriaImage.Create(500, wm.TitlebarHeight);
+    compWin2.ClientImage := TFloriaImage.Create(500, 350 - wm.TitlebarHeight);
+
+    cli3 := wm.ManageWindow(1003);
+    cli3.SetGeometry(150, 150, 600, 400);
+    cli3.FrameWindow := 2003;
+    compWin3 := wm.Compositor.RegisterWindow(cli3.FrameWindow, cli3.CurrentRect, cli3.ClientWindow);
+    compWin3.FrameImage := TFloriaImage.Create(600, wm.TitlebarHeight);
+    compWin3.ClientImage := TFloriaImage.Create(600, 400 - wm.TitlebarHeight);
+
+    // All 3 windows are unminimized and managed
+    AssertEquals('3 clients registered', 3, wm.Clients.Count);
+    AssertFalse('cli1 not minimized', wsMinimized in cli1.State);
+    AssertFalse('cli2 not minimized', wsMinimized in cli2.State);
+    AssertFalse('cli3 not minimized', wsMinimized in cli3.State);
+
+    // 1. Minimize cli3 when all 3 windows are unminimized
+    cli3.IconGeometry := TXCBRect.Create(600, 710, 48, 48);
+    cli3.Minimize();
+    AssertTrue('cli3 is minimized', wsMinimized in cli3.State);
+    AssertEquals('Animation created for cli3', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation client is cli3', cli3.ClientWindow, anim.ClientWindow);
+    AssertEquals('Animation kind is wakMinimize', Ord(wakMinimize), Ord(anim.Kind));
+    AssertEquals('Initial opacity is 1.0', 1.0, anim.Opacity);
+    AssertEquals('Animation duration is 250ms', 250, anim.DurationMs);
+
+    // First tick anchors start time and begins flight
+    wm.DoOnTick(16);
+    anim := wm.GetWindowAnimation(0);
+    AssertTrue('Opacity remains high (>0.85) during early flight', anim.Opacity > 0.85);
+
+    // Mid-flight (approx 125ms = half duration): opacity should stay clearly visible (>0.7)
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 125);
+    wm.DoOnTick(16);
+    anim := wm.GetWindowAnimation(0);
+    AssertTrue('Mid-flight opacity is clearly visible (>0.70)', anim.Opacity > 0.70);
+
+    // Complete cli3 minimize animation
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 300);
+    wm.DoOnTick(16);
+    AssertEquals('cli3 animation completed', 0, wm.ActiveAnimationCount());
+
+    // 2. Now minimize cli2 while cli3 is already minimized
+    cli2.IconGeometry := TXCBRect.Create(500, 710, 48, 48);
+    cli2.Minimize();
+    AssertTrue('cli2 is minimized', wsMinimized in cli2.State);
+    AssertEquals('Animation created for cli2', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation client is cli2', cli2.ClientWindow, anim.ClientWindow);
+    AssertEquals('cli2 animation duration is 250ms', 250, anim.DurationMs);
+
+    wm.DoOnTick(16);
+    anim := wm.GetWindowAnimation(0);
+    AssertTrue('cli2 opacity remains high on early tick', anim.Opacity > 0.85);
+
+    // Complete cli2 minimize animation
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 300);
+    wm.DoOnTick(16);
+    AssertEquals('cli2 animation completed', 0, wm.ActiveAnimationCount());
+
+  finally
+    cli1 := nil;
+    cli2 := nil;
+    cli3 := nil;
     wm.Free();
   end;
 end;

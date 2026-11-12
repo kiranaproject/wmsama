@@ -94,6 +94,7 @@ type
     TargetRect   : TXCBRect;
     CurRect      : TXCBRect;
     PrevRect     : TXCBRect;
+    Opacity      : Single;
     StartTimeMs  : QWord;
     DurationMs   : Integer;
     Snapshot     : TFloriaImage;
@@ -1468,7 +1469,7 @@ begin
           not ((wsFullscreen in AClient.State) or (wsMaximizedHorz in AClient.State) or
                (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State)) then
   begin
-    if AClient = ActiveClient then
+    if (AClient = ActiveClient) and (Length(FWindowAnimations) = 0) then
       ACompWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FActiveShadowRadius, FActiveShadowOffsetY, FActiveShadowOpacity)
     else
       ACompWin.ShadowConfig := TXCBWindowShadowConfig.Create(FShadowEnabled, FShadowRadius, FShadowOffsetY, FShadowOpacity);
@@ -2008,8 +2009,9 @@ begin
         FWindowAnimations[idx].TargetRect := targetR;
         FWindowAnimations[idx].CurRect := compWin.Geometry;
         FWindowAnimations[idx].PrevRect := compWin.Geometry;
-        FWindowAnimations[idx].StartTimeMs := GetTickCount64();
-        FWindowAnimations[idx].DurationMs := 200;
+        FWindowAnimations[idx].Opacity := 1.0;
+        FWindowAnimations[idx].StartTimeMs := 0;
+        FWindowAnimations[idx].DurationMs := 250;
         FWindowAnimations[idx].Snapshot := snap;
       end;
     end;
@@ -2099,8 +2101,9 @@ begin
         FWindowAnimations[idx].TargetRect := compWin.Geometry;
         FWindowAnimations[idx].CurRect := targetR;
         FWindowAnimations[idx].PrevRect := targetR;
-        FWindowAnimations[idx].StartTimeMs := GetTickCount64();
-        FWindowAnimations[idx].DurationMs := 200;
+        FWindowAnimations[idx].Opacity := 0.0;
+        FWindowAnimations[idx].StartTimeMs := 0;
+        FWindowAnimations[idx].DurationMs := 250;
         FWindowAnimations[idx].Snapshot := snap;
         compWin.IsVisible := False;
       end;
@@ -2229,7 +2232,14 @@ begin
   i := 0;
   while i < Length(FWindowAnimations) do
   begin
-    elapsed := Integer(now - FWindowAnimations[i].StartTimeMs);
+    if FWindowAnimations[i].StartTimeMs = 0 then
+    begin
+      FWindowAnimations[i].StartTimeMs := now;
+      elapsed := 0;
+    end
+    else
+      elapsed := Integer(now - FWindowAnimations[i].StartTimeMs);
+
     if elapsed >= FWindowAnimations[i].DurationMs then
     begin
       if FWindowAnimations[i].Kind = wakRestore then
@@ -2255,6 +2265,17 @@ begin
       for j := i to High(FWindowAnimations) - 1 do
         FWindowAnimations[j] := FWindowAnimations[j + 1];
       SetLength(FWindowAnimations, Length(FWindowAnimations) - 1);
+
+      if (Length(FWindowAnimations) = 0) and (ActiveClient <> nil) and (FCompositor <> nil) then
+      begin
+        if ActiveClient.IsReparented and (ActiveClient.FrameWindow <> 0) then
+          compWin := FCompositor.FindWindow(ActiveClient.FrameWindow)
+        else
+          compWin := FCompositor.FindWindow(ActiveClient.ClientWindow);
+        if compWin <> nil then
+          ApplyClientShadow(ActiveClient, compWin);
+      end;
+
       RequestComposite();
     end
     else
@@ -2262,7 +2283,7 @@ begin
       t := elapsed / FWindowAnimations[i].DurationMs;
       if t < 0.0 then t := 0.0;
       if t > 1.0 then t := 1.0;
-      ease := 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+      ease := 1.0 - (1.0 - t) * (1.0 - t);
 
       FWindowAnimations[i].PrevRect := FWindowAnimations[i].CurRect;
       FWindowAnimations[i].CurRect.X := Round(FWindowAnimations[i].StartRect.X +
@@ -2273,6 +2294,11 @@ begin
         (FWindowAnimations[i].TargetRect.Width - FWindowAnimations[i].StartRect.Width) * ease);
       FWindowAnimations[i].CurRect.Height := Round(FWindowAnimations[i].StartRect.Height +
         (FWindowAnimations[i].TargetRect.Height - FWindowAnimations[i].StartRect.Height) * ease);
+
+      if FWindowAnimations[i].Kind = wakMinimize then
+        FWindowAnimations[i].Opacity := 1.0 - (t * t * t)
+      else
+        FWindowAnimations[i].Opacity := ease;
 
       RequestComposite();
       Inc(i);
@@ -4851,8 +4877,6 @@ var
   overlay: TXCBRect;
   isAbove, isShaded: Boolean;
   checkIcon: string;
-  animElapsed: Integer;
-  animT, animEase, animOp: Single;
 
   // Union a HUD's painted area (including its shadow margin) into the overlay
   // bounds reported to the compositor.
@@ -5054,19 +5078,9 @@ begin
     if (FWindowAnimations[i].Snapshot <> nil) and
        (FWindowAnimations[i].CurRect.Width > 0) and (FWindowAnimations[i].CurRect.Height > 0) then
     begin
-      animElapsed := Integer(GetTickCount64() - FWindowAnimations[i].StartTimeMs);
-      animT := animElapsed / FWindowAnimations[i].DurationMs;
-      if animT < 0.0 then animT := 0.0;
-      if animT > 1.0 then animT := 1.0;
-      animEase := 1.0 - (1.0 - animT) * (1.0 - animT) * (1.0 - animT);
-      if FWindowAnimations[i].Kind = wakMinimize then
-        animOp := 1.0 - animEase
-      else
-        animOp := animEase;
-
       ACanvas.DrawImageScaled(FWindowAnimations[i].CurRect.X, FWindowAnimations[i].CurRect.Y,
                               FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height,
-                              FWindowAnimations[i].Snapshot, animOp);
+                              FWindowAnimations[i].Snapshot, FWindowAnimations[i].Opacity);
 
       IncludeOverlay(FWindowAnimations[i].CurRect.X, FWindowAnimations[i].CurRect.Y,
                      FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height, 0);
