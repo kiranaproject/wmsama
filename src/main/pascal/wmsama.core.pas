@@ -82,6 +82,23 @@ type
     Active       : Boolean;
   end;
 
+  TWMSamaAnimationKind = (
+    wakMinimize,
+    wakRestore
+  );
+
+  TWMSamaWindowAnimation = record
+    ClientWindow : xcb_window_t;
+    Kind         : TWMSamaAnimationKind;
+    StartRect    : TXCBRect;
+    TargetRect   : TXCBRect;
+    CurRect      : TXCBRect;
+    PrevRect     : TXCBRect;
+    StartTimeMs  : QWord;
+    DurationMs   : Integer;
+    Snapshot     : TFloriaImage;
+  end;
+
   Pxcb_map_notify_event_t = ^xcb_map_notify_event_t;
   Pxcb_unmap_notify_event_t = ^xcb_unmap_notify_event_t;
 
@@ -134,6 +151,8 @@ type
     // Shaded Windows and Window Menu Overlay
     FShadedWindows      : array of TWMSamaShadedWindow;
     FButtonHoverAnims   : array of TWMSamaButtonHoverAnim;
+    FAnimationsEnabled  : Boolean;
+    FWindowAnimations   : array of TWMSamaWindowAnimation;
     FWindowMenuClient   : TXCBWMClient;
     FWindowMenuRect     : TXCBRect;
     FWindowMenuHoverItem: Integer;
@@ -364,6 +383,17 @@ type
 
     function ProcessEvent(const AEvent: Pxcb_generic_event_t): Boolean; override;
     procedure Run(); override;
+
+    // Window Minimize/Restore Animations
+    function CreateClientSnapshot(const ACompWin: TXCBCompositedWindow): TFloriaImage;
+    function GetClientIconGeometry(const AClient: TXCBWMClient): TXCBRect;
+    procedure ClearWindowAnimation(const AClientWindow: xcb_window_t);
+    procedure ClearAllWindowAnimations();
+    procedure UpdateWindowAnimations();
+    function ActiveAnimationCount(): Integer;
+    function GetWindowAnimation(const AIndex: Integer): TWMSamaWindowAnimation;
+    procedure SetWindowAnimationStartTime(const AIndex: Integer; const ATime: QWord);
+    property AnimationsEnabled: Boolean read FAnimationsEnabled write FAnimationsEnabled;
 
     property Compositor         : TXCBCompositor read FCompositor;
     property CompositorEnabled  : Boolean        read FCompositorEnabled   write SetCompositorEnabled;
@@ -653,6 +683,8 @@ begin
   FButtonAlignment := baRight;
   SetLength(FShadedWindows, 0);
   SetLength(FButtonHoverAnims, 0);
+  FAnimationsEnabled := True;
+  SetLength(FWindowAnimations, 0);
   FWindowMenuClient := nil;
   FWindowMenuRect := TXCBRect.Create(0, 0, 0, 0);
   FWindowMenuHoverItem := -1;
@@ -737,6 +769,7 @@ begin
     FCompositor := nil;
   end;
 
+  ClearAllWindowAnimations();
   SetLength(FButtonHoverAnims, 0);
 
   inherited Destroy();
@@ -1927,6 +1960,7 @@ begin
     end;
 
   ClearClientButtonHoverAnims(AClient);
+  ClearWindowAnimation(AClient.ClientWindow);
 
   if FCompositor = nil then Exit;
 
@@ -1941,6 +1975,9 @@ procedure TWMSamaCompositingWM.DoOnClientMinimized(const AClient: TXCBWMClient);
 var
   compWin: TXCBCompositedWindow;
   targetWin: xcb_window_t;
+  snap: TFloriaImage;
+  idx: Integer;
+  targetR: TXCBRect;
 begin
   inherited DoOnClientMinimized(AClient);
 
@@ -1953,7 +1990,31 @@ begin
 
   compWin := FCompositor.FindWindow(targetWin);
   if compWin <> nil then
+  begin
+    if FAnimationsEnabled and (compWin.Geometry.Width > 0) and (compWin.Geometry.Height > 0) and
+       ((compWin.FrameImage <> nil) or (compWin.ClientImage <> nil)) then
+    begin
+      snap := CreateClientSnapshot(compWin);
+      if snap <> nil then
+      begin
+        targetR := GetClientIconGeometry(AClient);
+        ClearWindowAnimation(AClient.ClientWindow);
+
+        SetLength(FWindowAnimations, Length(FWindowAnimations) + 1);
+        idx := High(FWindowAnimations);
+        FWindowAnimations[idx].ClientWindow := AClient.ClientWindow;
+        FWindowAnimations[idx].Kind := wakMinimize;
+        FWindowAnimations[idx].StartRect := compWin.Geometry;
+        FWindowAnimations[idx].TargetRect := targetR;
+        FWindowAnimations[idx].CurRect := compWin.Geometry;
+        FWindowAnimations[idx].PrevRect := compWin.Geometry;
+        FWindowAnimations[idx].StartTimeMs := GetTickCount64();
+        FWindowAnimations[idx].DurationMs := 200;
+        FWindowAnimations[idx].Snapshot := snap;
+      end;
+    end;
     compWin.IsVisible := False;
+  end;
 
   if (targetWin <> 0) and (targetWin = FHoveredWindow) then
   begin
@@ -1988,6 +2049,9 @@ procedure TWMSamaCompositingWM.DoOnClientRestored(const AClient: TXCBWMClient);
 var
   compWin: TXCBCompositedWindow;
   targetWin: xcb_window_t;
+  snap: TFloriaImage;
+  idx: Integer;
+  targetR: TXCBRect;
 begin
   inherited DoOnClientRestored(AClient);
 
@@ -2015,7 +2079,32 @@ begin
   begin
     compWin.IsVisible := True;
     compWin.UpdateSurfaces();
+    compWin.FetchImages();
     compWin.MarkDamaged();
+
+    if FAnimationsEnabled and (compWin.Geometry.Width > 0) and (compWin.Geometry.Height > 0) and
+       ((compWin.FrameImage <> nil) or (compWin.ClientImage <> nil)) then
+    begin
+      snap := CreateClientSnapshot(compWin);
+      if snap <> nil then
+      begin
+        targetR := GetClientIconGeometry(AClient);
+        ClearWindowAnimation(AClient.ClientWindow);
+
+        SetLength(FWindowAnimations, Length(FWindowAnimations) + 1);
+        idx := High(FWindowAnimations);
+        FWindowAnimations[idx].ClientWindow := AClient.ClientWindow;
+        FWindowAnimations[idx].Kind := wakRestore;
+        FWindowAnimations[idx].StartRect := targetR;
+        FWindowAnimations[idx].TargetRect := compWin.Geometry;
+        FWindowAnimations[idx].CurRect := targetR;
+        FWindowAnimations[idx].PrevRect := targetR;
+        FWindowAnimations[idx].StartTimeMs := GetTickCount64();
+        FWindowAnimations[idx].DurationMs := 200;
+        FWindowAnimations[idx].Snapshot := snap;
+        compWin.IsVisible := False;
+      end;
+    end;
   end
   else
     DoOnClientMapped(AClient);
@@ -2031,6 +2120,183 @@ begin
 
   PaintClientFrame(AClient);
   RequestComposite();
+end;
+
+function TWMSamaCompositingWM.CreateClientSnapshot(const ACompWin: TXCBCompositedWindow): TFloriaImage;
+var
+  canvas: TFloriaCanvasAgg;
+begin
+  Result := nil;
+  if (ACompWin = nil) or (ACompWin.Geometry.Width <= 0) or (ACompWin.Geometry.Height <= 0) then Exit;
+  Result := TFloriaImage.Create(ACompWin.Geometry.Width, ACompWin.Geometry.Height);
+  Result.Clear(0, 0, 0, 0);
+  canvas := TFloriaCanvasAgg.Create(Result);
+  try
+    if ACompWin.FrameImage <> nil then
+      canvas.DrawImage(0, 0, ACompWin.FrameImage, 1.0);
+    if ACompWin.ClientImage <> nil then
+      canvas.DrawImage(ACompWin.ClientOffset.X, ACompWin.ClientOffset.Y,
+                       ACompWin.ClientImage, 1.0);
+  finally
+    canvas.Free();
+  end;
+end;
+
+function TWMSamaCompositingWM.GetClientIconGeometry(const AClient: TXCBWMClient): TXCBRect;
+var
+  mon: TXCBMonitor;
+  tw, th, tx, ty, sw, sh: Integer;
+begin
+  if (AClient <> nil) and (AClient.IconGeometry.Width > 0) and (AClient.IconGeometry.Height > 0) then
+  begin
+    Result := AClient.IconGeometry;
+    Exit;
+  end;
+
+  sw := 1920;
+  sh := 1080;
+  if FCompositor <> nil then
+  begin
+    sw := FCompositor.ScreenWidth;
+    sh := FCompositor.ScreenHeight;
+  end;
+
+  tw := 48;
+  th := 48;
+
+  if AClient <> nil then
+    mon := MonitorAt(AClient.CurrentRect.X + AClient.CurrentRect.Width div 2,
+                     AClient.CurrentRect.Y + AClient.CurrentRect.Height div 2)
+  else if (Monitors <> nil) and (Monitors.Count > 0) then
+    mon := TXCBMonitor(Monitors[0])
+  else
+    mon := nil;
+
+  if mon <> nil then
+  begin
+    tx := mon.Rect.X + (mon.Rect.Width - tw) div 2;
+    ty := mon.Rect.Bottom() - th - 12;
+  end
+  else
+  begin
+    tx := (sw - tw) div 2;
+    ty := sh - th - 12;
+  end;
+
+  Result := TXCBRect.Create(tx, ty, tw, th);
+end;
+
+procedure TWMSamaCompositingWM.ClearWindowAnimation(const AClientWindow: xcb_window_t);
+var
+  i, j: Integer;
+begin
+  for i := High(FWindowAnimations) downto 0 do
+    if FWindowAnimations[i].ClientWindow = AClientWindow then
+    begin
+      if FWindowAnimations[i].Snapshot <> nil then
+      begin
+        FWindowAnimations[i].Snapshot.Free();
+        FWindowAnimations[i].Snapshot := nil;
+      end;
+      for j := i to High(FWindowAnimations) - 1 do
+        FWindowAnimations[j] := FWindowAnimations[j + 1];
+      SetLength(FWindowAnimations, Length(FWindowAnimations) - 1);
+    end;
+end;
+
+procedure TWMSamaCompositingWM.ClearAllWindowAnimations();
+var
+  i: Integer;
+begin
+  for i := 0 to High(FWindowAnimations) do
+    if FWindowAnimations[i].Snapshot <> nil then
+      FWindowAnimations[i].Snapshot.Free();
+  SetLength(FWindowAnimations, 0);
+end;
+
+procedure TWMSamaCompositingWM.UpdateWindowAnimations();
+var
+  now: QWord;
+  elapsed: Integer;
+  t, ease: Single;
+  i, j: Integer;
+  compWin: TXCBCompositedWindow;
+  cli: TXCBWMClient;
+begin
+  if Length(FWindowAnimations) = 0 then Exit;
+
+  now := GetTickCount64();
+  i := 0;
+  while i < Length(FWindowAnimations) do
+  begin
+    elapsed := Integer(now - FWindowAnimations[i].StartTimeMs);
+    if elapsed >= FWindowAnimations[i].DurationMs then
+    begin
+      if FWindowAnimations[i].Kind = wakRestore then
+      begin
+        cli := FindClient(FWindowAnimations[i].ClientWindow);
+        if (cli <> nil) and (FCompositor <> nil) then
+        begin
+          if cli.IsReparented and (cli.FrameWindow <> 0) then
+            compWin := FCompositor.FindWindow(cli.FrameWindow)
+          else
+            compWin := FCompositor.FindWindow(cli.ClientWindow);
+          if compWin <> nil then
+            compWin.IsVisible := True;
+        end;
+      end;
+
+      if FWindowAnimations[i].Snapshot <> nil then
+      begin
+        FWindowAnimations[i].Snapshot.Free();
+        FWindowAnimations[i].Snapshot := nil;
+      end;
+
+      for j := i to High(FWindowAnimations) - 1 do
+        FWindowAnimations[j] := FWindowAnimations[j + 1];
+      SetLength(FWindowAnimations, Length(FWindowAnimations) - 1);
+      RequestComposite();
+    end
+    else
+    begin
+      t := elapsed / FWindowAnimations[i].DurationMs;
+      if t < 0.0 then t := 0.0;
+      if t > 1.0 then t := 1.0;
+      ease := 1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t);
+
+      FWindowAnimations[i].PrevRect := FWindowAnimations[i].CurRect;
+      FWindowAnimations[i].CurRect.X := Round(FWindowAnimations[i].StartRect.X +
+        (FWindowAnimations[i].TargetRect.X - FWindowAnimations[i].StartRect.X) * ease);
+      FWindowAnimations[i].CurRect.Y := Round(FWindowAnimations[i].StartRect.Y +
+        (FWindowAnimations[i].TargetRect.Y - FWindowAnimations[i].StartRect.Y) * ease);
+      FWindowAnimations[i].CurRect.Width := Round(FWindowAnimations[i].StartRect.Width +
+        (FWindowAnimations[i].TargetRect.Width - FWindowAnimations[i].StartRect.Width) * ease);
+      FWindowAnimations[i].CurRect.Height := Round(FWindowAnimations[i].StartRect.Height +
+        (FWindowAnimations[i].TargetRect.Height - FWindowAnimations[i].StartRect.Height) * ease);
+
+      RequestComposite();
+      Inc(i);
+    end;
+  end;
+end;
+
+function TWMSamaCompositingWM.ActiveAnimationCount(): Integer;
+begin
+  Result := Length(FWindowAnimations);
+end;
+
+function TWMSamaCompositingWM.GetWindowAnimation(const AIndex: Integer): TWMSamaWindowAnimation;
+begin
+  if (AIndex >= 0) and (AIndex < Length(FWindowAnimations)) then
+    Result := FWindowAnimations[AIndex]
+  else
+    FillChar(Result, SizeOf(Result), 0);
+end;
+
+procedure TWMSamaCompositingWM.SetWindowAnimationStartTime(const AIndex: Integer; const ATime: QWord);
+begin
+  if (AIndex >= 0) and (AIndex < Length(FWindowAnimations)) then
+    FWindowAnimations[AIndex].StartTimeMs := ATime;
 end;
 
 procedure TWMSamaCompositingWM.DoOnClientActivated(const AClient: TXCBWMClient);
@@ -4581,6 +4847,8 @@ var
   overlay: TXCBRect;
   isAbove, isShaded: Boolean;
   checkIcon: string;
+  animElapsed: Integer;
+  animT, animEase, animOp: Single;
 
   // Union a HUD's painted area (including its shadow margin) into the overlay
   // bounds reported to the compositor.
@@ -4774,6 +5042,33 @@ begin
     FtDrawMenuItem(ACanvas, cardX + 2, cardY + 128, cardW - 4, 24,
                    'Close Window', 'Alt+F4', 'wb:close',
                    FWindowMenuHoverItem = 4, True, False, FThemeDarkMode);
+  end;
+
+  // 4. Render active window minimize/restore animations
+  for i := 0 to High(FWindowAnimations) do
+  begin
+    if (FWindowAnimations[i].Snapshot <> nil) and
+       (FWindowAnimations[i].CurRect.Width > 0) and (FWindowAnimations[i].CurRect.Height > 0) then
+    begin
+      animElapsed := Integer(GetTickCount64() - FWindowAnimations[i].StartTimeMs);
+      animT := animElapsed / FWindowAnimations[i].DurationMs;
+      if animT < 0.0 then animT := 0.0;
+      if animT > 1.0 then animT := 1.0;
+      animEase := 1.0 - (1.0 - animT) * (1.0 - animT) * (1.0 - animT);
+      if FWindowAnimations[i].Kind = wakMinimize then
+        animOp := 1.0 - animEase
+      else
+        animOp := animEase;
+
+      ACanvas.DrawImageScaled(FWindowAnimations[i].CurRect.X, FWindowAnimations[i].CurRect.Y,
+                              FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height,
+                              FWindowAnimations[i].Snapshot, animOp);
+
+      IncludeOverlay(FWindowAnimations[i].CurRect.X, FWindowAnimations[i].CurRect.Y,
+                     FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height, 0);
+      IncludeOverlay(FWindowAnimations[i].PrevRect.X, FWindowAnimations[i].PrevRect.Y,
+                     FWindowAnimations[i].PrevRect.Width, FWindowAnimations[i].PrevRect.Height, 0);
+    end;
   end;
 
   // Tell the compositor what area this overlay covered. Under partial present the
@@ -5633,6 +5928,7 @@ end;
 procedure TWMSamaCompositingWM.DoOnTick(const AElapsedMs: Integer);
 begin
   UpdateButtonHoverAnimations();
+  UpdateWindowAnimations();
   inherited DoOnTick(AElapsedMs);
   // Presentation happens here, once per pump cycle, rather than inline in the
   // event handlers. RenderComposite owns the enabled/needed guards.

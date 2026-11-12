@@ -83,6 +83,7 @@ type
     procedure TestTitlebarRightClickShowsWindowMenu();
     procedure TestAlwaysOnTopStackingAndClickFocus();
     procedure TestShadedWindowMaximizeRestoreAndTile();
+    procedure TestWindowMinimizeAndRestoreAnimation();
   end;
 
 implementation
@@ -4235,6 +4236,95 @@ begin
     // 9. Un-shade expands back to 400
     wm.ToggleShade(cli);
     AssertEquals('Height restored to 400', 400, cli.CurrentRect.Height);
+  finally
+    cli := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowMinimizeAndRestoreAnimation();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  compWin: TXCBCompositedWindow;
+  geom: TXCBRect;
+  anim: TWMSamaWindowAnimation;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(7001);
+    cli.SetGeometry(200, 150, 500, 400);
+
+    // 1. Icon geometry when _NET_WM_ICON_GEOMETRY is specified
+    cli.IconGeometry := TXCBRect.Create(550, 710, 48, 48);
+    geom := wm.GetClientIconGeometry(cli);
+    AssertEquals('Explicit IconGeometry X', 550, geom.X);
+    AssertEquals('Explicit IconGeometry Y', 710, geom.Y);
+    AssertEquals('Explicit IconGeometry Width', 48, geom.Width);
+    AssertEquals('Explicit IconGeometry Height', 48, geom.Height);
+
+    // 2. Icon geometry fallback when _NET_WM_ICON_GEOMETRY is absent
+    cli.IconGeometry := TXCBRect.Create(0, 0, 0, 0);
+    geom := wm.GetClientIconGeometry(cli);
+    AssertEquals('Fallback icon width is 48', 48, geom.Width);
+    AssertEquals('Fallback icon height is 48', 48, geom.Height);
+
+    // 3. Test minimize animation creation with synthetic surfaces
+    compWin := wm.Compositor.FindWindow(cli.ClientWindow);
+    AssertNotNull('compWin registered', compWin);
+    compWin.FrameImage := TFloriaImage.Create(500, wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(500, 400 - wm.TitlebarHeight);
+
+    cli.IconGeometry := TXCBRect.Create(550, 710, 48, 48);
+    cli.Minimize();
+    AssertTrue('Client is minimized', wsMinimized in cli.State);
+    AssertEquals('Active animation created on minimize', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation window matches client', cli.ClientWindow, anim.ClientWindow);
+    AssertEquals('Animation kind is wakMinimize', Ord(wakMinimize), Ord(anim.Kind));
+    AssertEquals('StartRect width matches window', 500, anim.StartRect.Width);
+    AssertEquals('StartRect height matches window', 400, anim.StartRect.Height);
+    AssertEquals('TargetRect X matches icon geometry', 550, anim.TargetRect.X);
+    AssertEquals('TargetRect Y matches icon geometry', 710, anim.TargetRect.Y);
+
+    // 4. Test animation tick progress
+    wm.DoOnTick(16);
+    AssertEquals('Animation still active mid-flight', 1, wm.ActiveAnimationCount());
+
+    // Advance time beyond duration (200ms)
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 300);
+    wm.DoOnTick(16);
+    AssertEquals('Animation completes after duration', 0, wm.ActiveAnimationCount());
+    AssertFalse('Window remains hidden after minimize animation', compWin.IsVisible);
+
+    // 5. Test restore animation
+    compWin.FrameImage := TFloriaImage.Create(500, wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(500, 400 - wm.TitlebarHeight);
+
+    cli.Restore();
+    AssertFalse('Client is no longer minimized', wsMinimized in cli.State);
+    AssertEquals('Active animation created on restore', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation kind is wakRestore', Ord(wakRestore), Ord(anim.Kind));
+    AssertEquals('StartRect X is icon geometry', 550, anim.StartRect.X);
+    AssertEquals('TargetRect width is restored width', 500, anim.TargetRect.Width);
+
+    // Complete restore animation
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 300);
+    wm.DoOnTick(16);
+    AssertEquals('Restore animation completed', 0, wm.ActiveAnimationCount());
+    AssertTrue('Window visible after restore animation completes', compWin.IsVisible);
+
+    // 6. Test cleanup when window is unmapped during animation
+    compWin.FrameImage := TFloriaImage.Create(500, wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(500, 400 - wm.TitlebarHeight);
+    cli.Minimize();
+    AssertEquals('Minimize animation active', 1, wm.ActiveAnimationCount());
+
+    wm.UnmanageWindow(cli);
+    AssertEquals('Animation canceled and cleaned up on unmap', 0, wm.ActiveAnimationCount());
   finally
     cli := nil;
     wm.Free();
