@@ -84,7 +84,9 @@ type
     procedure TestAlwaysOnTopStackingAndClickFocus();
     procedure TestShadedWindowMaximizeRestoreAndTile();
     procedure TestWindowMinimizeAndRestoreAnimation();
+    procedure TestPropertyChangeDoesNotRaiseInactiveClient();
   end;
+
 
 implementation
 
@@ -4331,7 +4333,80 @@ begin
   end;
 end;
 
+procedure TWMSamaTest.TestPropertyChangeDoesNotRaiseInactiveClient();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2: TXCBWMClient;
+  compWin1, compWin2: TXCBCompositedWindow;
+  btnEv: xcb_button_press_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli1 := wm.ManageWindow(8001);
+    cli1.IsReparented := True;
+    cli1.FrameWindow := 8002;
+    cli1.SetGeometry(100, 100, 500, 400);
+    compWin1 := wm.Compositor.RegisterWindow(cli1.FrameWindow, cli1.CurrentRect, cli1.ClientWindow);
+
+    cli2 := wm.ManageWindow(8003);
+    cli2.IsReparented := True;
+    cli2.FrameWindow := 8004;
+    cli2.SetGeometry(300, 200, 400, 400);
+    compWin2 := wm.Compositor.RegisterWindow(cli2.FrameWindow, cli2.CurrentRect, cli2.ClientWindow);
+
+    AssertNotNull('compWin1 registered', compWin1);
+    AssertNotNull('compWin2 registered', compWin2);
+
+    // 1. Initial launch order: cli2 is active and on top in compositor
+    wm.ActiveClient := cli2;
+    AssertSame('cli2 is active', cli2, wm.ActiveClient);
+    AssertTrue('cli2 is above cli1 in compositor',
+      wm.Compositor.Windows.IndexOf(compWin2) > wm.Compositor.Windows.IndexOf(compWin1));
+
+    // 2. Property change on inactive client (cli1) must NOT raise it
+    wm.DoOnClientPropertiesChanged(cli1);
+    AssertTrue('cli2 remains above cli1 after property change on cli1',
+      wm.Compositor.Windows.IndexOf(compWin2) > wm.Compositor.Windows.IndexOf(compWin1));
+
+    // 3. Switch active to cli1, so cli1 is now in front
+    wm.ActiveClient := cli1;
+    AssertTrue('cli1 is above cli2 after activating cli1',
+      wm.Compositor.Windows.IndexOf(compWin1) > wm.Compositor.Windows.IndexOf(compWin2));
+
+    // 4. Property change on inactive client (cli2) must NOT raise cli2
+    wm.DoOnClientPropertiesChanged(cli2);
+    AssertTrue('cli1 remains above cli2 after property change on cli2',
+      wm.Compositor.Windows.IndexOf(compWin1) > wm.Compositor.Windows.IndexOf(compWin2));
+
+    // 5. Direct click on cli2 (pass-through / click-to-focus) immediately raises cli2 on first click
+    FillChar(btnEv, SizeOf(btnEv), 0);
+    btnEv.response_type := XCB_BUTTON_PRESS;
+    btnEv.detail := XCB_BUTTON_INDEX_1;
+    btnEv.root_x := 650;
+    btnEv.root_y := 300;
+    btnEv.event := cli2.ClientWindow;
+
+    wm.ProcessEvent(Pxcb_generic_event_t(@btnEv));
+    AssertSame('cli2 activated by click', cli2, wm.ActiveClient);
+    AssertTrue('cli2 raised above cli1 on first click',
+      wm.Compositor.Windows.IndexOf(compWin2) > wm.Compositor.Windows.IndexOf(compWin1));
+
+    // 6. When wsAbove is enabled, DoOnClientPropertiesChanged DOES elevate to above band
+    wm.ToggleKeepOnTop(cli1);
+    AssertTrue('wsAbove active on cli1', wsAbove in cli1.State);
+    wm.DoOnClientPropertiesChanged(cli1);
+    AssertTrue('cli1 elevated above cli2 when wsAbove is active',
+      wm.Compositor.Windows.IndexOf(compWin1) > wm.Compositor.Windows.IndexOf(compWin2));
+
+  finally
+    cli1 := nil;
+    cli2 := nil;
+    wm.Free();
+  end;
+end;
+
 initialization
+
   RegisterTest(TWMSamaTest);
 
 end.

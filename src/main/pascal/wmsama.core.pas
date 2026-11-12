@@ -4686,13 +4686,17 @@ begin
     else
       targetWin := AClient.ClientWindow;
 
-    if FCompositor <> nil then
+    if wsAbove in AClient.State then
     begin
-      compWin := FCompositor.FindWindow(targetWin);
-      if compWin <> nil then
-        RaiseInCompositor(AClient);
+      if FCompositor <> nil then
+      begin
+        compWin := FCompositor.FindWindow(targetWin);
+        if compWin <> nil then
+          RaiseInCompositor(AClient);
+      end;
+      RaiseInStacking(AClient);
     end;
-    RaiseInStacking(AClient);
+
     if Connection <> nil then
       xcb_flush(Connection);
 
