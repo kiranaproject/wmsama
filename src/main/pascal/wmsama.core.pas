@@ -84,7 +84,11 @@ type
 
   TWMSamaAnimationKind = (
     wakMinimize,
-    wakRestore
+    wakRestore,
+    wakMaximize,
+    wakRestoreToFloating,
+    wakTileLeft,
+    wakTileRight
   );
 
   TWMSamaWindowAnimation = record
@@ -94,6 +98,9 @@ type
     TargetRect   : TXCBRect;
     CurRect      : TXCBRect;
     PrevRect     : TXCBRect;
+    StartRadius  : Integer;
+    TargetRadius : Integer;
+    CurRadius    : Integer;
     Opacity      : Single;
     StartTimeMs  : QWord;
     DurationMs   : Integer;
@@ -154,6 +161,9 @@ type
     FButtonHoverAnims   : array of TWMSamaButtonHoverAnim;
     FAnimationsEnabled  : Boolean;
     FWindowAnimations   : array of TWMSamaWindowAnimation;
+    FPendingSnapshot    : TFloriaImage;
+    FPendingSnapshotClient : xcb_window_t;
+    FPendingStartRadius : Integer;
     FWindowMenuClient   : TXCBWMClient;
     FWindowMenuRect     : TXCBRect;
     FWindowMenuHoverItem: Integer;
@@ -285,6 +295,11 @@ type
     procedure DoOnClientConfigure(const AClient: TXCBWMClient); override;
     procedure DoOnClientMinimized(const AClient: TXCBWMClient); override;
     procedure DoOnClientRestored(const AClient: TXCBWMClient); override;
+    procedure DoOnBeforeClientStateChange(const AClient: TXCBWMClient); override;
+    procedure DoOnClientMaximized(const AClient: TXCBWMClient; const AOldRect: TXCBRect); override;
+    procedure DoOnClientRestoredFromMaximized(const AClient: TXCBWMClient; const AOldRect: TXCBRect); override;
+    procedure DoOnClientTiled(const AClient: TXCBWMClient; const AOldRect: TXCBRect); override;
+    procedure DoOnClientRestoredFromTiled(const AClient: TXCBWMClient; const AOldRect: TXCBRect); override;
     procedure DoOnMonitorsChanged(); override;
     procedure DoOnFramePaint(const AClient: TXCBWMClient; const ARect: TXCBRect); override;
     procedure DoOnTick(const AElapsedMs: Integer); override;
@@ -771,6 +786,12 @@ begin
   end;
 
   ClearAllWindowAnimations();
+  if FPendingSnapshot <> nil then
+  begin
+    FPendingSnapshot.Free();
+    FPendingSnapshot := nil;
+    FPendingSnapshotClient := 0;
+  end;
   SetLength(FButtonHoverAnims, 0);
 
   inherited Destroy();
@@ -1962,6 +1983,12 @@ begin
 
   ClearClientButtonHoverAnims(AClient);
   ClearWindowAnimation(AClient.ClientWindow);
+  if (FPendingSnapshot <> nil) and (FPendingSnapshotClient = AClient.ClientWindow) then
+  begin
+    FPendingSnapshot.Free();
+    FPendingSnapshot := nil;
+    FPendingSnapshotClient := 0;
+  end;
 
   if FCompositor = nil then Exit;
 
@@ -2009,6 +2036,12 @@ begin
         FWindowAnimations[idx].TargetRect := targetR;
         FWindowAnimations[idx].CurRect := compWin.Geometry;
         FWindowAnimations[idx].PrevRect := compWin.Geometry;
+        if (wsMaximizedHorz in AClient.State) or (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
+          FWindowAnimations[idx].StartRadius := 0
+        else
+          FWindowAnimations[idx].StartRadius := FCornerRadius;
+        FWindowAnimations[idx].TargetRadius := 0;
+        FWindowAnimations[idx].CurRadius := FWindowAnimations[idx].StartRadius;
         FWindowAnimations[idx].Opacity := 1.0;
         FWindowAnimations[idx].StartTimeMs := 0;
         FWindowAnimations[idx].DurationMs := 250;
@@ -2101,6 +2134,12 @@ begin
         FWindowAnimations[idx].TargetRect := compWin.Geometry;
         FWindowAnimations[idx].CurRect := targetR;
         FWindowAnimations[idx].PrevRect := targetR;
+        FWindowAnimations[idx].StartRadius := 0;
+        if (wsMaximizedHorz in AClient.State) or (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
+          FWindowAnimations[idx].TargetRadius := 0
+        else
+          FWindowAnimations[idx].TargetRadius := FCornerRadius;
+        FWindowAnimations[idx].CurRadius := 0;
         FWindowAnimations[idx].Opacity := 0.0;
         FWindowAnimations[idx].StartTimeMs := 0;
         FWindowAnimations[idx].DurationMs := 250;
@@ -2122,6 +2161,398 @@ begin
   end;
 
   PaintClientFrame(AClient);
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.DoOnBeforeClientStateChange(const AClient: TXCBWMClient);
+var
+  targetWin: xcb_window_t;
+  compWin: TXCBCompositedWindow;
+begin
+  inherited DoOnBeforeClientStateChange(AClient);
+
+  if (AClient = nil) or (FCompositor = nil) or not FAnimationsEnabled or (DragMode <> dmNone) then Exit;
+
+  // Clean up any previously orphaned pending snapshot
+  if FPendingSnapshot <> nil then
+  begin
+    FPendingSnapshot.Free();
+    FPendingSnapshot := nil;
+    FPendingSnapshotClient := 0;
+  end;
+
+  if (wsMaximizedHorz in AClient.State) or (wsTiledLeft in AClient.State) or (wsTiledRight in AClient.State) then
+    FPendingStartRadius := 0
+  else
+    FPendingStartRadius := FCornerRadius;
+
+  if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+    targetWin := AClient.FrameWindow
+  else
+    targetWin := AClient.ClientWindow;
+
+  compWin := FCompositor.FindWindow(targetWin);
+  if compWin <> nil then
+  begin
+    compWin.UpdateSurfaces();
+    compWin.FetchImages();
+    if (compWin.Geometry.Width > 0) and (compWin.Geometry.Height > 0) and
+       ((compWin.FrameImage <> nil) or (compWin.ClientImage <> nil)) then
+    begin
+      FPendingSnapshot := CreateClientSnapshot(compWin);
+      if FPendingSnapshot <> nil then
+      begin
+        FPendingSnapshotClient := AClient.ClientWindow;
+        compWin.IsVisible := False;
+        RequestComposite();
+      end;
+    end;
+  end;
+end;
+
+procedure TWMSamaCompositingWM.DoOnClientMaximized(const AClient: TXCBWMClient; const AOldRect: TXCBRect);
+var
+  idx: Integer;
+  startR, targetR: TXCBRect;
+  compWin: TXCBCompositedWindow;
+  targetWin: xcb_window_t;
+begin
+  inherited DoOnClientMaximized(AClient, AOldRect);
+
+  if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  startR := AOldRect;
+  targetR := AClient.CurrentRect;
+
+  if (startR.X = targetR.X) and (startR.Y = targetR.Y) and
+     (startR.Width = targetR.Width) and (startR.Height = targetR.Height) then
+  begin
+    if FPendingSnapshot <> nil then
+    begin
+      FPendingSnapshot.Free();
+      FPendingSnapshot := nil;
+      FPendingSnapshotClient := 0;
+    end;
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      compWin.IsVisible := True;
+      ApplyClientCornerRadius(AClient, compWin);
+      ApplyClientShadow(AClient, compWin);
+    end;
+    Exit;
+  end;
+
+  if (FPendingSnapshot <> nil) and (FPendingSnapshotClient = AClient.ClientWindow) and
+     FAnimationsEnabled and (DragMode = dmNone) then
+  begin
+    ClearWindowAnimation(AClient.ClientWindow);
+
+    SetLength(FWindowAnimations, Length(FWindowAnimations) + 1);
+    idx := High(FWindowAnimations);
+    FWindowAnimations[idx].ClientWindow := AClient.ClientWindow;
+    FWindowAnimations[idx].Kind := wakMaximize;
+    FWindowAnimations[idx].StartRect := startR;
+    FWindowAnimations[idx].TargetRect := targetR;
+    FWindowAnimations[idx].CurRect := startR;
+    FWindowAnimations[idx].PrevRect := startR;
+    FWindowAnimations[idx].StartRadius := FPendingStartRadius;
+    FWindowAnimations[idx].TargetRadius := 0;
+    FWindowAnimations[idx].CurRadius := FPendingStartRadius;
+    FWindowAnimations[idx].Opacity := 1.0;
+    FWindowAnimations[idx].StartTimeMs := 0;
+    FWindowAnimations[idx].DurationMs := 200;
+    FWindowAnimations[idx].Snapshot := FPendingSnapshot;
+
+    FPendingSnapshot := nil;
+    FPendingSnapshotClient := 0;
+  end
+  else
+  begin
+    if FPendingSnapshot <> nil then
+    begin
+      FPendingSnapshot.Free();
+      FPendingSnapshot := nil;
+      FPendingSnapshotClient := 0;
+    end;
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      compWin.IsVisible := True;
+      ApplyClientCornerRadius(AClient, compWin);
+      ApplyClientShadow(AClient, compWin);
+    end;
+  end;
+
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.DoOnClientRestoredFromMaximized(const AClient: TXCBWMClient; const AOldRect: TXCBRect);
+var
+  idx: Integer;
+  startR, targetR: TXCBRect;
+  compWin: TXCBCompositedWindow;
+  targetWin: xcb_window_t;
+begin
+  inherited DoOnClientRestoredFromMaximized(AClient, AOldRect);
+
+  if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  startR := AOldRect;
+  targetR := AClient.CurrentRect;
+
+  if (startR.X = targetR.X) and (startR.Y = targetR.Y) and
+     (startR.Width = targetR.Width) and (startR.Height = targetR.Height) then
+  begin
+    if FPendingSnapshot <> nil then
+    begin
+      FPendingSnapshot.Free();
+      FPendingSnapshot := nil;
+      FPendingSnapshotClient := 0;
+    end;
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      compWin.IsVisible := True;
+      ApplyClientCornerRadius(AClient, compWin);
+      ApplyClientShadow(AClient, compWin);
+    end;
+    Exit;
+  end;
+
+  if (FPendingSnapshot <> nil) and (FPendingSnapshotClient = AClient.ClientWindow) and
+     FAnimationsEnabled and (DragMode = dmNone) then
+  begin
+    ClearWindowAnimation(AClient.ClientWindow);
+
+    SetLength(FWindowAnimations, Length(FWindowAnimations) + 1);
+    idx := High(FWindowAnimations);
+    FWindowAnimations[idx].ClientWindow := AClient.ClientWindow;
+    FWindowAnimations[idx].Kind := wakRestoreToFloating;
+    FWindowAnimations[idx].StartRect := startR;
+    FWindowAnimations[idx].TargetRect := targetR;
+    FWindowAnimations[idx].CurRect := startR;
+    FWindowAnimations[idx].PrevRect := startR;
+    FWindowAnimations[idx].StartRadius := 0;
+    FWindowAnimations[idx].TargetRadius := FCornerRadius;
+    FWindowAnimations[idx].CurRadius := 0;
+    FWindowAnimations[idx].Opacity := 1.0;
+    FWindowAnimations[idx].StartTimeMs := 0;
+    FWindowAnimations[idx].DurationMs := 200;
+    FWindowAnimations[idx].Snapshot := FPendingSnapshot;
+
+    FPendingSnapshot := nil;
+    FPendingSnapshotClient := 0;
+  end
+  else
+  begin
+    if FPendingSnapshot <> nil then
+    begin
+      FPendingSnapshot.Free();
+      FPendingSnapshot := nil;
+      FPendingSnapshotClient := 0;
+    end;
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      compWin.IsVisible := True;
+      ApplyClientCornerRadius(AClient, compWin);
+      ApplyClientShadow(AClient, compWin);
+    end;
+  end;
+
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.DoOnClientTiled(const AClient: TXCBWMClient; const AOldRect: TXCBRect);
+var
+  idx: Integer;
+  startR, targetR: TXCBRect;
+  compWin: TXCBCompositedWindow;
+  targetWin: xcb_window_t;
+  animKind: TWMSamaAnimationKind;
+begin
+  inherited DoOnClientTiled(AClient, AOldRect);
+
+  if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  startR := AOldRect;
+  targetR := AClient.CurrentRect;
+
+  if (startR.X = targetR.X) and (startR.Y = targetR.Y) and
+     (startR.Width = targetR.Width) and (startR.Height = targetR.Height) then
+  begin
+    if FPendingSnapshot <> nil then
+    begin
+      FPendingSnapshot.Free();
+      FPendingSnapshot := nil;
+      FPendingSnapshotClient := 0;
+    end;
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      compWin.IsVisible := True;
+      ApplyClientCornerRadius(AClient, compWin);
+      ApplyClientShadow(AClient, compWin);
+    end;
+    Exit;
+  end;
+
+  if (FPendingSnapshot <> nil) and (FPendingSnapshotClient = AClient.ClientWindow) and
+     FAnimationsEnabled and (DragMode = dmNone) then
+  begin
+    if wsTiledLeft in AClient.State then
+      animKind := wakTileLeft
+    else
+      animKind := wakTileRight;
+
+    ClearWindowAnimation(AClient.ClientWindow);
+
+    SetLength(FWindowAnimations, Length(FWindowAnimations) + 1);
+    idx := High(FWindowAnimations);
+    FWindowAnimations[idx].ClientWindow := AClient.ClientWindow;
+    FWindowAnimations[idx].Kind := animKind;
+    FWindowAnimations[idx].StartRect := startR;
+    FWindowAnimations[idx].TargetRect := targetR;
+    FWindowAnimations[idx].CurRect := startR;
+    FWindowAnimations[idx].PrevRect := startR;
+    FWindowAnimations[idx].StartRadius := FPendingStartRadius;
+    FWindowAnimations[idx].TargetRadius := 0;
+    FWindowAnimations[idx].CurRadius := FPendingStartRadius;
+    FWindowAnimations[idx].Opacity := 1.0;
+    FWindowAnimations[idx].StartTimeMs := 0;
+    FWindowAnimations[idx].DurationMs := 200;
+    FWindowAnimations[idx].Snapshot := FPendingSnapshot;
+
+    FPendingSnapshot := nil;
+    FPendingSnapshotClient := 0;
+  end
+  else
+  begin
+    if FPendingSnapshot <> nil then
+    begin
+      FPendingSnapshot.Free();
+      FPendingSnapshot := nil;
+      FPendingSnapshotClient := 0;
+    end;
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      compWin.IsVisible := True;
+      ApplyClientCornerRadius(AClient, compWin);
+      ApplyClientShadow(AClient, compWin);
+    end;
+  end;
+
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.DoOnClientRestoredFromTiled(const AClient: TXCBWMClient; const AOldRect: TXCBRect);
+var
+  idx: Integer;
+  startR, targetR: TXCBRect;
+  compWin: TXCBCompositedWindow;
+  targetWin: xcb_window_t;
+begin
+  inherited DoOnClientRestoredFromTiled(AClient, AOldRect);
+
+  if (AClient = nil) or (FCompositor = nil) then Exit;
+
+  startR := AOldRect;
+  targetR := AClient.CurrentRect;
+
+  if (startR.X = targetR.X) and (startR.Y = targetR.Y) and
+     (startR.Width = targetR.Width) and (startR.Height = targetR.Height) then
+  begin
+    if FPendingSnapshot <> nil then
+    begin
+      FPendingSnapshot.Free();
+      FPendingSnapshot := nil;
+      FPendingSnapshotClient := 0;
+    end;
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      compWin.IsVisible := True;
+      ApplyClientCornerRadius(AClient, compWin);
+      ApplyClientShadow(AClient, compWin);
+    end;
+    Exit;
+  end;
+
+  if (FPendingSnapshot <> nil) and (FPendingSnapshotClient = AClient.ClientWindow) and
+     FAnimationsEnabled and (DragMode = dmNone) then
+  begin
+    ClearWindowAnimation(AClient.ClientWindow);
+
+    SetLength(FWindowAnimations, Length(FWindowAnimations) + 1);
+    idx := High(FWindowAnimations);
+    FWindowAnimations[idx].ClientWindow := AClient.ClientWindow;
+    FWindowAnimations[idx].Kind := wakRestoreToFloating;
+    FWindowAnimations[idx].StartRect := startR;
+    FWindowAnimations[idx].TargetRect := targetR;
+    FWindowAnimations[idx].CurRect := startR;
+    FWindowAnimations[idx].PrevRect := startR;
+    FWindowAnimations[idx].StartRadius := 0;
+    FWindowAnimations[idx].TargetRadius := FCornerRadius;
+    FWindowAnimations[idx].CurRadius := 0;
+    FWindowAnimations[idx].Opacity := 1.0;
+    FWindowAnimations[idx].StartTimeMs := 0;
+    FWindowAnimations[idx].DurationMs := 200;
+    FWindowAnimations[idx].Snapshot := FPendingSnapshot;
+
+    FPendingSnapshot := nil;
+    FPendingSnapshotClient := 0;
+  end
+  else
+  begin
+    if FPendingSnapshot <> nil then
+    begin
+      FPendingSnapshot.Free();
+      FPendingSnapshot := nil;
+      FPendingSnapshotClient := 0;
+    end;
+    if AClient.IsReparented and (AClient.FrameWindow <> 0) then
+      targetWin := AClient.FrameWindow
+    else
+      targetWin := AClient.ClientWindow;
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      compWin.IsVisible := True;
+      ApplyClientCornerRadius(AClient, compWin);
+      ApplyClientShadow(AClient, compWin);
+    end;
+  end;
+
   RequestComposite();
 end;
 
@@ -2242,7 +2673,7 @@ begin
 
     if elapsed >= FWindowAnimations[i].DurationMs then
     begin
-      if FWindowAnimations[i].Kind = wakRestore then
+      if FWindowAnimations[i].Kind <> wakMinimize then
       begin
         cli := FindClient(FWindowAnimations[i].ClientWindow);
         if (cli <> nil) and (FCompositor <> nil) then
@@ -2252,7 +2683,14 @@ begin
           else
             compWin := FCompositor.FindWindow(cli.ClientWindow);
           if compWin <> nil then
+          begin
             compWin.IsVisible := True;
+            compWin.UpdateSurfaces();
+            compWin.FetchImages();
+            ApplyClientCornerRadius(cli, compWin);
+            ApplyClientShadow(cli, compWin);
+            compWin.MarkDamaged();
+          end;
         end;
       end;
 
@@ -2294,11 +2732,17 @@ begin
         (FWindowAnimations[i].TargetRect.Width - FWindowAnimations[i].StartRect.Width) * ease);
       FWindowAnimations[i].CurRect.Height := Round(FWindowAnimations[i].StartRect.Height +
         (FWindowAnimations[i].TargetRect.Height - FWindowAnimations[i].StartRect.Height) * ease);
+      FWindowAnimations[i].CurRadius := Round(FWindowAnimations[i].StartRadius +
+        (FWindowAnimations[i].TargetRadius - FWindowAnimations[i].StartRadius) * ease);
 
-      if FWindowAnimations[i].Kind = wakMinimize then
-        FWindowAnimations[i].Opacity := 1.0 - (t * t * t)
-      else
-        FWindowAnimations[i].Opacity := ease;
+      case FWindowAnimations[i].Kind of
+        wakMinimize:
+          FWindowAnimations[i].Opacity := 1.0 - (t * t * t);
+        wakRestore:
+          FWindowAnimations[i].Opacity := ease;
+        wakMaximize, wakRestoreToFloating, wakTileLeft, wakTileRight:
+          FWindowAnimations[i].Opacity := 1.0;
+      end;
 
       RequestComposite();
       Inc(i);
@@ -5072,20 +5516,38 @@ begin
                    FWindowMenuHoverItem = 4, True, False, FThemeDarkMode);
   end;
 
-  // 4. Render active window minimize/restore animations
+  // 4. Render active window minimize/restore/maximize/tile animations
   for i := 0 to High(FWindowAnimations) do
   begin
     if (FWindowAnimations[i].Snapshot <> nil) and
        (FWindowAnimations[i].CurRect.Width > 0) and (FWindowAnimations[i].CurRect.Height > 0) then
     begin
-      ACanvas.DrawImageScaled(FWindowAnimations[i].CurRect.X, FWindowAnimations[i].CurRect.Y,
-                              FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height,
-                              FWindowAnimations[i].Snapshot, FWindowAnimations[i].Opacity);
+      if (FWindowAnimations[i].CurRadius > 0) and
+         (FWindowAnimations[i].CurRect.Width > FWindowAnimations[i].CurRadius * 2) and
+         (FWindowAnimations[i].CurRect.Height > FWindowAnimations[i].CurRadius * 2) then
+      begin
+        ACanvas.PushClipRoundedRect(FWindowAnimations[i].CurRect.X,
+                                    FWindowAnimations[i].CurRect.Y,
+                                    FWindowAnimations[i].CurRect.Width,
+                                    FWindowAnimations[i].CurRect.Height,
+                                    FWindowAnimations[i].CurRadius,
+                                    FWindowAnimations[i].CurRadius);
+        ACanvas.DrawImageScaled(FWindowAnimations[i].CurRect.X, FWindowAnimations[i].CurRect.Y,
+                                FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height,
+                                FWindowAnimations[i].Snapshot, FWindowAnimations[i].Opacity);
+        ACanvas.PopClipRoundedRect();
+      end
+      else
+      begin
+        ACanvas.DrawImageScaled(FWindowAnimations[i].CurRect.X, FWindowAnimations[i].CurRect.Y,
+                                FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height,
+                                FWindowAnimations[i].Snapshot, FWindowAnimations[i].Opacity);
+      end;
 
       IncludeOverlay(FWindowAnimations[i].CurRect.X, FWindowAnimations[i].CurRect.Y,
-                     FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height, 0);
+                     FWindowAnimations[i].CurRect.Width, FWindowAnimations[i].CurRect.Height, 24);
       IncludeOverlay(FWindowAnimations[i].PrevRect.X, FWindowAnimations[i].PrevRect.Y,
-                     FWindowAnimations[i].PrevRect.Width, FWindowAnimations[i].PrevRect.Height, 0);
+                     FWindowAnimations[i].PrevRect.Width, FWindowAnimations[i].PrevRect.Height, 24);
     end;
   end;
 

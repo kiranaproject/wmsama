@@ -86,6 +86,7 @@ type
     procedure TestWindowMinimizeAndRestoreAnimation();
     procedure TestPropertyChangeDoesNotRaiseInactiveClient();
     procedure TestMultipleWindowsMinimizeAnimationProgress();
+    procedure TestWindowMaximizeRestoreAndTileAnimation();
   end;
 
 
@@ -4495,6 +4496,168 @@ begin
     cli1 := nil;
     cli2 := nil;
     cli3 := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWindowMaximizeRestoreAndTileAnimation();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  compWin: TXCBCompositedWindow;
+  anim: TWMSamaWindowAnimation;
+  origW, origH, waW, waH: Integer;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    cli := wm.ManageWindow(9001);
+    cli.SetGeometry(120, 100, 600, 400);
+    cli.FrameWindow := 9002;
+    compWin := wm.Compositor.RegisterWindow(cli.FrameWindow, cli.CurrentRect, cli.ClientWindow);
+    compWin.FrameImage := TFloriaImage.Create(600, wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(600, 400 - wm.TitlebarHeight);
+
+    origW := cli.CurrentRect.Width;
+    origH := cli.CurrentRect.Height;
+    waW := wm.Workarea.Width;
+    waH := wm.Workarea.Height;
+
+    // 1. Maximize window with animation
+    cli.Maximize();
+    AssertTrue('Client state has wsMaximizedHorz', wsMaximizedHorz in cli.State);
+    AssertTrue('Client state has wsMaximizedVert', wsMaximizedVert in cli.State);
+    AssertEquals('Active animation created on maximize', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation client matches', cli.ClientWindow, anim.ClientWindow);
+    AssertEquals('Animation kind is wakMaximize', Ord(wakMaximize), Ord(anim.Kind));
+    AssertEquals('StartRect width matches floating width', origW, anim.StartRect.Width);
+    AssertEquals('StartRect height matches floating height', origH, anim.StartRect.Height);
+    AssertEquals('TargetRect width matches workarea width', waW, anim.TargetRect.Width);
+    AssertEquals('TargetRect height matches workarea height', waH, anim.TargetRect.Height);
+    AssertEquals('StartRadius is FCornerRadius', wm.CornerRadius, anim.StartRadius);
+    AssertEquals('TargetRadius is 0 for maximized', 0, anim.TargetRadius);
+    AssertEquals('Opacity is 1.0 (solid)', 1.0, anim.Opacity);
+    AssertEquals('Duration is 200ms', 200, anim.DurationMs);
+    AssertFalse('Composited window hidden during flight', compWin.IsVisible);
+
+    // Tick mid-flight (100ms)
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 100);
+    wm.DoOnTick(16);
+    anim := wm.GetWindowAnimation(0);
+    AssertTrue('CurRect width expands mid-flight', anim.CurRect.Width > origW);
+    AssertTrue('CurRadius decreases mid-flight', anim.CurRadius < wm.CornerRadius);
+    AssertEquals('Opacity stays 1.0 mid-flight', 1.0, anim.Opacity);
+
+    // Complete maximize animation
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 250);
+    wm.DoOnTick(16);
+    AssertEquals('Maximize animation completed', 0, wm.ActiveAnimationCount());
+    AssertTrue('Window visible after maximize completes', compWin.IsVisible);
+    AssertEquals('CornerRadius is 0 when maximized', 0, compWin.CornerRadius);
+
+    // 2. Restore from maximize with animation
+    compWin.FrameImage := TFloriaImage.Create(waW, wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(waW, waH - wm.TitlebarHeight);
+
+    cli.Restore();
+    AssertFalse('No longer maximized', wsMaximizedHorz in cli.State);
+    AssertEquals('Active animation created on restore', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation kind is wakRestoreToFloating', Ord(wakRestoreToFloating), Ord(anim.Kind));
+    AssertEquals('StartRect width is maximized width', waW, anim.StartRect.Width);
+    AssertEquals('TargetRect width is restored floating width', origW, anim.TargetRect.Width);
+    AssertEquals('StartRadius is 0', 0, anim.StartRadius);
+    AssertEquals('TargetRadius is FCornerRadius', wm.CornerRadius, anim.TargetRadius);
+    AssertEquals('Opacity is 1.0', 1.0, anim.Opacity);
+
+    // Complete restore animation
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 250);
+    wm.DoOnTick(16);
+    AssertEquals('Restore animation completed', 0, wm.ActiveAnimationCount());
+    AssertTrue('Window visible after restore completes', compWin.IsVisible);
+    AssertEquals('CornerRadius restored to FCornerRadius', wm.CornerRadius, compWin.CornerRadius);
+
+    // 3. Tile Left with animation
+    compWin.FrameImage := TFloriaImage.Create(origW, wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(origW, origH - wm.TitlebarHeight);
+
+    cli.TileLeft();
+    AssertTrue('Client state has wsTiledLeft', wsTiledLeft in cli.State);
+    AssertEquals('Active animation created on TileLeft', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation kind is wakTileLeft', Ord(wakTileLeft), Ord(anim.Kind));
+    AssertEquals('TargetRect width is half workarea', waW div 2, anim.TargetRect.Width);
+    AssertEquals('StartRadius is FCornerRadius', wm.CornerRadius, anim.StartRadius);
+    AssertEquals('TargetRadius is 0', 0, anim.TargetRadius);
+
+    // Complete TileLeft animation
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 250);
+    wm.DoOnTick(16);
+    AssertEquals('TileLeft animation completed', 0, wm.ActiveAnimationCount());
+    AssertTrue('Window visible after TileLeft completes', compWin.IsVisible);
+    AssertEquals('CornerRadius is 0 when tiled', 0, compWin.CornerRadius);
+
+    // 4. Tile Right directly from Tile Left
+    compWin.FrameImage := TFloriaImage.Create(waW div 2, wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(waW div 2, waH - wm.TitlebarHeight);
+
+    cli.TileRight();
+    AssertTrue('Client state has wsTiledRight', wsTiledRight in cli.State);
+    AssertEquals('Active animation created on TileRight', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation kind is wakTileRight', Ord(wakTileRight), Ord(anim.Kind));
+    AssertEquals('StartRadius is 0 when transitioning from TileLeft', 0, anim.StartRadius);
+    AssertEquals('TargetRadius is 0', 0, anim.TargetRadius);
+
+    // Complete TileRight animation
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 250);
+    wm.DoOnTick(16);
+    AssertEquals('TileRight animation completed', 0, wm.ActiveAnimationCount());
+
+    // 5. Restore from Tiled to Floating
+    compWin.FrameImage := TFloriaImage.Create(waW - (waW div 2), wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(waW - (waW div 2), waH - wm.TitlebarHeight);
+
+    cli.Restore();
+    AssertFalse('No longer tiled', wsTiledRight in cli.State);
+    AssertEquals('Active animation created on restore from tile', 1, wm.ActiveAnimationCount());
+
+    anim := wm.GetWindowAnimation(0);
+    AssertEquals('Animation kind is wakRestoreToFloating', Ord(wakRestoreToFloating), Ord(anim.Kind));
+    AssertEquals('StartRadius is 0', 0, anim.StartRadius);
+    AssertEquals('TargetRadius is FCornerRadius', wm.CornerRadius, anim.TargetRadius);
+
+    // Complete restore animation
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 250);
+    wm.DoOnTick(16);
+    AssertEquals('Restore animation completed', 0, wm.ActiveAnimationCount());
+    AssertTrue('Window visible after restore completes', compWin.IsVisible);
+    AssertEquals('CornerRadius restored to FCornerRadius', wm.CornerRadius, compWin.CornerRadius);
+
+    // 6. Interactive Drag suppression: animations must not trigger during mouse dragging
+    compWin.FrameImage := TFloriaImage.Create(origW, wm.TitlebarHeight);
+    compWin.ClientImage := TFloriaImage.Create(origW, origH - wm.TitlebarHeight);
+
+    cli.Maximize();
+    wm.SetWindowAnimationStartTime(0, GetTickCount64() - 250);
+    wm.DoOnTick(16);
+
+    wm.BeginDrag(cli, dmMove, 200, 10);
+    AssertEquals('DragMode is dmMove', Ord(dmMove), Ord(wm.DragMode));
+
+    cli.Restore();
+    AssertEquals('No animation created while DragMode <> dmNone', 0, wm.ActiveAnimationCount());
+    AssertTrue('Window remains visible during interactive drag', compWin.IsVisible);
+
+    wm.EndDrag();
+    AssertEquals('DragMode is dmNone after EndDrag', Ord(dmNone), Ord(wm.DragMode));
+
+  finally
+    cli := nil;
     wm.Free();
   end;
 end;
