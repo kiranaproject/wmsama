@@ -87,6 +87,7 @@ type
     procedure TestPropertyChangeDoesNotRaiseInactiveClient();
     procedure TestMultipleWindowsMinimizeAnimationProgress();
     procedure TestWindowMaximizeRestoreAndTileAnimation();
+    procedure TestUndecoratedWindowClickToRaise();
   end;
 
 
@@ -4658,6 +4659,59 @@ begin
 
   finally
     cli := nil;
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestUndecoratedWindowClickToRaise();
+var
+  wm: TWMSamaCompositingWM;
+  cliDecorated, cliUndecorated: TXCBWMClient;
+  compDecorated, compUndecorated: TXCBCompositedWindow;
+  btnEv: xcb_button_press_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    // 1. Decorated window: (50, 50, 400, 300)
+    cliDecorated := wm.ManageWindow(5001);
+    cliDecorated.CurrentRect := TXCBRect.Create(50, 50, 400, 300);
+    cliDecorated.RestoredRect := cliDecorated.CurrentRect;
+    cliDecorated.FrameWindow := 5002;
+    cliDecorated.IsReparented := True;
+    compDecorated := wm.Compositor.RegisterWindow(cliDecorated.FrameWindow, cliDecorated.CurrentRect, cliDecorated.ClientWindow);
+
+    // 2. Undecorated / borderless normal window: (200, 150, 400, 300)
+    cliUndecorated := TXCBWMClient.Create(6001, wm);
+    cliUndecorated.WindowType := wtNormal;
+    cliUndecorated.Borderless := True;
+    cliUndecorated.IsReparented := False;
+    cliUndecorated.CurrentRect := TXCBRect.Create(200, 150, 400, 300);
+    cliUndecorated.RestoredRect := cliUndecorated.CurrentRect;
+    wm.Clients.Add(cliUndecorated);
+    compUndecorated := wm.Compositor.RegisterWindow(cliUndecorated.ClientWindow, cliUndecorated.CurrentRect, 0);
+
+    // Initially, activate cliDecorated so it is on top
+    cliDecorated.Activate();
+    AssertSame('cliDecorated is active', cliDecorated, wm.ActiveClient);
+    AssertTrue('cliDecorated is stacked above cliUndecorated in compositor',
+               wm.Compositor.Windows.IndexOf(compDecorated) > wm.Compositor.Windows.IndexOf(compUndecorated));
+
+    // Simulate clicking inside the unoccluded area of the undecorated window at (500, 250)
+    // with button event sent to cliUndecorated.ClientWindow
+    FillChar(btnEv, SizeOf(btnEv), 0);
+    btnEv.response_type := XCB_BUTTON_PRESS;
+    btnEv.detail := XCB_BUTTON_INDEX_1;
+    btnEv.root_x := 500;
+    btnEv.root_y := 250;
+    btnEv.event := cliUndecorated.ClientWindow;
+
+    wm.ProcessEvent(Pxcb_generic_event_t(@btnEv));
+
+    // Verify that the undecorated window was activated and raised to the top
+    AssertSame('Undecorated window is now the active client', cliUndecorated, wm.ActiveClient);
+    AssertTrue('Undecorated window is raised above decorated window in compositor',
+               wm.Compositor.Windows.IndexOf(compUndecorated) > wm.Compositor.Windows.IndexOf(compDecorated));
+  finally
     wm.Free();
   end;
 end;

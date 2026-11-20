@@ -1906,6 +1906,23 @@ begin
   begin
     targetWin := AClient.ClientWindow;
     frameWin := 0;
+
+    // Passive grab on mouse Button 1 for click-to-focus on unparented/borderless windows
+    if (Connection <> nil) and not (AClient.WindowType in [wtDock, wtDesktop]) then
+    begin
+      xcb_grab_button(
+        Connection,
+        0,
+        AClient.ClientWindow,
+        XCB_EVENT_MASK_BUTTON_PRESS,
+        XCB_GRAB_MODE_SYNC,
+        XCB_GRAB_MODE_ASYNC,
+        XCB_NONE,
+        XCB_NONE,
+        XCB_BUTTON_INDEX_1,
+        XCB_MOD_MASK_ANY
+      );
+    end;
   end;
 
   compWin := FCompositor.RegisterWindow(targetWin, AClient.CurrentRect, frameWin);
