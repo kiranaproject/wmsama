@@ -1631,20 +1631,22 @@ var
   valPtr: Pointer;
   valStr: AnsiString;
   darkVal: Cardinal;
+  atomList: array[0..2] of xcb_atom_t;
+  i: Integer;
 begin
   if (Connection = nil) or (RootWindow = 0) then Exit;
 
-  // 1. If a string theme atom changed or general query
-  if (AChangedAtom = 0) or
-     (AChangedAtom = FAtomSamarindaTheme) or
-     (AChangedAtom = FAtomKiranaTheme) or
-     (AChangedAtom = FAtomNetWmTheme) then
+  // 1. If general query (AChangedAtom = 0), iterate string theme atoms
+  if AChangedAtom = 0 then
   begin
-    targetAtom := AChangedAtom;
-    if targetAtom = 0 then
-      targetAtom := FAtomSamarindaTheme;
-    if targetAtom <> 0 then
+    atomList[0] := FAtomSamarindaTheme;
+    atomList[1] := FAtomNetWmTheme;
+    atomList[2] := FAtomKiranaTheme;
+    for i := 0 to High(atomList) do
     begin
+      targetAtom := atomList[i];
+      if targetAtom = 0 then Continue;
+
       cookie := xcb_get_property(Connection, 0, RootWindow, targetAtom, XCB_ATOM_STRING, 0, 32);
       reply := xcb_get_property_reply(Connection, cookie, nil);
       if reply <> nil then
@@ -1670,6 +1672,37 @@ begin
         finally
           xcb_free(reply);
         end;
+      end;
+    end;
+  end
+  else if (AChangedAtom = FAtomSamarindaTheme) or
+          (AChangedAtom = FAtomKiranaTheme) or
+          (AChangedAtom = FAtomNetWmTheme) then
+  begin
+    cookie := xcb_get_property(Connection, 0, RootWindow, AChangedAtom, XCB_ATOM_STRING, 0, 32);
+    reply := xcb_get_property_reply(Connection, cookie, nil);
+    if reply <> nil then
+    begin
+      try
+        len := xcb_get_property_value_length(reply);
+        if len > 0 then
+        begin
+          valPtr := xcb_get_property_value(reply);
+          SetString(valStr, PAnsiChar(valPtr), len);
+          valStr := LowerCase(valStr);
+          if Pos('light', valStr) > 0 then
+          begin
+            SetThemeDarkMode(False);
+            Exit;
+          end
+          else if Pos('dark', valStr) > 0 then
+          begin
+            SetThemeDarkMode(True);
+            Exit;
+          end;
+        end;
+      finally
+        xcb_free(reply);
       end;
     end;
   end;

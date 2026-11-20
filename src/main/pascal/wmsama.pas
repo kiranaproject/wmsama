@@ -8,7 +8,7 @@ program wmsama;
 {$mode objfpc}{$H+}
 
 uses
-  SysUtils, Math, BaseUnix,
+  SysUtils, Math, BaseUnix, IniFiles,
   Floria.XCB,
   Floria.XCB.WM,
   Floria.XCB.WM.Compositor,
@@ -73,6 +73,32 @@ begin
     WM.RequestShutdown();
 end;
 
+function DetectThemeFromSettingsIni(const ADefault: Boolean): Boolean;
+var
+  HomeDir: String;
+  ConfigPath: String;
+  Ini: TIniFile;
+begin
+  Result := ADefault;
+  HomeDir := GetEnvironmentVariable('HOME');
+  if HomeDir = '' then Exit;
+  ConfigPath := HomeDir + '/.config/samarinda/settings.ini';
+  if not FileExists(ConfigPath) then Exit;
+  try
+    Ini := TIniFile.Create(ConfigPath);
+    try
+      if Ini.ValueExists('Appearance', 'darkmode') then
+        Result := Ini.ReadBool('Appearance', 'darkmode', ADefault)
+      else if Ini.ValueExists('Appearance', 'DarkMode') then
+        Result := Ini.ReadBool('Appearance', 'DarkMode', ADefault);
+    finally
+      Ini.Free();
+    end;
+  except
+    // Fall back to default on parse failure
+  end;
+end;
+
 begin
   SetExceptionMask([exInvalidOp, exDenormalized, exZeroDivide, exOverflow, exUnderflow, exPrecision]);
   WriteLn('wmsama — X11 Compositing Window Manager (Samarinda DE)');
@@ -92,15 +118,28 @@ begin
   LibFtPath := '';
 
   // Detect theme from environment variables if set
-  EnvTheme := LowerCase(GetEnvironmentVariable('WMSAMA_THEME'));
-  if EnvTheme = '' then
-    EnvTheme := LowerCase(GetEnvironmentVariable('KIRANA_THEME'));
-  if EnvTheme = '' then
-    EnvTheme := LowerCase(GetEnvironmentVariable('SAMARINDA_THEME'));
-  if (EnvTheme = 'light') or (EnvTheme = '0') or (EnvTheme = 'false') then
+  EnvTheme := LowerCase(GetEnvironmentVariable('FT_DARK_MODE'));
+  if (EnvTheme = '1') or (EnvTheme = 'true') then
+    ThemeDark := True
+  else if (EnvTheme = '0') or (EnvTheme = 'false') then
     ThemeDark := False
-  else if (EnvTheme = 'dark') or (EnvTheme = '1') or (EnvTheme = 'true') then
-    ThemeDark := True;
+  else
+  begin
+    EnvTheme := LowerCase(GetEnvironmentVariable('FT_THEME'));
+    if EnvTheme = '' then
+      EnvTheme := LowerCase(GetEnvironmentVariable('SAMARINDA_THEME'));
+    if EnvTheme = '' then
+      EnvTheme := LowerCase(GetEnvironmentVariable('KIRANA_THEME'));
+    if EnvTheme = '' then
+      EnvTheme := LowerCase(GetEnvironmentVariable('WMSAMA_THEME'));
+
+    if (EnvTheme = 'light') or (EnvTheme = '0') or (EnvTheme = 'false') then
+      ThemeDark := False
+    else if (EnvTheme = 'dark') or (EnvTheme = '1') or (EnvTheme = 'true') then
+      ThemeDark := True
+    else
+      ThemeDark := DetectThemeFromSettingsIni(ThemeDark);
+  end;
 
   I := 1;
   while I <= ParamCount do
