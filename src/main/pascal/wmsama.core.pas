@@ -1056,13 +1056,7 @@ begin
                   if compWin <> nil then
                   begin
                     compWin.HasAlphaChannel := (geomReply^.depth = 32);
-                    if compWin.HasAlphaChannel then
-                    begin
-                      compWin.CornerRadius := 0;
-                      compWin.BottomCornerRadius := 0;
-                      compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
-                    end
-                    else if IsWindowMenu(children[i]) then
+                    if IsWindowMenu(children[i]) then
                     begin
                       compWin.CornerRadius := 6;
                       compWin.BottomCornerRadius := 6;
@@ -1486,6 +1480,9 @@ var
   classCookie: xcb_get_property_cookie_t;
   classReply: Pxcb_get_property_reply_t;
   classStr: AnsiString;
+  nameCookie: xcb_get_property_cookie_t;
+  nameReply: Pxcb_get_property_reply_t;
+  nameStr: AnsiString;
 begin
   Result := False;
   if (Connection = nil) or (AWindow = 0) then Exit;
@@ -1494,6 +1491,42 @@ begin
   cli := FindClient(AWindow);
   if cli <> nil then
     Exit(cli.IsMenu());
+
+  // Check window title to exclude launcher or custom-shaped overlays
+  if EwmhInitialized then
+  begin
+    nameCookie := xcb_get_property(Connection, 0, AWindow, Ewmh._NET_WM_NAME, Ewmh.UTF8_STRING, 0, 64);
+    nameReply := xcb_get_property_reply(Connection, nameCookie, nil);
+    if nameReply <> nil then
+    begin
+      try
+        if xcb_get_property_value_length(nameReply) > 0 then
+        begin
+          SetString(nameStr, PAnsiChar(xcb_get_property_value(nameReply)), xcb_get_property_value_length(nameReply));
+          if Pos('Launcher', nameStr) > 0 then
+            Exit(False);
+        end;
+      finally
+        xcb_free(nameReply);
+      end;
+    end;
+  end;
+
+  nameCookie := xcb_get_property(Connection, 0, AWindow, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 0, 64);
+  nameReply := xcb_get_property_reply(Connection, nameCookie, nil);
+  if nameReply <> nil then
+  begin
+    try
+      if xcb_get_property_value_length(nameReply) > 0 then
+      begin
+        SetString(nameStr, PAnsiChar(xcb_get_property_value(nameReply)), xcb_get_property_value_length(nameReply));
+        if Pos('Launcher', nameStr) > 0 then
+          Exit(False);
+      end;
+    finally
+      xcb_free(nameReply);
+    end;
+  end;
 
   // 2. Check _NET_WM_WINDOW_TYPE
   if EwmhInitialized then
@@ -1562,8 +1595,8 @@ begin
       begin
         SetString(classStr, PAnsiChar(xcb_get_property_value(classReply)), xcb_get_property_value_length(classReply));
         classStr := LowerCase(classStr);
-        // If it mentions splash, definitely not a menu
-        if Pos('splash', classStr) > 0 then
+        // If it mentions splash or launcher, definitely not a menu
+        if (Pos('splash', classStr) > 0) or (Pos('launcher', classStr) > 0) then
           Exit(False);
         if (Pos('menu', classStr) > 0) or (Pos('popup', classStr) > 0) or (Pos('dropdown', classStr) > 0) then
           Exit(True);
@@ -6624,13 +6657,7 @@ begin
                 if compWin <> nil then
                 begin
                   compWin.HasAlphaChannel := (geomReply^.depth = 32);
-                  if compWin.HasAlphaChannel then
-                  begin
-                    compWin.CornerRadius := 0;
-                    compWin.BottomCornerRadius := 0;
-                    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
-                  end
-                  else if IsWindowMenu(mapEv^.window) then
+                  if IsWindowMenu(mapEv^.window) then
                   begin
                     compWin.CornerRadius := 6;
                     compWin.BottomCornerRadius := 6;
