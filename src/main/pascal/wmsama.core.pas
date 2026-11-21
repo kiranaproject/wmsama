@@ -348,6 +348,7 @@ type
 
     procedure RequestComposite();
     procedure RenderComposite();
+    procedure UpdateCompositedWindowsVisibility();
 
     procedure PaintAllFrames();
     procedure PaintClientFrame(const AClient: TXCBWMClient);
@@ -418,6 +419,7 @@ type
     function ActiveAnimationCount(): Integer;
     function GetWindowAnimation(const AIndex: Integer): TWMSamaWindowAnimation;
     procedure SetWindowAnimationStartTime(const AIndex: Integer; const ATime: QWord);
+    function IsClientAnimating(const AClientWindow: xcb_window_t): Boolean;
     property AnimationsEnabled: Boolean read FAnimationsEnabled write FAnimationsEnabled;
 
     property Compositor         : TXCBCompositor read FCompositor;
@@ -1120,9 +1122,64 @@ begin
   FNeedsComposite := True;
 end;
 
+function TWMSamaCompositingWM.IsClientAnimating(const AClientWindow: xcb_window_t): Boolean;
+var
+  k: Integer;
+begin
+  Result := False;
+  for k := 0 to High(FWindowAnimations) do
+    if FWindowAnimations[k].ClientWindow = AClientWindow then
+      Exit(True);
+end;
+
+procedure TWMSamaCompositingWM.UpdateCompositedWindowsVisibility();
+var
+  i: Integer;
+  cli: TXCBWMClient;
+  targetWin: xcb_window_t;
+  compWin: TXCBCompositedWindow;
+  visibleOnDesk: Boolean;
+begin
+  if (FCompositor = nil) or (Clients = nil) then Exit;
+
+  for i := 0 to Clients.Count - 1 do
+  begin
+    cli := TXCBWMClient(Clients[i]);
+    if cli = nil then Continue;
+
+    if cli.IsReparented and (cli.FrameWindow <> 0) then
+      targetWin := cli.FrameWindow
+    else
+      targetWin := cli.ClientWindow;
+
+    compWin := FCompositor.FindWindow(targetWin);
+    if compWin <> nil then
+    begin
+      visibleOnDesk := cli.ShouldBeVisibleOnDesktop(CurrentDesktop) and
+                       (not (wsMinimized in cli.State));
+      if visibleOnDesk and IsClientAnimating(cli.ClientWindow) then
+        Continue;
+
+      if compWin.IsVisible <> visibleOnDesk then
+      begin
+        compWin.IsVisible := visibleOnDesk;
+        if visibleOnDesk then
+        begin
+          compWin.UpdateSurfaces();
+          compWin.FetchImages();
+          ApplyClientCornerRadius(cli, compWin);
+          ApplyClientShadow(cli, compWin);
+          compWin.MarkDamaged();
+        end;
+      end;
+    end;
+  end;
+end;
+
 procedure TWMSamaCompositingWM.RenderComposite();
 begin
   if not FCompositorEnabled or not FNeedsComposite or (FCompositor = nil) then Exit;
+  UpdateCompositedWindowsVisibility();
   FCompositor.CompositeScene();
   FCompositor.PresentToScreen();
   FNeedsComposite := False;
@@ -2005,6 +2062,8 @@ begin
     compWin.BlurRadius := FBlurRadius;
 
     ApplyClientCornerRadius(AClient, compWin);
+    compWin.IsVisible := AClient.ShouldBeVisibleOnDesktop(CurrentDesktop) and
+                         (not (wsMinimized in AClient.State));
   end;
 
   if AClient.ExtendedClientArea then
@@ -2789,12 +2848,16 @@ begin
             compWin := FCompositor.FindWindow(cli.ClientWindow);
           if compWin <> nil then
           begin
-            compWin.IsVisible := True;
-            compWin.UpdateSurfaces();
-            compWin.FetchImages();
-            ApplyClientCornerRadius(cli, compWin);
-            ApplyClientShadow(cli, compWin);
-            compWin.MarkDamaged();
+            compWin.IsVisible := cli.ShouldBeVisibleOnDesktop(CurrentDesktop) and
+                                 (not (wsMinimized in cli.State));
+            if compWin.IsVisible then
+            begin
+              compWin.UpdateSurfaces();
+              compWin.FetchImages();
+              ApplyClientCornerRadius(cli, compWin);
+              ApplyClientShadow(cli, compWin);
+              compWin.MarkDamaged();
+            end;
           end;
         end;
       end;
@@ -5282,6 +5345,7 @@ begin
       ToggleShade(AClient);
     AClient.SetGeometry(AClient.CurrentRect.X, AClient.CurrentRect.Y, AClient.CurrentRect.Width, AClient.CurrentRect.Height);
     PaintClientFrame(AClient);
+    UpdateCompositedWindowsVisibility();
     RequestComposite();
   end;
 end;
@@ -5428,6 +5492,7 @@ begin
   if AClient.Desktop = ADesktop then Exit;
 
   AClient.Desktop := ADesktop;
+  UpdateCompositedWindowsVisibility();
   TriggerWorkspaceHud(ADesktop);
   RequestComposite();
 end;
@@ -5435,6 +5500,7 @@ end;
 procedure TWMSamaCompositingWM.DoOnDesktopChanged(const AOldDesktop, ANewDesktop: Integer);
 begin
   inherited DoOnDesktopChanged(AOldDesktop, ANewDesktop);
+  UpdateCompositedWindowsVisibility();
   TriggerWorkspaceHud(ANewDesktop);
   RequestComposite();
 end;

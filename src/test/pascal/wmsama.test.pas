@@ -89,6 +89,7 @@ type
     procedure TestWindowMaximizeRestoreAndTileAnimation();
     procedure TestUndecoratedWindowClickToRaise();
     procedure TestWorkspaceKeybindingsAndHUD();
+    procedure TestWorkspaceWindowCompositorVisibility();
   end;
 
 
@@ -4767,6 +4768,51 @@ begin
     AssertEquals('cli moved to desktop 3', 3, cli.Desktop);
     AssertTrue('Workspace HUD active after moving client', wm.WorkspaceHudActive);
     AssertEquals('HUD desktop is 3', 3, wm.WorkspaceHudDesktop);
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWorkspaceWindowCompositorVisibility();
+var
+  wm: TWMSamaCompositingWM;
+  cli1, cli2: TXCBWMClient;
+  comp1, comp2: TXCBCompositedWindow;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    wm.StartCompositor();
+    AssertEquals('Initial desktop is 0', 0, wm.CurrentDesktop);
+
+    cli1 := wm.ManageWindow(9001);
+    cli1.Desktop := 0;
+
+    cli2 := wm.ManageWindow(9002);
+    cli2.Desktop := 1;
+
+    comp1 := wm.Compositor.FindWindow(cli1.ClientWindow);
+    comp2 := wm.Compositor.FindWindow(cli2.ClientWindow);
+    AssertNotNull('comp1 registered', comp1);
+    AssertNotNull('comp2 registered', comp2);
+
+    // Initial state on desktop 0
+    wm.UpdateCompositedWindowsVisibility();
+    AssertTrue('cli1 is visible on desktop 0', comp1.IsVisible);
+    AssertFalse('cli2 is hidden on desktop 0', comp2.IsVisible);
+
+    // Switch to desktop 1
+    wm.SwitchDesktop(1);
+    AssertFalse('cli1 is hidden on desktop 1', comp1.IsVisible);
+    AssertTrue('cli2 is visible on desktop 1', comp2.IsVisible);
+
+    // Switch back to desktop 0
+    wm.SwitchDesktop(0);
+    AssertTrue('cli1 is visible again on desktop 0', comp1.IsVisible);
+    AssertFalse('cli2 is hidden on desktop 0', comp2.IsVisible);
+
+    // Move cli1 to desktop 2 while on desktop 0
+    wm.MoveClientToDesktop(cli1, 2);
+    AssertFalse('cli1 is now hidden after moving to desktop 2', comp1.IsVisible);
   finally
     wm.Free();
   end;
