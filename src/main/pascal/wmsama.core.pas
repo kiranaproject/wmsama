@@ -1055,7 +1055,14 @@ begin
                   compWin := FCompositor.RegisterWindow(children[i], geomRect, 0);
                   if compWin <> nil then
                   begin
-                    if IsWindowMenu(children[i]) then
+                    compWin.HasAlphaChannel := (geomReply^.depth = 32);
+                    if compWin.HasAlphaChannel then
+                    begin
+                      compWin.CornerRadius := 0;
+                      compWin.BottomCornerRadius := 0;
+                      compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
+                    end
+                    else if IsWindowMenu(children[i]) then
                     begin
                       compWin.CornerRadius := 6;
                       compWin.BottomCornerRadius := 6;
@@ -6616,7 +6623,14 @@ begin
                 compWin := FCompositor.RegisterWindow(mapEv^.window, geomRect, 0);
                 if compWin <> nil then
                 begin
-                  if IsWindowMenu(mapEv^.window) then
+                  compWin.HasAlphaChannel := (geomReply^.depth = 32);
+                  if compWin.HasAlphaChannel then
+                  begin
+                    compWin.CornerRadius := 0;
+                    compWin.BottomCornerRadius := 0;
+                    compWin.ShadowConfig := TXCBWindowShadowConfig.Create(False, 0, 0, 0.0);
+                  end
+                  else if IsWindowMenu(mapEv^.window) then
                   begin
                     compWin.CornerRadius := 6;
                     compWin.BottomCornerRadius := 6;
