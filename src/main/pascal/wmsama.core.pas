@@ -181,6 +181,12 @@ type
     FAltTabActive       : Boolean;
     FAltTabIndex        : Integer;
 
+    // Workspace Switcher HUD OSD
+    FWorkspaceHudActive : Boolean;
+    FWorkspaceHudStartTime: QWord;
+    FWorkspaceHudDesktop : Integer;
+    FWorkspaceHudRect   : TXCBRect;
+
     // Keyboard grab ownership for the Alt+Tab switcher.
     // A single flag governs acquire/release so the grab and the HUD state can
     // never diverge: FKeyboardGrabHeld is the only thing any release path checks.
@@ -302,8 +308,11 @@ type
     procedure DoOnClientRestoredFromTiled(const AClient: TXCBWMClient; const AOldRect: TXCBRect); override;
     procedure DoOnMonitorsChanged(); override;
     procedure DoOnFramePaint(const AClient: TXCBWMClient; const ARect: TXCBRect); override;
+    procedure DoOnDesktopChanged(const AOldDesktop, ANewDesktop: Integer); override;
     procedure DoOnTick(const AElapsedMs: Integer); override;
   public
+    procedure TriggerWorkspaceHud(const ADesktop: Integer);
+    procedure MoveClientToDesktop(const AClient: TXCBWMClient; const ADesktop: Integer);
     function IsWindowMenu(const AWindow: xcb_window_t): Boolean;
     // Smallest monitor containing the point, preferring a specific screen over an
     // aggregate one. Exposed because multi-monitor behaviour cannot be reproduced
@@ -446,6 +455,9 @@ type
     property DragDetentPassed   : Boolean        read FDragDetentPassed;
     property AltTabActive       : Boolean        read FAltTabActive;
     property AltTabIndex        : Integer        read FAltTabIndex;
+    property WorkspaceHudActive : Boolean        read FWorkspaceHudActive;
+    property WorkspaceHudDesktop: Integer        read FWorkspaceHudDesktop;
+    property WorkspaceHudRect   : TXCBRect       read FWorkspaceHudRect;
     property KeyboardGrabHeld   : Boolean        read FKeyboardGrabHeld;
     property KeyboardGrabAttempts    : Integer   read FGrabAttempts;
     property KeyboardReleaseAttempts : Integer   read FReleaseAttempts;
@@ -739,6 +751,11 @@ begin
   FAltTabActive := False;
   FAltTabIndex := 0;
 
+  FWorkspaceHudActive := False;
+  FWorkspaceHudStartTime := 0;
+  FWorkspaceHudDesktop := 0;
+  FWorkspaceHudRect := TXCBRect.Create(0, 0, 0, 0);
+
   FKeyboardGrabHeld := False;
   FGrabAttempts := 0;
   FReleaseAttempts := 0;
@@ -853,6 +870,44 @@ begin
     // Multi-monitor keyboard navigation: Super + Shift + Arrow keys
     if ModSuper <> 0 then
     begin
+      // Workspace navigation: Super+1..4 (switch) and Super+Shift+1..4 (move window)
+      if Keycode1 <> 0 then
+      begin
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i], Keycode1,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT, Keycode1,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+      end;
+      if Keycode2 <> 0 then
+      begin
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i], Keycode2,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT, Keycode2,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+      end;
+      if Keycode3 <> 0 then
+      begin
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i], Keycode3,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT, Keycode3,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+      end;
+      if Keycode4 <> 0 then
+      begin
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i], Keycode4,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT, Keycode4,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+      end;
+
+      // Super+Left / Super+Right for cycling virtual desktops
+      if KeycodeLeft <> 0 then
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i], KeycodeLeft,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+      if KeycodeRight <> 0 then
+        xcb_grab_key(Connection, 1, Screen^.root, superMods[i], KeycodeRight,
+                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+
       if KeycodeLeft <> 0 then
         xcb_grab_key(Connection, 1, Screen^.root, superMods[i] or XCB_MOD_MASK_SHIFT,
                      KeycodeLeft, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
@@ -5359,6 +5414,31 @@ begin
   RequestComposite();
 end;
 
+procedure TWMSamaCompositingWM.TriggerWorkspaceHud(const ADesktop: Integer);
+begin
+  FWorkspaceHudActive := True;
+  FWorkspaceHudStartTime := GetTickCount64();
+  FWorkspaceHudDesktop := ADesktop;
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.MoveClientToDesktop(const AClient: TXCBWMClient; const ADesktop: Integer);
+begin
+  if (AClient = nil) or (ADesktop < 0) or (ADesktop >= DesktopCount) then Exit;
+  if AClient.Desktop = ADesktop then Exit;
+
+  AClient.Desktop := ADesktop;
+  TriggerWorkspaceHud(ADesktop);
+  RequestComposite();
+end;
+
+procedure TWMSamaCompositingWM.DoOnDesktopChanged(const AOldDesktop, ANewDesktop: Integer);
+begin
+  inherited DoOnDesktopChanged(AOldDesktop, ANewDesktop);
+  TriggerWorkspaceHud(ANewDesktop);
+  RequestComposite();
+end;
+
 procedure TWMSamaCompositingWM.DoOnCompositorAfterRender(ASender: TObject; ACanvas: TFloriaCanvasAgg; const ASceneRect: TXCBRect);
 var
   sw, sh, cardW, cardH, cardX, cardY: Integer;
@@ -5371,6 +5451,9 @@ var
   overlay: TXCBRect;
   isAbove, isShaded: Boolean;
   checkIcon: string;
+  elapsed: QWord;
+  hudAlpha: Double;
+  pillW, pillH, pillGap, totalPillsW, pillsStartX, pillsY: Integer;
 
   // Union a HUD's painted area (including its shadow margin) into the overlay
   // bounds reported to the compositor.
@@ -5601,6 +5684,93 @@ begin
     end;
   end;
 
+  // 5. Render Workspace Switcher OSD HUD
+  if FWorkspaceHudActive then
+  begin
+    elapsed := GetTickCount64() - FWorkspaceHudStartTime;
+    if elapsed >= 750 then
+    begin
+      FWorkspaceHudActive := False;
+      if FWorkspaceHudRect.Width > 0 then
+        IncludeOverlay(FWorkspaceHudRect.X, FWorkspaceHudRect.Y,
+                       FWorkspaceHudRect.Width, FWorkspaceHudRect.Height, 30);
+      FWorkspaceHudRect := TXCBRect.Create(0, 0, 0, 0);
+      RequestComposite();
+    end
+    else
+    begin
+      if elapsed < 500 then
+        hudAlpha := 1.0
+      else
+        hudAlpha := (750 - elapsed) / 250.0;
+
+      targetMon := nil;
+      if ActiveClient <> nil then
+        targetMon := MonitorForClient(ActiveClient);
+      if targetMon = nil then
+        targetMon := PrimaryMonitor;
+      if targetMon <> nil then
+        hudArea := targetMon.Workarea
+      else
+        hudArea := Workarea;
+
+      cardW := 320;
+      cardH := 96;
+      cardX := hudArea.X + (hudArea.Width - cardW) div 2;
+      cardY := hudArea.Y + (hudArea.Height - cardH) div 2;
+      FWorkspaceHudRect := TXCBRect.Create(cardX, cardY, cardW, cardH);
+
+      IncludeOverlay(cardX, cardY, cardW, cardH, 30);
+
+      if FThemeDarkMode then
+      begin
+        ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 14, 0, 8, 24, 0.0, 0.0, 0.0, 0.55 * hudAlpha);
+        ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 14, 24 / 255, 25 / 255, 38 / 255, 0.92 * hudAlpha);
+        ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 14, 1.5, 69 / 255, 71 / 255, 90 / 255, 0.60 * hudAlpha);
+        ACanvas.DrawTextCentered(cardX, cardY + 12, cardW, 20, 'Workspace ' + IntToStr(FWorkspaceHudDesktop + 1), 13.0, 236 / 255, 239 / 255, 244 / 255);
+      end
+      else
+      begin
+        ACanvas.DrawShadow(cardX, cardY, cardW, cardH, 14, 0, 8, 24, 0.0, 0.0, 0.0, 0.22 * hudAlpha);
+        ACanvas.DrawRoundedRect(cardX, cardY, cardW, cardH, 14, 248 / 255, 250 / 255, 252 / 255, 0.96 * hudAlpha);
+        ACanvas.DrawRoundedRectOutline(cardX, cardY, cardW, cardH, 14, 1.5, 203 / 255, 213 / 255, 225 / 255, 0.90 * hudAlpha);
+        ACanvas.DrawTextCentered(cardX, cardY + 12, cardW, 20, 'Workspace ' + IntToStr(FWorkspaceHudDesktop + 1), 13.0, 15 / 255, 23 / 255, 42 / 255);
+      end;
+
+      pillW := 52;
+      pillH := 32;
+      pillGap := 12;
+      totalPillsW := (4 * pillW) + (3 * pillGap);
+      pillsStartX := cardX + (cardW - totalPillsW) div 2;
+      pillsY := cardY + 44;
+
+      for i := 0 to 3 do
+      begin
+        itemX := pillsStartX + i * (pillW + pillGap);
+        if i = FWorkspaceHudDesktop then
+        begin
+          ACanvas.DrawRoundedRect(itemX, pillsY, pillW, pillH, 8, 59 / 255, 130 / 255, 246 / 255, 0.95 * hudAlpha);
+          ACanvas.DrawTextCentered(itemX, pillsY + 6, pillW, 20, IntToStr(i + 1), 12.0, 1.0, 1.0, 1.0);
+        end
+        else
+        begin
+          if FThemeDarkMode then
+          begin
+            ACanvas.DrawRoundedRect(itemX, pillsY, pillW, pillH, 8, 49 / 255, 50 / 255, 68 / 255, 0.55 * hudAlpha);
+            ACanvas.DrawTextCentered(itemX, pillsY + 6, pillW, 20, IntToStr(i + 1), 12.0, 147 / 255, 153 / 255, 178 / 255);
+          end
+          else
+          begin
+            ACanvas.DrawRoundedRect(itemX, pillsY, pillW, pillH, 8, 226 / 255, 232 / 255, 240 / 255, 0.70 * hudAlpha);
+            ACanvas.DrawTextCentered(itemX, pillsY + 6, pillW, 20, IntToStr(i + 1), 12.0, 100 / 255, 116 / 255, 139 / 255);
+          end;
+        end;
+      end;
+
+      RequestComposite();
+    end;
+  end;
+
   // Tell the compositor what area this overlay covered. Under partial present the
   // compositor can only repaint what it knows changed, and HUDs are drawn here,
   // after the scene, so they are invisible to the scene snapshot. Without this a
@@ -5728,6 +5898,51 @@ begin
               RequestComposite();
             end;
           end;
+        end;
+        Exit(True);
+      end
+      // Super+Shift+1..4: Move active client to workspace
+      else if (ModSuper <> 0) and
+              ((keyEv^.state and (ModSuper or XCB_MOD_MASK_SHIFT)) =
+               (ModSuper or XCB_MOD_MASK_SHIFT)) and
+              ((keyEv^.detail = Keycode1) or (keyEv^.detail = Keycode2) or
+               (keyEv^.detail = Keycode3) or (keyEv^.detail = Keycode4)) then
+      begin
+        targetCli := ActiveClient;
+        if targetCli <> nil then
+        begin
+          if keyEv^.detail = Keycode1 then MoveClientToDesktop(targetCli, 0)
+          else if keyEv^.detail = Keycode2 then MoveClientToDesktop(targetCli, 1)
+          else if keyEv^.detail = Keycode3 then MoveClientToDesktop(targetCli, 2)
+          else if keyEv^.detail = Keycode4 then MoveClientToDesktop(targetCli, 3);
+        end;
+        Exit(True);
+      end
+      // Super+1..4: Switch to workspace
+      else if (ModSuper <> 0) and
+              ((keyEv^.state and ModSuper) = ModSuper) and
+              ((keyEv^.state and XCB_MOD_MASK_SHIFT) = 0) and
+              ((keyEv^.detail = Keycode1) or (keyEv^.detail = Keycode2) or
+               (keyEv^.detail = Keycode3) or (keyEv^.detail = Keycode4)) then
+      begin
+        if keyEv^.detail = Keycode1 then SwitchDesktop(0)
+        else if keyEv^.detail = Keycode2 then SwitchDesktop(1)
+        else if keyEv^.detail = Keycode3 then SwitchDesktop(2)
+        else if keyEv^.detail = Keycode4 then SwitchDesktop(3);
+        Exit(True);
+      end
+      // Super+Left / Super+Right: Cycle virtual desktops
+      else if (ModSuper <> 0) and
+              ((keyEv^.state and ModSuper) = ModSuper) and
+              ((keyEv^.state and XCB_MOD_MASK_SHIFT) = 0) and
+              ((keyEv^.detail = KeycodeLeft) or (keyEv^.detail = KeycodeRight)) then
+      begin
+        if DesktopCount > 0 then
+        begin
+          if keyEv^.detail = KeycodeLeft then
+            SwitchDesktop((CurrentDesktop + DesktopCount - 1) mod DesktopCount)
+          else
+            SwitchDesktop((CurrentDesktop + 1) mod DesktopCount);
         end;
         Exit(True);
       end;

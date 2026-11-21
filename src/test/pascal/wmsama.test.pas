@@ -88,6 +88,7 @@ type
     procedure TestMultipleWindowsMinimizeAnimationProgress();
     procedure TestWindowMaximizeRestoreAndTileAnimation();
     procedure TestUndecoratedWindowClickToRaise();
+    procedure TestWorkspaceKeybindingsAndHUD();
   end;
 
 
@@ -4711,6 +4712,61 @@ begin
     AssertSame('Undecorated window is now the active client', cliUndecorated, wm.ActiveClient);
     AssertTrue('Undecorated window is raised above decorated window in compositor',
                wm.Compositor.Windows.IndexOf(compUndecorated) > wm.Compositor.Windows.IndexOf(compDecorated));
+  finally
+    wm.Free();
+  end;
+end;
+
+procedure TWMSamaTest.TestWorkspaceKeybindingsAndHUD();
+var
+  wm: TWMSamaCompositingWM;
+  cli: TXCBWMClient;
+  keyEv: xcb_key_press_event_t;
+begin
+  wm := TWMSamaCompositingWM.Create(nil, 0);
+  try
+    AssertEquals('Initial desktop is 0', 0, wm.CurrentDesktop);
+
+    // 1. Switch desktop directly: SwitchDesktop(2)
+    wm.SwitchDesktop(2);
+    AssertEquals('Desktop switched to 2', 2, wm.CurrentDesktop);
+    AssertTrue('Workspace HUD is active', wm.WorkspaceHudActive);
+    AssertEquals('HUD desktop is 2', 2, wm.WorkspaceHudDesktop);
+
+    // 2. Super+1 keypress switches to desktop 0
+    FillChar(keyEv, SizeOf(keyEv), 0);
+    keyEv.response_type := XCB_KEY_PRESS;
+    keyEv.detail := wm.Keycode1;
+    keyEv.state := wm.ModSuper;
+    wm.ProcessEvent(Pxcb_generic_event_t(@keyEv));
+    AssertEquals('Desktop switched to 0 via Super+1', 0, wm.CurrentDesktop);
+    AssertTrue('Workspace HUD active after Super+1', wm.WorkspaceHudActive);
+    AssertEquals('HUD desktop is 0', 0, wm.WorkspaceHudDesktop);
+
+    // 3. Super+Right cycles forward to desktop 1
+    keyEv.detail := wm.KeycodeRight;
+    keyEv.state := wm.ModSuper;
+    wm.ProcessEvent(Pxcb_generic_event_t(@keyEv));
+    AssertEquals('Desktop cycled to 1 via Super+Right', 1, wm.CurrentDesktop);
+
+    // 4. Super+Left cycles backward to desktop 0
+    keyEv.detail := wm.KeycodeLeft;
+    keyEv.state := wm.ModSuper;
+    wm.ProcessEvent(Pxcb_generic_event_t(@keyEv));
+    AssertEquals('Desktop cycled to 0 via Super+Left', 0, wm.CurrentDesktop);
+
+    // 5. Super+Shift+4 moves active client to desktop 3
+    cli := wm.ManageWindow(8001);
+    cli.Activate();
+    AssertSame('cli is active client', cli, wm.ActiveClient);
+    AssertEquals('cli initial desktop is 0', 0, cli.Desktop);
+
+    keyEv.detail := wm.Keycode4;
+    keyEv.state := wm.ModSuper or XCB_MOD_MASK_SHIFT;
+    wm.ProcessEvent(Pxcb_generic_event_t(@keyEv));
+    AssertEquals('cli moved to desktop 3', 3, cli.Desktop);
+    AssertTrue('Workspace HUD active after moving client', wm.WorkspaceHudActive);
+    AssertEquals('HUD desktop is 3', 3, wm.WorkspaceHudDesktop);
   finally
     wm.Free();
   end;
